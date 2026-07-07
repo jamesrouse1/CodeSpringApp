@@ -12,7 +12,7 @@ render_csl_table <- function(expr, page_length = 50, editable = FALSE, scroll_y 
     DT::renderDataTable({
       df <- expr
       if (!NROW(df)) df <- data.frame()
-      DT::datatable(
+      widget <- DT::datatable(
         df,
         editable = editable,
         rownames = FALSE,
@@ -25,9 +25,15 @@ render_csl_table <- function(expr, page_length = 50, editable = FALSE, scroll_y 
           paging = TRUE,
           pagingType = "full_numbers",
           dom = "lfrtip",
-          autoWidth = FALSE
+          autoWidth = FALSE,
+          columnDefs = list(list(width = "118px", targets = "_all"))
         )
       )
+      numeric_cols <- names(df)[vapply(df, is.numeric, logical(1))]
+      if (length(numeric_cols)) {
+        widget <- DT::formatSignif(widget, columns = numeric_cols, digits = 4)
+      }
+      widget
     }, server = FALSE)
   } else {
     renderTable({
@@ -1580,6 +1586,21 @@ body {
   background: #0f62c6 !important;
   color: #fff !important;
   border-color: #0f62c6 !important;
+}
+table.dataTable { table-layout: fixed; }
+table.dataTable tbody td, table.dataTable thead th {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 118px;
+  max-width: 118px;
+}
+table.dataTable tbody td:first-child, table.dataTable thead th:first-child {
+  min-width: 150px;
+  max-width: 190px;
+}
+.native-results-host .qc-report-frame {
+  min-width: 1120px !important;
 }
 
 "
