@@ -7,7 +7,7 @@ table_output <- function(output_id) {
   if (DT_AVAILABLE) DT::dataTableOutput(output_id) else tableOutput(output_id)
 }
 
-render_csl_table <- function(expr, page_length = 25, editable = FALSE, scroll_y = "520px") {
+render_csl_table <- function(expr, page_length = 25, editable = FALSE, scroll_y = "520px", escape = TRUE) {
   if (DT_AVAILABLE) {
     DT::renderDataTable({
       df <- expr
@@ -16,6 +16,7 @@ render_csl_table <- function(expr, page_length = 25, editable = FALSE, scroll_y 
         df,
         editable = editable,
         rownames = FALSE,
+        escape = escape,
         options = list(scrollX = TRUE, scrollY = scroll_y, pageLength = page_length)
       )
     })
@@ -761,10 +762,9 @@ project_status <- function(project) {
   data_dir <- project$data_dir
   design <- project$design_matrix_path
   raw <- data.frame(
-    step = c("Design matrix", "FASTQ reads", "FastQC", "Cutadapt", "STAR", "RSEM optional", "Kallisto optional", "featureCounts", "Count matrix", "DESeq2", "GSEA"),
+    step = c("Design matrix", "FastQC", "Cutadapt", "STAR", "RSEM optional", "Kallisto optional", "featureCounts", "Count matrix", "DESeq2", "GSEA"),
     status = c(
       if (file.exists(design)) "Complete" else "Not started",
-      if (dir.exists(project$fastq_dir) && length(fastq_files(project$fastq_dir))) "Complete" else "Not started",
       if (count_files(file.path(data_dir, "fastqc"), "\\.html$") + count_files(file.path(data_dir, "fastqc_cutadapt"), "\\.html$") > 0) "Complete" else "Not started",
       if (count_files(file.path(data_dir, "cutadapt"), fastq_suffix_regex) > 0) "Complete" else "Not started",
       if (count_files(file.path(data_dir, "star"), "Aligned\\.sortedByCoord\\.out\\.bam$") > 0) "Complete" else "Not started",
@@ -777,7 +777,6 @@ project_status <- function(project) {
     ),
     path = c(
       design,
-      project$fastq_dir,
       file.path(data_dir, "fastqc"),
       file.path(data_dir, "cutadapt"),
       file.path(data_dir, "star"),
@@ -804,7 +803,7 @@ status_rank <- function(status) {
 }
 
 pipeline_order <- function() {
-  c("Design matrix", "FASTQ reads", "FastQC", "Cutadapt", "STAR", "RSEM optional", "Kallisto optional", "featureCounts", "Count matrix", "DESeq2", "GSEA")
+  c("Design matrix", "FastQC", "Cutadapt", "STAR", "RSEM optional", "Kallisto optional", "featureCounts", "Count matrix", "DESeq2", "GSEA")
 }
 
 step_order <- function(step) {
@@ -839,16 +838,21 @@ sample_output_target <- function(project, sample, step) {
   data_dir <- project$data_dir
   if (identical(step, "FastQC")) {
     hits <- c(
-      list.files(file.path(data_dir, "fastqc"), pattern = paste0(sample, ".*\\.html$"), full.names = TRUE),
-      list.files(file.path(data_dir, "fastqc_cutadapt"), pattern = paste0(sample, ".*\\.html$"), full.names = TRUE)
+      list.files(file.path(data_dir, "fastqc"), pattern = paste0("^", sample, ".*\\.html$"), full.names = TRUE),
+      list.files(file.path(data_dir, "fastqc_cutadapt"), pattern = paste0("^", sample, ".*\\.html$"), full.names = TRUE)
     )
     return(hits[1] %||% file.path(data_dir, "fastqc", paste0(sample, "_fastqc.html")))
   }
   switch(step,
     "Cutadapt" = {
+      cutadapt_dir <- file.path(data_dir, "cutadapt")
+      hits <- if (dir.exists(cutadapt_dir)) {
+        list.files(cutadapt_dir, pattern = paste0("^", sample, ".*", fastq_suffix_regex), full.names = TRUE, ignore.case = TRUE)
+      } else character(0)
+      if (length(hits)) return(hits[1])
       pairs <- sample_fastq_pairs(project, FALSE)
       hit <- pairs[pairs$sample == sample, , drop = FALSE]
-      if (NROW(hit)) file.path(data_dir, "cutadapt", basename(hit$r1[1])) else file.path(data_dir, "cutadapt", paste0(sample, ".fastq.gz"))
+      if (NROW(hit)) file.path(cutadapt_dir, basename(hit$r1[1])) else file.path(cutadapt_dir, paste0(sample, ".fastq.gz"))
     },
     "STAR" = file.path(data_dir, "star", sample, paste0(sample, "Aligned.sortedByCoord.out.bam")),
     "RSEM optional" = file.path(data_dir, "rsem", sample, paste0(sample, ".genes.results")),
@@ -925,10 +929,12 @@ sample_progress <- function(project, active_states = active_job_state_map(projec
       } else {
         ""
       }
+      display_status <- status
       rows[[length(rows) + 1]] <- data.frame(
         sample = sample,
         step = step,
         status = status,
+        display_status = display_status,
         slurm_state = slurm_state,
         output_bytes = size,
         target = target,
@@ -942,6 +948,38 @@ sample_progress <- function(project, active_states = active_job_state_map(projec
   out <- out[order(out$sample, step_order(out$step)), , drop = FALSE]
   cache <- do.call(rbind, cache_rows)
   list(table = out, cache = cache)
+}
+
+
+status_class <- function(status) {
+  key <- tolower(gsub("[^A-Za-z0-9]+", "-", status %||% ""))
+  paste("sample-status", key)
+}
+
+sample_progress_matrix <- function(progress_df) {
+  if (!NROW(progress_df)) return(data.frame())
+  steps <- c("FastQC", "Cutadapt", "STAR", "RSEM optional", "Kallisto optional", "featureCounts")
+  samples <- unique(progress_df$sample)
+  out <- data.frame(Sample = samples, stringsAsFactors = FALSE)
+  for (step in steps) {
+    out[[step]] <- vapply(samples, function(sample) {
+      hit <- progress_df[progress_df$sample == sample & progress_df$step == step, , drop = FALSE]
+      if (!NROW(hit)) return("")
+      title <- paste0(
+        "Status: ", hit$status[1],
+        "\nBytes: ", hit$output_bytes[1],
+        "\nPath: ", hit$target[1],
+        if (nzchar(hit$note[1])) paste0("\nNote: ", hit$note[1]) else ""
+      )
+      sprintf(
+        '<span class="%s" title="%s">%s</span>',
+        status_class(hit$status[1]),
+        htmltools::htmlEscape(title),
+        htmltools::htmlEscape(hit$display_status[1])
+      )
+    }, character(1))
+  }
+  out
 }
 
 save_job <- function(project, step, command, output = "") {
@@ -1228,7 +1266,6 @@ run_step_meta <- function() {
     step = pipeline_order(),
     description = c(
       "Create or load design_matrix.txt.",
-      "Raw reads are available.",
       "Generate per-read quality reports.",
       "Trim adapters and short reads.",
       "Align reads and write BAM files.",
@@ -1356,6 +1393,14 @@ body { background:#eef3f8; color:#17202f; }
 .step-main span, .step-main em { font-size:12px; color:#657084; margin-top:3px; font-style:normal; }
 .log-viewer { max-height:620px; overflow:auto; background:#0d1623; color:#d9e8ff; border-radius:8px; border:1px solid #1f3857; padding:14px; }
 .button-row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+.setup-logo-panel { min-height:280px; background:white; border:1px solid #d8dde8; border-radius:8px; padding:24px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:24px; box-shadow:0 8px 20px rgba(15,23,36,.05); }
+.setup-logo-panel img { max-width:100%; max-height:150px; object-fit:contain; }
+.sample-status { display:inline-flex; width:100%; min-width:112px; justify-content:center; border-radius:999px; padding:5px 9px; font-size:12px; font-weight:800; border:1px solid #cfd7e3; background:#eef2f7; color:#526070; cursor:help; }
+.sample-status.completed { background:#def7e8; color:#0b6b3a; border-color:#8fd8ad; }
+.sample-status.running, .sample-status.running-no-growth-yet { background:#fff4d6; color:#7c3d00; border-color:#f0c36d; }
+.sample-status.waiting { background:#e8f2ff; color:#15549a; border-color:#b9d5f5; }
+.sample-status.possibly-incomplete { background:#fff0ed; color:#9f2d20; border-color:#e5a397; }
+.sample-status.optional-not-run { background:#f6f3fb; color:#5d4d79; border-color:#d9d0ea; }
 .project-card { background:white; border:1px solid #d8dde8; border-radius:8px; padding:14px; box-shadow:0 8px 20px rgba(15,23,36,.06); }
 .project-card-top { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; margin-bottom:12px; }
 .project-title-wrap h3 { margin:2px 0 0 0; font-size:19px; font-weight:800; color:#17202f; overflow-wrap:anywhere; }
@@ -1404,7 +1449,13 @@ ui <- fluidPage(
       width = 10,
       tabsetPanel(
         id = "web_main_tabs",
-        tabPanel("Setup", br(), h3("Project Setup"), tableOutput("setup_table"), uiOutput("source_config_ui")),
+        tabPanel("Setup", br(), h3("Project Setup"),
+                 fluidRow(
+                   column(7, tableOutput("setup_table"), uiOutput("source_config_ui")),
+                   column(5, div(class = "setup-logo-panel",
+                                 if (file.exists(LOGO_PATH)) tags$img(src = file.path("codespring_logo", basename(LOGO_PATH))) else NULL,
+                                 if (file.exists(LOGO_CSL_PATH)) tags$img(src = file.path("csl_logo", basename(LOGO_CSL_PATH))) else NULL))
+                 )),
         tabPanel("Design Matrix", br(), h3("Design Matrix Builder"),
                  tags$p(class = "muted", "Scan the raw FASTQ folder, then edit include/sample/metadata cells directly. Filenames stay on the right so the run steps know which reads belong to each sample."),
                  fluidRow(
@@ -1648,8 +1699,8 @@ server <- function(input, output, session) {
   })
 
   output$sample_progress_table <- render_csl_table({
-    sample_progress_state()
-  }, page_length = 25)
+    sample_progress_matrix(sample_progress_state())
+  }, page_length = 25, escape = FALSE)
 
   output$active_jobs_table <- render_csl_table({
     progress_refresh()
