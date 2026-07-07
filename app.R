@@ -31,7 +31,13 @@ render_csl_table <- function(expr, page_length = 50, editable = FALSE, scroll_y 
       )
       numeric_cols <- names(df)[vapply(df, is.numeric, logical(1))]
       if (length(numeric_cols)) {
-        widget <- DT::formatSignif(widget, columns = numeric_cols, digits = 4)
+        integer_cols <- numeric_cols[vapply(df[numeric_cols], function(x) {
+          finite <- x[is.finite(x) & !is.na(x)]
+          length(finite) == 0 || all(abs(finite - round(finite)) < 1e-8)
+        }, logical(1))]
+        decimal_cols <- setdiff(numeric_cols, integer_cols)
+        if (length(integer_cols)) widget <- DT::formatRound(widget, columns = integer_cols, digits = 0)
+        if (length(decimal_cols)) widget <- DT::formatRound(widget, columns = decimal_cols, digits = 2)
       }
       widget
     }, server = FALSE)
@@ -1603,6 +1609,36 @@ table.dataTable tbody td:first-child, table.dataTable thead th:first-child {
   min-width: 1120px !important;
 }
 
+.progress-header-row {
+  display:flex;
+  align-items:flex-start;
+  justify-content:space-between;
+  gap:16px;
+  margin-bottom:14px;
+}
+.progress-header-row h3 { margin-top:0; margin-bottom:4px; }
+.progress-header-row .muted { margin:0; }
+.project-card {
+  background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+}
+.project-card-top {
+  border-bottom: 1px solid #edf1f6;
+  padding-bottom: 12px;
+}
+.compact-path-list .path-item {
+  border-top: 0;
+  background: #f7fbff;
+  border: 1px solid #dce7f3;
+  border-radius: 8px;
+  padding: 10px;
+}
+.compact-path-list .path-item code {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  font-size: 12px;
+}
+
 "
 
 ui <- fluidPage(
@@ -1649,15 +1685,12 @@ ui <- fluidPage(
                  actionButton("save_design", "Save design_matrix.txt", class = "btn-primary"),
                  verbatimTextOutput("design_save_status")),
         tabPanel("Progress", br(),
-                 h3("Pipeline Progress"),
-                 div(class = "status-toolbar",
-                     selectInput("progress_status_filter", "Show steps", choices = c("All", "Active", "Complete", "Not started"), selected = "All"),
+                 div(class = "progress-header-row",
+                     div(h3("Pipeline Progress"), tags$p(class = "muted", "Steps are shown in workflow order. The sample matrix below updates as outputs appear.")),
                      actionButton("refresh_progress", "Refresh now", class = "btn-primary")
                  ),
                  textOutput("progress_updated"),
                  uiOutput("pipeline_stepper"),
-                 uiOutput("status_cards_ui"),
-                 table_output("status_table"),
                  br(),
                  h4("Sample Progress"),
                  uiOutput("sample_progress_matrix_ui"),
@@ -1746,10 +1779,8 @@ server <- function(input, output, session) {
             span(class = "meta-chip", paste("Genome", p$genome)),
             span(class = "meta-chip", if (isTRUE(p$paired_end)) "Paired-end" else "Single-end")
         ),
-        div(class = "path-list",
-            div(class = "path-item", span("Data"), code(p$data_dir)),
-            div(class = "path-item", span("Design"), code(p$design_matrix_path)),
-            div(class = "path-item", span("FASTQ"), code(p$fastq_dir %||% "Not set"))
+        div(class = "path-list compact-path-list",
+            div(class = "path-item", span("Data"), code(p$data_dir))
         )
     )
   })
@@ -1850,8 +1881,6 @@ server <- function(input, output, session) {
   progress_status <- reactive({
     progress_refresh()
     df <- project_status(current_project())
-    filt <- input$progress_status_filter %||% "All"
-    if (!identical(filt, "All")) df <- df[df$status == filt, , drop = FALSE]
     df[order(step_order(df$step)), , drop = FALSE]
   })
 
@@ -1862,12 +1891,6 @@ server <- function(input, output, session) {
   output$pipeline_stepper <- renderUI({
     pipeline_stepper_ui(current_project())
   })
-
-  output$status_cards_ui <- renderUI({
-    div(class = "status-grid", status_cards(progress_status()))
-  })
-
-  output$status_table <- render_csl_table(progress_status(), page_length = 20)
 
   observe({
     progress_refresh()
