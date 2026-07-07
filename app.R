@@ -352,18 +352,157 @@ save_job <- function(project, step, command, output = "") {
   utils::write.table(row, JOBS_PATH, sep = "\t", row.names = FALSE, quote = TRUE, append = file.exists(JOBS_PATH), col.names = !file.exists(JOBS_PATH))
 }
 
+rna_workdir <- function(project) {
+  normalizePath(file.path(CSL_ROOT, analysis_notebook_dir(project$analysis_key)), winslash = "/", mustWork = FALSE)
+}
+
+genome_resources <- function(project) {
+  genome <- tolower(project$genome %||% "mouse")
+  if (genome == "human") {
+    list(
+      star_index = "/grid/bsr/data/data/utama/genome/hg38_p13_gencode/hg38_p13_gencode_rel42_all_starindex",
+      kallisto_index = "/grid/bsr/data/data/utama/genome/hg38_p13_gencode/gencode.v45.transcripts.idx",
+      gtf = "/grid/bsr/data/data/utama/genome/hg38_p13_gencode/gencode.v42.chr_patch_hapl_scaff.annotation.gtf",
+      strand_bed = "/grid/bsr/data/data/utama/genome/hg38_p13_gencode/gencode.v42.chr_patch_hapl_scaff.annotation_forStrandDetect_geneID.bed"
+    )
+  } else {
+    list(
+      star_index = "/grid/bsr/data/data/utama/genome/GRCm39_M29_gencode/GRCm39_M29_gencode_starindex",
+      kallisto_index = "/grid/bsr/data/data/utama/genome/GRCm39_M29_gencode/gencode.vM29.transcripts.idx",
+      gtf = "/grid/bsr/data/data/utama/genome/GRCm39_M29_gencode/gencode.vM29.annotation.gtf",
+      strand_bed = "/grid/bsr/data/data/utama/genome/GRCm39_M29_gencode/gencode.vM29.annotation_forStrandDetect_geneID.bed"
+    )
+  }
+}
+
+resolve_read_path <- function(base, value) {
+  value <- trimws(as.character(value %||% ""))
+  if (!nzchar(value)) return("")
+  if (startsWith(path.expand(value), "/")) return(path.expand(value))
+  file.path(base, basename(value))
+}
+
+sample_fastq_pairs <- function(project, trimmed = FALSE) {
+  design <- safe_read_table(project$design_matrix_path)
+  if (!NROW(design) || !"sample" %in% names(design) || !"filename" %in% names(design)) return(data.frame())
+  base <- if (trimmed) file.path(project$data_dir, "cutadapt") else project$fastq_dir
+  rows <- lapply(seq_len(NROW(design)), function(i) {
+    parts <- trimws(unlist(strsplit(as.character(design$filename[i]), ",")))
+    parts <- parts[nzchar(parts)]
+    if (!length(parts)) return(NULL)
+    r1 <- resolve_read_path(base, parts[1])
+    r2 <- if (project$paired_end && length(parts) >= 2) resolve_read_path(base, parts[2]) else r1
+    data.frame(sample = as.character(design$sample[i]), r1 = r1, r2 = r2, stringsAsFactors = FALSE)
+  })
+  out <- do.call(rbind, Filter(Negate(is.null), rows))
+  if (is.null(out)) data.frame() else out
+}
+
+parse_sbatch_job_id <- function(output) {
+  m <- regexpr("Submitted batch job[[:space:]]+[0-9]+", output)
+  if (m < 0) return("")
+  sub(".*Submitted batch job[[:space:]]+", "", regmatches(output, m))
+}
+
 submit_sbatch <- function(project, step, script, args, log_name) {
   log_dir <- file.path(dirname(project$data_dir), "log")
   dir.create(log_dir, recursive = TRUE, showWarnings = FALSE)
-  cmd <- c("sbatch", "-e", file.path(log_dir, paste0("error_", log_name, ".txt")), "-o", file.path(log_dir, paste0("output_", log_name, ".txt")), script, args)
+  stamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
+  stdout <- file.path(log_dir, paste0("output_", log_name, "_", stamp, ".txt"))
+  stderr <- file.path(log_dir, paste0("error_", log_name, "_", stamp, ".txt"))
+  cmd <- c("sbatch", "-e", stderr, "-o", stdout, script, args)
   if (Sys.which("sbatch") == "") {
     msg <- "sbatch was not found. Run on the server to submit jobs."
     save_job(project, step, cmd, msg)
     return(msg)
   }
+  wd <- rna_workdir(project)
+  old_wd <- getwd()
+  on.exit(setwd(old_wd), add = TRUE)
+  dir.create(wd, recursive = TRUE, showWarnings = FALSE)
+  setwd(wd)
   out <- tryCatch(system2(cmd[1], cmd[-1], stdout = TRUE, stderr = TRUE), error = function(e) conditionMessage(e))
-  save_job(project, step, cmd, paste(out, collapse = "\n"))
-  paste(out, collapse = "\n")
+  out_text <- paste(out, collapse = "\n")
+  job_id <- parse_sbatch_job_id(out_text)
+  save_job(project, step, cmd, paste(c(out_text, if (nzchar(job_id)) paste("job_id:", job_id), paste("stdout:", stdout), paste("stderr:", stderr)), collapse = "\n"))
+  out_text
+}
+
+submit_fastqc_jobs <- function(project, trimmed = FALSE) {
+  outdir <- file.path(project$data_dir, if (trimmed) "fastqc_cutadapt" else "fastqc")
+  dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+  pairs <- sample_fastq_pairs(project, trimmed)
+  if (!NROW(pairs)) return("No samples/read files found in design matrix.")
+  reads <- unique(c(pairs$r1, if (project$paired_end) pairs$r2 else character(0)))
+  script <- file.path(SCRIPTS_DIR, "FastQC", "qsub_fastqc.sh")
+  paste(vapply(reads, function(read) submit_sbatch(project, "FastQC", script, c(read, outdir, project$name), "fastQC"), character(1)), collapse = "\n")
+}
+
+submit_cutadapt_jobs <- function(project, adapter1, adapter2, min_length) {
+  outdir <- file.path(project$data_dir, "cutadapt")
+  dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+  pairs <- sample_fastq_pairs(project, FALSE)
+  if (!NROW(pairs)) return("No samples/read files found in design matrix.")
+  script <- file.path(SCRIPTS_DIR, if (project$paired_end) "cutadapt_PE/qsub_cutadapt_PE.sh" else "cutadapt_SE/qsub_cutadapt_SE.sh")
+  paste(apply(pairs, 1, function(row) {
+    trimmed1 <- file.path(outdir, basename(row[["r1"]]))
+    trimmed2 <- if (project$paired_end) file.path(outdir, basename(row[["r2"]])) else trimmed1
+    submit_sbatch(project, "Cutadapt", script, c(min_length, adapter1, adapter2, trimmed1, trimmed2, row[["r1"]], row[["r2"]], project$name), "cutadapt")
+  }), collapse = "\n")
+}
+
+submit_star_jobs <- function(project, trimmed = FALSE) {
+  res <- genome_resources(project)
+  outdir <- file.path(project$data_dir, "star")
+  dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+  pairs <- sample_fastq_pairs(project, trimmed)
+  if (!NROW(pairs)) return("No samples/read files found in design matrix.")
+  script <- file.path(SCRIPTS_DIR, "STAR", if (project$paired_end) "qsub_star_PE.sh" else "qsub_star_SE.sh")
+  paste(apply(pairs, 1, function(row) {
+    sample_dir <- file.path(outdir, row[["sample"]])
+    dir.create(sample_dir, recursive = TRUE, showWarnings = FALSE)
+    out_prefix <- file.path(sample_dir, row[["sample"]])
+    submit_sbatch(project, "STAR", script, c(out_prefix, res$star_index, row[["r1"]], row[["r2"]], project$name), "star")
+  }), collapse = "\n")
+}
+
+submit_kallisto_jobs <- function(project, trimmed = FALSE) {
+  res <- genome_resources(project)
+  outdir <- file.path(project$data_dir, "kallisto")
+  dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+  pairs <- sample_fastq_pairs(project, trimmed)
+  if (!NROW(pairs)) return("No samples/read files found in design matrix.")
+  script <- file.path(SCRIPTS_DIR, "Kallisto", if (project$paired_end) "qsub_kallisto_PE.sh" else "qsub_kallisto_SE.sh")
+  paste(apply(pairs, 1, function(row) {
+    sample_dir <- file.path(outdir, row[["sample"]])
+    dir.create(sample_dir, recursive = TRUE, showWarnings = FALSE)
+    submit_sbatch(project, "Kallisto", script, c(sample_dir, res$kallisto_index, row[["r1"]], row[["r2"]], project$name), "kallisto")
+  }), collapse = "\n")
+}
+
+submit_featurecounts_jobs <- function(project, feature = "gene_id") {
+  res <- genome_resources(project)
+  design <- safe_read_table(project$design_matrix_path)
+  if (!NROW(design) || !"sample" %in% names(design)) return("No samples found in design matrix.")
+  outdir <- file.path(project$data_dir, "featurecounts")
+  dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+  script <- file.path(SCRIPTS_DIR, "featureCounts", if (project$paired_end) "qsub_featurecounts_PE.sh" else "qsub_featurecounts_SE.sh")
+  paste(vapply(as.character(design$sample), function(sample) {
+    sample_dir <- file.path(outdir, sample)
+    dir.create(sample_dir, recursive = TRUE, showWarnings = FALSE)
+    bam <- file.path(project$data_dir, "star", sample, paste0(sample, "Aligned.sortedByCoord.out.bam"))
+    count_prefix <- file.path(sample_dir, sample)
+    submit_sbatch(project, "featureCounts", script, c(bam, res$gtf, feature, count_prefix, res$strand_bed, project$name), "featurecounts")
+  }, character(1)), collapse = "\n")
+}
+
+submit_deseq2_job <- function(project, reference, comparison, redundant = "NoRedundant") {
+  outdir <- file.path(project$data_dir, "deseq2")
+  dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+  script <- file.path(SCRIPTS_DIR, "DESeq2", "qsub_deseq2.sh")
+  rscript <- file.path(SCRIPTS_DIR, "DESeq2", "DESeq2.R")
+  count_matrix <- file.path(project$data_dir, "counts", "count_matrix.txt")
+  submit_sbatch(project, "DESeq2", script, c(rscript, count_matrix, project$design_matrix_path, outdir, reference, comparison, redundant, project$name), "deseq2")
 }
 
 list_result_files <- function(project, pattern = "\\.(txt|csv|tsv|html|png|pdf)$") {
@@ -432,10 +571,25 @@ ui <- fluidPage(
                  verbatimTextOutput("design_save_status")),
         tabPanel("Progress", br(), h3("Pipeline Progress"), DT::dataTableOutput("status_table"), br(), h4("Sample Progress"), DT::dataTableOutput("sample_progress_table")),
         tabPanel("Run Pipeline", br(), h3("Run Pipeline"),
+                 tags$p(class = "muted", "Buttons submit SLURM sbatch jobs. After submission, jobs keep running even if this app or browser is closed."),
                  fluidRow(
-                   column(4, actionButton("run_fastqc", "Run FastQC", class = "btn-primary")),
-                   column(4, actionButton("run_star", "Run STAR", class = "btn-primary")),
-                   column(4, actionButton("run_featurecounts", "Run featureCounts", class = "btn-primary"))
+                   column(3, checkboxInput("use_trimmed_reads", "Use trimmed reads", value = FALSE)),
+                   column(3, selectInput("feature_attr", "featureCounts attribute", choices = c("gene_id", "gene_name"), selected = "gene_id")),
+                   column(3, textInput("deseq_reference", "DESeq2 reference", value = "control")),
+                   column(3, textInput("deseq_comparison", "DESeq2 comparison", value = "treated"))
+                 ),
+                 fluidRow(
+                   column(4, textInput("adapter1", "R1 adapter", value = "AGATCGGAAGAGCACACGTCTGAACTCCAGTCA")),
+                   column(4, textInput("adapter2", "R2 adapter", value = "AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT")),
+                   column(4, textInput("min_length", "Minimum read length", value = "20"))
+                 ),
+                 fluidRow(
+                   column(2, actionButton("run_fastqc", "FastQC", class = "btn-primary")),
+                   column(2, actionButton("run_cutadapt", "cutadapt", class = "btn-primary")),
+                   column(2, actionButton("run_star", "STAR", class = "btn-primary")),
+                   column(2, actionButton("run_kallisto", "Kallisto", class = "btn-primary")),
+                   column(2, actionButton("run_featurecounts", "featureCounts", class = "btn-primary")),
+                   column(2, actionButton("run_deseq2", "DESeq2", class = "btn-primary"))
                  ),
                  br(),
                  verbatimTextOutput("run_output")),
@@ -566,20 +720,28 @@ server <- function(input, output, session) {
     DT::datatable(sample_progress(current_project()), rownames = FALSE, options = list(pageLength = 25, scrollX = TRUE))
   })
 
-  run_step <- function(step) {
-    p <- current_project()
-    script <- switch(step,
-      FastQC = file.path(SCRIPTS_DIR, "FastQC", "qsub_fastqc.sh"),
-      STAR = file.path(SCRIPTS_DIR, "STAR", if (p$paired_end) "qsub_star_PE.sh" else "qsub_star_SE.sh"),
-      featureCounts = file.path(SCRIPTS_DIR, "featureCounts", if (p$paired_end) "qsub_featurecounts_PE.sh" else "qsub_featurecounts_SE.sh")
-    )
-    msg <- paste("Prepared", step, "submission using", script, "\nFull per-sample submission is intentionally conservative in this Shiny rewrite; use the notebook wrappers for now if you need immediate batch submission.")
-    save_job(p, step, c("#", msg), msg)
-    run_message(msg)
-  }
-  observeEvent(input$run_fastqc, run_step("FastQC"))
-  observeEvent(input$run_star, run_step("STAR"))
-  observeEvent(input$run_featurecounts, run_step("featureCounts"))
+  observeEvent(input$run_fastqc, {
+    run_message(submit_fastqc_jobs(current_project(), isTRUE(input$use_trimmed_reads)))
+  })
+  observeEvent(input$run_cutadapt, {
+    run_message(submit_cutadapt_jobs(current_project(), input$adapter1, input$adapter2, input$min_length))
+  })
+  observeEvent(input$run_star, {
+    run_message(submit_star_jobs(current_project(), isTRUE(input$use_trimmed_reads)))
+  })
+  observeEvent(input$run_kallisto, {
+    run_message(submit_kallisto_jobs(current_project(), isTRUE(input$use_trimmed_reads)))
+  })
+  observeEvent(input$run_featurecounts, {
+    run_message(submit_featurecounts_jobs(current_project(), input$feature_attr))
+  })
+  observeEvent(input$run_deseq2, {
+    if (identical(input$deseq_reference, input$deseq_comparison)) {
+      run_message("Reference and comparison must be different.")
+    } else {
+      run_message(submit_deseq2_job(current_project(), input$deseq_reference, input$deseq_comparison, "NoRedundant"))
+    }
+  })
   output$run_output <- renderText(run_message())
 
   output$results_overview <- DT::renderDataTable({

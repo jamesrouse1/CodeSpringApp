@@ -33,7 +33,7 @@ http://localhost:8501
 - `Setup`: selected project paths and imported config.
 - `Design Matrix`: scan FASTQs, edit metadata, and save `design_matrix.txt`.
 - `Progress`: project and sample-level completion tables.
-- `Run Pipeline`: conservative Shiny-side run controls with job logging.
+- `Run Pipeline`: submits real SLURM `sbatch` jobs for FastQC, cutadapt, STAR, Kallisto, featureCounts, and DESeq2. Submitted jobs keep running after the app or browser is closed.
 - `Results Explorer`: native Shiny viewer for QC, counts, DESeq2, GSEA, plots, PDFs, and files.
 - `Logs`: job submissions started from this app.
 
@@ -50,3 +50,8 @@ Recommended for inline PNG/PDF rendering:
 ```r
 install.packages("base64enc")
 ```
+
+
+## Job Submission
+
+Run buttons call `sbatch` from the matching CodeSpringLab analysis folder, so jobs are owned by SLURM after submission. Closing the browser or stopping the Shiny app does not cancel jobs that were already accepted by `sbatch`.
