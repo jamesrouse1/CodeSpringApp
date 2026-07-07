@@ -61,17 +61,50 @@ JOBS_PATH <- file.path(APP_HOME, "jobs.tsv")
 cleanup_previous_shiny_processes <- function() {
   if (identical(Sys.getenv("CSL_WEB_AUTOKILL_SHINY", unset = "1"), "0")) return(invisible(character(0)))
   current_pid <- as.integer(Sys.getpid())
+  current_user <- Sys.info()[["user"]] %||% ""
   killed <- character(0)
 
-  kill_pid <- function(pid, reason) {
+  run_quiet <- function(command, args) {
+    suppressWarnings(tryCatch(system2(command, args, stdout = TRUE, stderr = FALSE), error = function(e) character(0)))
+  }
+
+  pid_command <- function(pid) {
+    paste(run_quiet("ps", c("-p", as.character(pid), "-o", "command=")), collapse = " ")
+  }
+
+  pid_user <- function(pid) {
+    trimws(paste(run_quiet("ps", c("-p", as.character(pid), "-o", "user=")), collapse = " "))
+  }
+
+  looks_like_r_shiny <- function(cmd) {
+    grepl("(^|/)(R|Rscript)(\\s|$)|/exec/R(\\s|$)|shiny::runApp|runApp\\(|CodeSpringWeb|scripts_DoNotTouch/Shiny|RNASEQ_SHINY", cmd)
+  }
+
+  kill_pid <- function(pid, reason, signal = tools::SIGTERM) {
     pid <- suppressWarnings(as.integer(pid))
     if (is.na(pid) || pid <= 1 || identical(pid, current_pid)) return(invisible(FALSE))
     ok <- tryCatch({
-      tools::pskill(pid, tools::SIGTERM)
+      tools::pskill(pid, signal)
       TRUE
     }, error = function(e) FALSE)
-    if (ok) killed <<- unique(c(killed, paste0("pid:", pid, " (", reason, ")")))
+    if (ok) {
+      label <- if (identical(signal, tools::SIGKILL)) "SIGKILL" else "SIGTERM"
+      killed <<- unique(c(killed, paste0("pid:", pid, " (", reason, ", ", label, ")")))
+    }
     invisible(ok)
+  }
+
+  listener_pids <- function(port) {
+    if (!nzchar(Sys.which("lsof"))) return(character(0))
+    pids <- run_quiet("lsof", c("-nP", paste0("-iTCP:", port), "-sTCP:LISTEN", "-t"))
+    unique(trimws(pids[nzchar(pids)]))
+  }
+
+  stop_listener <- function(pid, reason, signal = tools::SIGTERM) {
+    cmd <- pid_command(pid)
+    user <- pid_user(pid)
+    same_user <- !nzchar(current_user) || !nzchar(user) || identical(user, current_user)
+    if (same_user && looks_like_r_shiny(cmd)) kill_pid(pid, reason, signal)
   }
 
   pidfiles <- list.files(APP_HOME, pattern = "^codespringweb_.*\\.pid$|^rnaseq_shiny_.*\\.pid$", full.names = TRUE)
@@ -81,7 +114,7 @@ cleanup_previous_shiny_processes <- function() {
     unlink(pf, force = TRUE)
   }
 
-  ps_lines <- tryCatch(system2("ps", c("-eo", "pid=,command="), stdout = TRUE, stderr = FALSE), error = function(e) character(0))
+  ps_lines <- run_quiet("ps", c("-eo", "pid=,command="))
   for (line in ps_lines) {
     line <- trimws(line)
     m <- regexec("^([0-9]+)\\s+(.+)$", line)
@@ -89,22 +122,17 @@ cleanup_previous_shiny_processes <- function() {
     if (length(hit) != 3) next
     pid <- suppressWarnings(as.integer(hit[2]))
     cmd <- hit[3]
-    is_r <- grepl("(^|/)(R|Rscript)(\\s|$)", cmd)
-    is_shiny <- grepl("shiny::runApp|runApp\\(|CodeSpringWeb|scripts_DoNotTouch/Shiny|RNASEQ_SHINY", cmd)
-    if (is_r && is_shiny && !identical(pid, current_pid)) kill_pid(pid, "R/Shiny process")
+    if (looks_like_r_shiny(cmd) && !identical(pid, current_pid)) kill_pid(pid, "R/Shiny process")
   }
 
-  if (nzchar(Sys.which("lsof"))) {
-    ports <- c(3838:3850, 8501:8515)
-    for (port in ports) {
-      pids <- tryCatch(system2("lsof", c("-nP", paste0("-iTCP:", port), "-sTCP:LISTEN", "-t"), stdout = TRUE, stderr = FALSE), error = function(e) character(0))
-      for (pid in unique(pids[nzchar(pids)])) {
-        cmd <- tryCatch(system2("ps", c("-p", pid, "-o", "command="), stdout = TRUE, stderr = FALSE), error = function(e) "")
-        if (grepl("(^|/)(R|Rscript)(\\s|$)", cmd) && grepl("shiny|runApp|CodeSpringWeb", cmd, ignore.case = TRUE)) {
-          kill_pid(pid, paste0("port:", port))
-        }
-      }
-    }
+  ports <- c(3838:3850, 8501:8515)
+  for (port in ports) {
+    for (pid in listener_pids(port)) stop_listener(pid, paste0("port:", port))
+  }
+
+  Sys.sleep(0.7)
+  for (port in ports) {
+    for (pid in listener_pids(port)) stop_listener(pid, paste0("port still busy:", port), tools::SIGKILL)
   }
 
   pid_path <- file.path(APP_HOME, paste0("codespringweb_", current_pid, ".pid"))
