@@ -986,20 +986,28 @@ genome_resources <- function(project) {
 
 adapter_choices_r1 <- function() {
   c(
-    "Illumina Universal TruSeq RNA - AGATCGGAAGAGCACACGTCTGAACTCCAGTCA" = "AGATCGGAAGAGCACACGTCTGAACTCCAGTCA",
-    "Nextera Transposase ATAC - CTGTCTCTTATACACATCTCCGAGCCCACGAGAC" = "CTGTCTCTTATACACATCTCCGAGCCCACGAGAC",
-    "Illumina Small RNA 3 prime - TGGAATTCTCGG" = "TGGAATTCTCGG",
-    "Illumina Small RNA 5 prime - GATCGTCGGACT" = "GATCGTCGGACT"
+    "Illumina Universal TruSeq RNA" = "AGATCGGAAGAGCACACGTCTGAACTCCAGTCA",
+    "Nextera Transposase ATAC" = "CTGTCTCTTATACACATCTCCGAGCCCACGAGAC",
+    "Illumina Small RNA 3 prime" = "TGGAATTCTCGG",
+    "Illumina Small RNA 5 prime" = "GATCGTCGGACT",
+    "Custom adapter" = "__custom__"
   )
 }
 
 adapter_choices_r2 <- function() {
   c(
-    "Illumina Universal TruSeq RNA - AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT" = "AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT",
-    "Nextera Transposase ATAC - CTGTCTCTTATACACATCTGACGCTGCCGACGA" = "CTGTCTCTTATACACATCTGACGCTGCCGACGA",
-    "Illumina Small RNA 3 prime - TGGAATTCTCGG" = "TGGAATTCTCGG",
-    "Illumina Small RNA 5 prime - GATCGTCGGACT" = "GATCGTCGGACT"
+    "Illumina Universal TruSeq RNA" = "AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT",
+    "Nextera Transposase ATAC" = "CTGTCTCTTATACACATCTGACGCTGCCGACGA",
+    "Illumina Small RNA 3 prime" = "TGGAATTCTCGG",
+    "Illumina Small RNA 5 prime" = "GATCGTCGGACT",
+    "Custom adapter" = "__custom__"
   )
+}
+
+selected_adapter_value <- function(selected, custom) {
+  selected <- selected %||% ""
+  if (identical(selected, "__custom__")) return(trimws(custom %||% ""))
+  selected
 }
 
 gencode_label <- function(project) {
@@ -1296,10 +1304,10 @@ body { background:#eef3f8; color:#17202f; }
 .navbar, .navbar-default { background:#0f1724 !important; border:0; }
 .navbar-default .navbar-nav > li > a, .navbar-default .navbar-brand { color:#f8fafc !important; }
 .well, .panel, .tab-content { border-radius:8px; border-color:#d8dde8; }
-.csl-header { background:linear-gradient(135deg,#0f2742 0%,#145f78 58%,#1f8f7a 100%); color:white; border:0; border-radius:8px; padding:28px 34px; margin-bottom:16px; min-height:128px; display:flex; align-items:center; justify-content:space-between; gap:26px; }
-.brand-lockup { display:flex; align-items:center; gap:22px; }
-.brand-lockup img { background:white; border-radius:8px; padding:9px; max-height:78px; max-width:210px; object-fit:contain; }
-.csl-header h2 { margin:0 0 6px 0; font-weight:800; font-size:32px; color:white; }
+.csl-header { background:linear-gradient(135deg,#0f2742 0%,#145f78 58%,#1f8f7a 100%); color:white; border:0; border-radius:8px; padding:34px 42px; margin-bottom:18px; min-height:168px; display:flex; align-items:center; justify-content:space-between; gap:34px; }
+.brand-lockup { display:flex; align-items:center; gap:28px; }
+.brand-lockup img { background:white; border-radius:8px; padding:10px; max-height:112px; max-width:285px; object-fit:contain; }
+.csl-header h2 { margin:0 0 8px 0; font-weight:800; font-size:40px; color:white; }
 .csl-header .muted { color:#dceaf4; }
 .muted { color:#657084; }
 .empty-box { background:white; border:1px solid #d8dde8; border-radius:8px; padding:18px; color:#657084; }
@@ -1328,9 +1336,10 @@ body { background:#eef3f8; color:#17202f; }
 .tool-right small { color:#657084; }
 .tool-body { padding:0 16px 16px 16px; border-top:1px solid #edf1f6; }
 .tool-body .form-group { margin-bottom:10px; }
-.resource-strip { display:grid; grid-template-columns:1.2fr 1fr; gap:12px; align-items:stretch; margin:12px 0 14px 0; }
-.resource-card { background:white; border:1px solid #d8dde8; border-radius:8px; padding:14px; }
-.resource-card img { max-width:100%; max-height:150px; object-fit:contain; }
+.resource-strip { display:grid; grid-template-columns:minmax(280px,.85fr) minmax(460px,1.45fr); gap:16px; align-items:stretch; margin:12px 0 18px 0; }
+.resource-card { background:white; border:1px solid #d8dde8; border-radius:8px; padding:16px; }
+.resource-card.flowchart-card { display:flex; align-items:center; justify-content:center; min-height:360px; overflow:hidden; }
+.resource-card img { width:100%; max-width:100%; max-height:380px; object-fit:contain; }
 .progress-note { color:#657084; margin-bottom:10px; }
 .job-table-wrap { margin-top:16px; }
 .design-table-scroll { overflow-x:auto; background:white; border:1px solid #d8dde8; border-radius:8px; padding:10px; }
@@ -1380,7 +1389,7 @@ ui <- fluidPage(
           if (file.exists(LOGO_PATH)) tags$img(src = file.path("codespring_logo", basename(LOGO_PATH))),
           div(h2("CodeSpringWeb"), div(class = "muted", "Shiny control center for CodeSpringLab projects: configure, run, track, and visualize results from one port."))
       ),
-      if (file.exists(LOGO_CSL_PATH)) tags$img(src = file.path("csl_logo", basename(LOGO_CSL_PATH)), style = "max-height:82px;max-width:230px;background:white;border-radius:8px;padding:9px;object-fit:contain;")
+      if (file.exists(LOGO_CSL_PATH)) tags$img(src = file.path("csl_logo", basename(LOGO_CSL_PATH)), style = "max-height:120px;max-width:300px;background:white;border-radius:8px;padding:10px;object-fit:contain;")
   ),
   sidebarLayout(
     sidebarPanel(
@@ -1456,9 +1465,9 @@ server <- function(input, output, session) {
 
   output$project_ui <- renderUI({
     p <- filtered_projects()
-    labels <- if (length(p)) vapply(p, function(x) paste0(x$label, " (", x$analysis, if (nzchar(x$source_config)) " · CSL config" else "", ")"), character(1)) else character(0)
+    labels <- if (length(p)) vapply(p, function(x) x$label, character(1)) else character(0)
     choices <- c(stats::setNames(labels, labels), "Start a new project" = "__new__")
-    selectInput("project_id", "Project config", choices = choices, selected = if (length(labels)) labels[[1]] else "__new__")
+    selectInput("project_id", "Project Name", choices = choices, selected = if (length(labels)) labels[[1]] else "__new__")
   })
 
   output$new_project_ui <- renderUI({
@@ -1473,7 +1482,7 @@ server <- function(input, output, session) {
       textInput("new_fastq_dir", "Raw FASTQ folder", value = ""),
       textInput("new_results_root", "Results root", value = "~/csl_results"),
       textInput("new_design_matrix_path", "Design matrix path", value = ""),
-      actionButton("create_project_config", "Create project config", class = "btn-primary"),
+      actionButton("create_project_config", "Create project", class = "btn-primary"),
       textOutput("create_project_status")
     )
   })
@@ -1482,7 +1491,7 @@ server <- function(input, output, session) {
     if (identical(input$project_id, "__new__")) return(new_project_from_inputs(input))
     p <- filtered_projects()
     req(length(p) > 0)
-    labels <- vapply(p, function(x) paste0(x$label, " (", x$analysis, if (nzchar(x$source_config)) " · CSL config" else "", ")"), character(1))
+    labels <- vapply(p, function(x) x$label, character(1))
     selected <- input$project_id
     if (!length(selected) || is.null(selected) || !nzchar(selected)) {
       idx <- 1
@@ -1529,7 +1538,7 @@ server <- function(input, output, session) {
     p <- current_project()
     if (!nzchar(p$source_config)) return(NULL)
     div(class = "config-card",
-        div(class = "eyebrow", "Imported CodeSpringLab config"),
+        div(class = "eyebrow", "Imported CodeSpringLab project file"),
         code(p$source_config)
     )
   })
@@ -1540,7 +1549,7 @@ server <- function(input, output, session) {
     msg <- tryCatch({
       cfg <- write_project_config(p)
       projects(discover_projects())
-      paste("Created project config:", cfg)
+      paste("Created project:", p$name, "\nSaved project file:", cfg)
     }, error = function(e) paste("ERROR:", conditionMessage(e)))
     output$create_project_status <- renderText(msg)
   })
@@ -1592,7 +1601,7 @@ server <- function(input, output, session) {
       if (identical(input$project_id, "__new__")) {
         cfg <- write_project_config(p)
         projects(discover_projects())
-        paste("Saved design matrix:", design_path, "\nCreated project config:", cfg)
+        paste("Saved design matrix:", design_path, "\nCreated project:", p$name, "\nSaved project file:", cfg)
       } else {
         paste("Saved design matrix:", design_path)
       }
@@ -1660,7 +1669,7 @@ server <- function(input, output, session) {
             tags$p(class = "muted", gencode_label(p)),
             tags$p(class = "status-path", genome_resources(p)$gtf)
         ),
-        div(class = "resource-card",
+        div(class = "resource-card flowchart-card",
             if (file.exists(FLOWCHART_PATH)) tags$img(src = file.path("codespring_flowchart", basename(FLOWCHART_PATH))) else tags$p("Pipeline flowchart")
         )
     )
@@ -1675,8 +1684,10 @@ server <- function(input, output, session) {
         "run_fastqc", "Submit FastQC"),
       tool_panel("Cutadapt", status, "Trim adapters and short reads from raw FASTQs.",
         tagList(
-          selectInput("cutadapt_adapter1", "R1/read1 adapter", choices = adapter_choices_r1(), selected = adapter_choices_r1()[[1]]),
-          selectInput("cutadapt_adapter2", "R2/read2 adapter", choices = adapter_choices_r2(), selected = adapter_choices_r2()[[1]]),
+          selectInput("cutadapt_adapter1", "R1/read1 adapter", choices = adapter_choices_r1(), selected = adapter_choices_r1()[[1]], width = "100%"),
+          conditionalPanel("input.cutadapt_adapter1 == '__custom__'", textInput("cutadapt_adapter1_custom", "Custom R1/read1 adapter sequence", value = "", width = "100%")),
+          selectInput("cutadapt_adapter2", "R2/read2 adapter", choices = adapter_choices_r2(), selected = adapter_choices_r2()[[1]], width = "100%"),
+          conditionalPanel("input.cutadapt_adapter2 == '__custom__'", textInput("cutadapt_adapter2_custom", "Custom R2/read2 adapter sequence", value = "", width = "100%")),
           textInput("cutadapt_min_length", "Minimum read length", value = "20")
         ),
         "run_cutadapt", "Submit cutadapt"),
@@ -1719,7 +1730,13 @@ server <- function(input, output, session) {
     progress_refresh(Sys.time())
   })
   observeEvent(input$run_cutadapt, {
-    run_message(submit_cutadapt_jobs(current_project(), input$cutadapt_adapter1, input$cutadapt_adapter2, input$cutadapt_min_length))
+    adapter1 <- selected_adapter_value(input$cutadapt_adapter1, input$cutadapt_adapter1_custom)
+    adapter2 <- selected_adapter_value(input$cutadapt_adapter2, input$cutadapt_adapter2_custom)
+    if (!nzchar(adapter1) || !nzchar(adapter2)) {
+      run_message("Custom adapter sequences cannot be blank.")
+    } else {
+      run_message(submit_cutadapt_jobs(current_project(), adapter1, adapter2, input$cutadapt_min_length))
+    }
     progress_refresh(Sys.time())
   })
   observeEvent(input$run_star, {
