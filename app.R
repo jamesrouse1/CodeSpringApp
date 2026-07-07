@@ -28,7 +28,7 @@ render_csl_table <- function(expr, page_length = 50, editable = FALSE, scroll_y 
           autoWidth = FALSE
         )
       )
-    })
+    }, server = FALSE)
   } else {
     renderTable({
       df <- expr

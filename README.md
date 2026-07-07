@@ -66,3 +66,14 @@ By default, CodeSpringWeb checks for older CodeSpring/R Shiny sessions and stops
 ```bash
 CSL_WEB_AUTOKILL_SHINY=0 CSL_CODESPRINGLAB_ROOT=~/CodeSpringLab Rscript -e 'shiny::runApp(".", host="0.0.0.0", port=8501)'
 ```
+## Server launcher
+
+On bamdev1, start the app with:
+
+```bash
+cd ~/CodeSpringWeb
+./run_codespringweb.sh
+```
+
+The script starts Shiny in the background, writes logs to `~/.codespringweb/`, and prints the one SSH tunnel command to run on your laptop.
+
