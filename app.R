@@ -445,8 +445,73 @@ scan_fastqs <- function(folder, paired = TRUE, metadata_cols = "treatment") {
   df[, c("include", "sample", metadata_cols, "filename", "status"), drop = FALSE]
 }
 
+design_matrix_columns <- function(df) {
+  if (!NROW(df)) return(c("include", "sample", "treatment", "filename", "status"))
+  c("include", "sample", setdiff(names(df), c("include", "sample", "filename", "status")), "filename", "status")
+}
+
+as_design_bool <- function(x) {
+  if (is.logical(x)) return(isTRUE(x))
+  tolower(as.character(x %||% "")) %in% c("true", "t", "1", "yes", "y")
+}
+
+design_input_id <- function(row, col) {
+  paste0("design_", col, "_", row)
+}
+
+collect_design_inputs <- function(input, df) {
+  if (!NROW(df)) return(df)
+  cols <- design_matrix_columns(df)
+  for (i in seq_len(NROW(df))) {
+    for (col in cols) {
+      id <- design_input_id(i, col)
+      val <- input[[id]]
+      if (is.null(val)) next
+      if (identical(col, "include")) {
+        df[[col]][i] <- isTRUE(val)
+      } else {
+        df[[col]][i] <- as.character(val)
+      }
+    }
+  }
+  df
+}
+
+design_matrix_ui <- function(df) {
+  if (!NROW(df)) return(div(class = "empty-box", "Scan a FASTQ folder or select a project with an existing design_matrix.txt."))
+  cols <- design_matrix_columns(df)
+  df <- df[, cols, drop = FALSE]
+  tags$div(
+    class = "design-table-scroll",
+    tags$table(
+      class = "design-matrix-table",
+      tags$thead(tags$tr(lapply(cols, tags$th))),
+      tags$tbody(lapply(seq_len(NROW(df)), function(i) {
+        tags$tr(lapply(cols, function(col) {
+          value <- df[[col]][i]
+          tags$td(
+            if (identical(col, "include")) {
+              checkboxInput(design_input_id(i, col), NULL, value = as_design_bool(value), width = "70px")
+            } else if (identical(col, "status")) {
+              tags$span(class = "status-path", as.character(value %||% ""))
+            } else {
+              textInput(
+                design_input_id(i, col),
+                NULL,
+                value = as.character(value %||% ""),
+                width = if (identical(col, "filename")) "420px" else "180px"
+              )
+            }
+          )
+        }))
+      }))
+    )
+  )
+}
+
 write_design_matrix <- function(project, df, metadata_cols) {
-  keep <- df[isTRUE(df$include) | df$include %in% c(TRUE, "TRUE", "true", "1"), , drop = FALSE]
+  if (!"include" %in% names(df)) df$include <- TRUE
+  keep <- df[vapply(df$include, as_design_bool, logical(1)), , drop = FALSE]
   if (!NROW(keep)) stop("No samples are included.")
   keep$sample <- clean_name(keep$sample)
   out <- project$design_matrix_path
@@ -676,14 +741,25 @@ submit_sbatch <- function(project, step, script, args, log_name) {
   out_text <- paste(out, collapse = "\n")
   job_id <- parse_sbatch_job_id(out_text)
   save_job(project, step, cmd, paste(c(out_text, if (nzchar(job_id)) paste("job_id:", job_id), paste("stdout:", stdout), paste("stderr:", stderr)), collapse = "\n"))
-  out_text
+  paste(c(paste("Command:", paste(cmd, collapse = " ")), out_text, if (nzchar(job_id)) paste("Job ID:", job_id), paste("stdout:", stdout), paste("stderr:", stderr)), collapse = "\n")
+}
+
+missing_read_message <- function(project, pairs) {
+  if (!NROW(pairs)) return("No samples/read files found in design matrix.")
+  reads <- unique(c(pairs$r1, if (isTRUE(project$paired_end)) pairs$r2 else character(0)))
+  missing <- reads[nzchar(reads) & !file.exists(reads)]
+  if (length(missing)) {
+    return(paste(c("These read files do not exist. Check the FASTQ folder and design_matrix.txt filenames:", missing), collapse = "\n"))
+  }
+  ""
 }
 
 submit_fastqc_jobs <- function(project, trimmed = FALSE) {
   outdir <- file.path(project$data_dir, if (trimmed) "fastqc_cutadapt" else "fastqc")
   dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
   pairs <- sample_fastq_pairs(project, trimmed)
-  if (!NROW(pairs)) return("No samples/read files found in design matrix.")
+  msg <- missing_read_message(project, pairs)
+  if (nzchar(msg)) return(msg)
   reads <- unique(c(pairs$r1, if (project$paired_end) pairs$r2 else character(0)))
   script <- file.path(SCRIPTS_DIR, "FastQC", "qsub_fastqc.sh")
   paste(vapply(reads, function(read) submit_sbatch(project, "FastQC", script, c(read, outdir, project$name), "fastQC"), character(1)), collapse = "\n")
@@ -693,12 +769,14 @@ submit_cutadapt_jobs <- function(project, adapter1, adapter2, min_length) {
   outdir <- file.path(project$data_dir, "cutadapt")
   dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
   pairs <- sample_fastq_pairs(project, FALSE)
-  if (!NROW(pairs)) return("No samples/read files found in design matrix.")
+  msg <- missing_read_message(project, pairs)
+  if (nzchar(msg)) return(msg)
   script <- file.path(SCRIPTS_DIR, if (project$paired_end) "cutadapt_PE/qsub_cutadapt_PE.sh" else "cutadapt_SE/qsub_cutadapt_SE.sh")
   paste(apply(pairs, 1, function(row) {
     trimmed1 <- file.path(outdir, basename(row[["r1"]]))
     trimmed2 <- if (project$paired_end) file.path(outdir, basename(row[["r2"]])) else trimmed1
-    submit_sbatch(project, "Cutadapt", script, c(min_length, adapter1, adapter2, trimmed1, trimmed2, row[["r1"]], row[["r2"]], project$name), "cutadapt")
+    read2 <- if (project$paired_end) row[["r2"]] else row[["r1"]]
+    submit_sbatch(project, "Cutadapt", script, c(min_length, adapter1, adapter2, trimmed1, trimmed2, row[["r1"]], read2, project$name), "cutadapt")
   }), collapse = "\n")
 }
 
@@ -707,7 +785,8 @@ submit_star_jobs <- function(project, trimmed = FALSE) {
   outdir <- file.path(project$data_dir, "star")
   dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
   pairs <- sample_fastq_pairs(project, trimmed)
-  if (!NROW(pairs)) return("No samples/read files found in design matrix.")
+  msg <- missing_read_message(project, pairs)
+  if (nzchar(msg)) return(msg)
   script <- file.path(SCRIPTS_DIR, "STAR", if (project$paired_end) "qsub_star_PE.sh" else "qsub_star_SE.sh")
   paste(apply(pairs, 1, function(row) {
     sample_dir <- file.path(outdir, row[["sample"]])
@@ -722,7 +801,8 @@ submit_kallisto_jobs <- function(project, trimmed = FALSE) {
   outdir <- file.path(project$data_dir, "kallisto")
   dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
   pairs <- sample_fastq_pairs(project, trimmed)
-  if (!NROW(pairs)) return("No samples/read files found in design matrix.")
+  msg <- missing_read_message(project, pairs)
+  if (nzchar(msg)) return(msg)
   script <- file.path(SCRIPTS_DIR, "Kallisto", if (project$paired_end) "qsub_kallisto_PE.sh" else "qsub_kallisto_SE.sh")
   paste(apply(pairs, 1, function(row) {
     sample_dir <- file.path(outdir, row[["sample"]])
@@ -800,6 +880,7 @@ load_native_rnaseq_viewer <- function(project) {
 
 run_step_meta <- function() {
   data.frame(
+    order = seq_len(6),
     step = c("FastQC", "Cutadapt", "STAR", "Kallisto", "featureCounts", "DESeq2"),
     description = c(
       "Generate per-read quality reports.",
@@ -813,6 +894,19 @@ run_step_meta <- function() {
     label = c("Run FastQC", "Run cutadapt", "Run STAR", "Run Kallisto", "Run featureCounts", "Run DESeq2"),
     stringsAsFactors = FALSE
   )
+}
+
+pipeline_stepper_ui <- function(project) {
+  status <- project_status(project)
+  meta <- run_step_meta()
+  div(class = "pipeline-stepper", lapply(seq_len(NROW(meta)), function(i) {
+    st <- status$status[match(meta$step[i], status$step)] %||% "Not started"
+    cls <- switch(st, "Complete" = "complete", "Active" = "active", "not-started")
+    div(class = paste("pipeline-step", cls),
+        div(class = "step-index", meta$order[i]),
+        div(class = "step-main", tags$strong(meta$step[i]), tags$span(st))
+    )
+  }))
 }
 
 list_result_files <- function(project, pattern = "\\.(txt|csv|tsv|html|png|pdf)$") {
@@ -859,11 +953,23 @@ body { background:#f5f7fb; color:#17202f; }
 .run-card p { min-height:38px; margin-bottom:12px; }
 .progress-note { color:#657084; margin-bottom:10px; }
 .job-table-wrap { margin-top:16px; }
-.native-results-host { margin: -18px -24px -24px -24px; }
-.native-results-host .container-fluid { max-width: none !important; width: 100% !important; padding: 10px 12px 18px 12px !important; }
-.native-results-host .app-shell { border-radius: 10px !important; box-shadow: none !important; }
-.native-results-host .hero { padding: 20px 24px 18px 24px !important; }
-.native-results-host .main-tabs { padding: 14px 16px 20px 16px !important; }
+.design-table-scroll { overflow-x:auto; background:white; border:1px solid #d8dde8; border-radius:8px; padding:10px; }
+.design-matrix-table { border-collapse:separate; border-spacing:0 6px; min-width:100%; }
+.design-matrix-table th { font-size:12px; color:#657084; font-weight:700; padding:0 8px 4px 8px; }
+.design-matrix-table td { vertical-align:middle; padding:0 8px; }
+.design-matrix-table .form-group { margin-bottom:0; }
+.pipeline-stepper { display:grid; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); gap:10px; margin:12px 0 18px 0; }
+.pipeline-step { border:1px solid #d8dde8; border-radius:8px; padding:10px; display:flex; gap:10px; align-items:center; background:#fff4f3; }
+.pipeline-step.complete { background:#def7e8; border-color:#8fd8ad; }
+.pipeline-step.active { background:#fff4d6; border-color:#f0c36d; }
+.step-index { width:28px; height:28px; border-radius:50%; background:white; display:flex; align-items:center; justify-content:center; font-weight:700; }
+.step-main { display:flex; flex-direction:column; line-height:1.2; }
+.step-main span { font-size:12px; color:#657084; margin-top:3px; }
+.native-results-host { margin: 0 !important; width:100% !important; }
+.native-results-host > .container-fluid { max-width: none !important; width: 100% !important; margin: 0 !important; padding: 6px 0 18px 0 !important; }
+.native-results-host .app-shell { border-radius: 10px !important; box-shadow: none !important; margin:0 !important; }
+.native-results-host .hero { padding: 18px 22px 16px 22px !important; }
+.native-results-host .main-tabs { padding: 14px 14px 20px 14px !important; }
 "
 
 ui <- fluidPage(
@@ -890,11 +996,12 @@ ui <- fluidPage(
         id = "web_main_tabs",
         tabPanel("Setup", br(), h3("Project Setup"), tableOutput("setup_table"), uiOutput("source_config_ui")),
         tabPanel("Design Matrix", br(), h3("Design Matrix Builder"),
+                 tags$p(class = "muted", "Scan the raw FASTQ folder, then edit include/sample/metadata cells directly. Filenames stay on the right so the run steps know which reads belong to each sample."),
                  fluidRow(
                    column(8, textInput("metadata_cols", "Metadata columns", value = "treatment", placeholder = "treatment, batch, replicate")),
                    column(4, br(), actionButton("scan_fastqs", "Scan FASTQ folder", class = "btn-primary"))
                  ),
-                 table_output("design_editor"),
+                 uiOutput("design_editor_ui"),
                  br(),
                  actionButton("save_design", "Save design_matrix.txt", class = "btn-primary"),
                  verbatimTextOutput("design_save_status")),
@@ -905,6 +1012,7 @@ ui <- fluidPage(
                      actionButton("refresh_progress", "Refresh now", class = "btn-primary")
                  ),
                  textOutput("progress_updated"),
+                 uiOutput("pipeline_stepper"),
                  uiOutput("status_cards_ui"),
                  table_output("status_table"),
                  br(),
@@ -924,6 +1032,7 @@ ui <- fluidPage(
                    column(4, textInput("adapter2", "R2 adapter", value = "AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT")),
                    column(4, textInput("min_length", "Minimum read length", value = "20"))
                  ),
+                 uiOutput("run_pipeline_stepper"),
                  uiOutput("run_step_cards"),
                  br(),
                  verbatimTextOutput("run_output")),
@@ -1046,27 +1155,28 @@ server <- function(input, output, session) {
     }
   }, ignoreInit = FALSE)
 
-  output$design_editor <- render_csl_table({
+  output$design_editor_ui <- renderUI({
     df <- design_state()
     if (!NROW(df)) df <- data.frame(include = logical(), sample = character(), treatment = character(), filename = character(), status = character())
-    df
-  }, page_length = 25, editable = TRUE)
-
-  observeEvent(input$design_editor_cell_edit, {
-    info <- input$design_editor_cell_edit
-    df <- design_state()
-    if (NROW(df)) {
-      df[info$row, info$col + 1] <- info$value
-      design_state(df)
-    }
+    design_matrix_ui(df)
   })
 
   output$design_save_status <- renderText("")
   observeEvent(input$save_design, {
     p <- current_project()
-    df <- design_state()
+    df <- collect_design_inputs(input, design_state())
+    design_state(df)
     metadata <- setdiff(names(df), c("include", "sample", "filename", "status"))
-    msg <- tryCatch(write_design_matrix(p, df, metadata), error = function(e) paste("ERROR:", conditionMessage(e)))
+    msg <- tryCatch({
+      design_path <- write_design_matrix(p, df, metadata)
+      if (identical(input$project_id, "__new__")) {
+        cfg <- write_project_config(p)
+        projects(discover_projects())
+        paste("Saved design matrix:", design_path, "\nCreated project config:", cfg)
+      } else {
+        paste("Saved design matrix:", design_path)
+      }
+    }, error = function(e) paste("ERROR:", conditionMessage(e)))
     output$design_save_status <- renderText(msg)
   })
 
@@ -1091,6 +1201,10 @@ server <- function(input, output, session) {
     progress_refresh(Sys.time())
   })
 
+  output$pipeline_stepper <- renderUI({
+    pipeline_stepper_ui(current_project())
+  })
+
   output$status_cards_ui <- renderUI({
     div(class = "status-grid", status_cards(progress_status()))
   })
@@ -1106,6 +1220,11 @@ server <- function(input, output, session) {
     progress_refresh()
     job_history(current_project())
   }, page_length = 10)
+
+  output$run_pipeline_stepper <- renderUI({
+    progress_refresh()
+    pipeline_stepper_ui(current_project())
+  })
 
   output$run_step_cards <- renderUI({
     progress_refresh()
