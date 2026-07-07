@@ -356,6 +356,43 @@ project_config_dir <- function(key) {
   file.path(SCRIPTS_DIR, "project_configs", analysis_key(key))
 }
 
+project_config_roots <- function() {
+  unique(normalizePath(c(file.path(SCRIPTS_DIR, "project_configs"), file.path(CSL_ROOT, "project_configs")), winslash = "/", mustWork = FALSE))
+}
+
+is_managed_project_config <- function(path) {
+  path <- trimws(as.character(path %||% ""))
+  if (!nzchar(path)) return(FALSE)
+  path <- normalizePath(path, winslash = "/", mustWork = FALSE)
+  if (!file.exists(path) || basename(path) == "config.py") return(FALSE)
+  any(vapply(project_config_roots(), function(root) startsWith(path, paste0(sub("/+$", "", root), "/")), logical(1)))
+}
+
+delete_projects <- function(projects_to_delete, delete_data = FALSE) {
+  if (!length(projects_to_delete)) return("No projects selected.")
+  messages <- character(0)
+  for (project in projects_to_delete) {
+    cfg <- project$source_config %||% ""
+    if (is_managed_project_config(cfg)) {
+      ok <- unlink(cfg, force = TRUE) == 0
+      messages <- c(messages, paste(if (ok) "Deleted config:" else "Could not delete config:", cfg))
+    } else {
+      messages <- c(messages, paste("Skipped unmanaged config:", if (nzchar(cfg)) cfg else project$label))
+    }
+    if (isTRUE(delete_data)) {
+      data_dir_raw <- trimws(as.character(project$data_dir %||% ""))
+      data_dir <- if (nzchar(data_dir_raw)) normalizePath(data_dir_raw, winslash = "/", mustWork = FALSE) else ""
+      if (nzchar(data_dir) && dir.exists(data_dir)) {
+        ok <- unlink(data_dir, recursive = TRUE, force = TRUE) == 0
+        messages <- c(messages, paste(if (ok) "Deleted data:" else "Could not delete data:", data_dir))
+      } else {
+        messages <- c(messages, paste("No data folder found for:", project$label))
+      }
+    }
+  }
+  paste(messages, collapse = "\n")
+}
+
 write_project_config <- function(project) {
   cfg_dir <- project_config_dir(project$analysis_key)
   dir.create(cfg_dir, recursive = TRUE, showWarnings = FALSE)
@@ -1760,6 +1797,27 @@ select.form-control {
   padding: 0;
   font-size: 12px;
 }
+.project-manage {
+  margin-top: 8px;
+  background: #ffffff;
+  border: 1px solid #d8dde8;
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+.project-manage summary {
+  cursor: pointer;
+  font-weight: 800;
+  color: #17202f;
+}
+.project-manage .checkbox {
+  margin-top: 6px;
+  margin-bottom: 6px;
+}
+.small-note {
+  font-size: 12px;
+  line-height: 1.35;
+  margin: 8px 0;
+}
 
 "
 
@@ -1778,6 +1836,7 @@ ui <- fluidPage(
       selectInput("analysis", "Analysis", choices = c("RNA-seq", "ATAC-seq", "ChIP-seq"), selected = "RNA-seq", selectize = FALSE),
       uiOutput("project_ui"),
       uiOutput("new_project_ui"),
+      uiOutput("project_manage_ui"),
       tags$hr(),
       uiOutput("project_card")
     ),
@@ -1850,8 +1909,12 @@ server <- function(input, output, session) {
   output$project_ui <- renderUI({
     p <- filtered_projects()
     labels <- if (length(p)) vapply(p, function(x) x$label, character(1)) else character(0)
-    choices <- c(stats::setNames(labels, labels), "Start a new project" = "__new__")
-    selectInput("project_id", "Project Name", choices = choices, selected = if (length(labels)) labels[[1]] else "__new__", selectize = FALSE)
+    choices <- c("Start a new project" = "__new__", stats::setNames(labels, labels))
+    selected <- isolate(input$project_id)
+    if (is.null(selected) || !selected %in% unname(choices)) {
+      selected <- if (length(labels)) labels[[1]] else "__new__"
+    }
+    selectInput("project_id", "Project Name", choices = choices, selected = selected, selectize = FALSE)
   })
 
   output$new_project_ui <- renderUI({
@@ -1868,6 +1931,23 @@ server <- function(input, output, session) {
       textInput("new_design_matrix_path", "Design matrix path", value = ""),
       actionButton("create_project_config", "Create project", class = "btn-primary"),
       textOutput("create_project_status")
+    )
+  })
+
+  output$project_manage_ui <- renderUI({
+    p <- filtered_projects()
+    if (!length(p)) return(NULL)
+    choices <- stats::setNames(vapply(p, `[[`, character(1), "id"), vapply(p, `[[`, character(1), "label"))
+    tagList(
+      tags$hr(),
+      details(class = "project-manage",
+        summary("Manage projects"),
+        div(class = "muted small-note", "Delete saved project files from project_configs. Data deletion is optional and asks for confirmation."),
+        checkboxGroupInput("delete_project_ids", "Projects to delete", choices = choices),
+        checkboxInput("delete_project_data", "Also delete associated data folders", value = FALSE),
+        actionButton("delete_selected_projects", "Delete selected", class = "btn-danger"),
+        textOutput("delete_project_status")
+      )
     )
   })
 
@@ -1926,6 +2006,49 @@ server <- function(input, output, session) {
   })
 
   output$create_project_status <- renderText("")
+  output$delete_project_status <- renderText("")
+
+  selected_projects_for_delete <- reactive({
+    ids <- input$delete_project_ids %||% character(0)
+    p <- projects()
+    p[intersect(ids, names(p))]
+  })
+
+  observeEvent(input$delete_selected_projects, {
+    to_delete <- selected_projects_for_delete()
+    if (!length(to_delete)) {
+      output$delete_project_status <- renderText("Select at least one project.")
+      return()
+    }
+    if (isTRUE(input$delete_project_data)) {
+      labels <- vapply(to_delete, `[[`, character(1), "label")
+      data_dirs <- vapply(to_delete, `[[`, character(1), "data_dir")
+      showModal(modalDialog(
+        title = "Delete project data?",
+        tags$p("This will delete the selected project config file(s) and permanently remove these data folders:"),
+        tags$ul(lapply(seq_along(labels), function(i) tags$li(tags$strong(labels[[i]]), tags$br(), code(data_dirs[[i]])))),
+        tags$p(tags$strong("This cannot be undone.")),
+        footer = tagList(
+          modalButton("Cancel"),
+          actionButton("confirm_delete_projects", "Yes, delete configs and data", class = "btn-danger")
+        ),
+        easyClose = TRUE
+      ))
+      return()
+    }
+    msg <- delete_projects(to_delete, delete_data = FALSE)
+    projects(discover_projects())
+    output$delete_project_status <- renderText(msg)
+  })
+
+  observeEvent(input$confirm_delete_projects, {
+    to_delete <- selected_projects_for_delete()
+    removeModal()
+    msg <- delete_projects(to_delete, delete_data = TRUE)
+    projects(discover_projects())
+    output$delete_project_status <- renderText(msg)
+  })
+
   observeEvent(input$create_project_config, {
     p <- new_project_from_inputs(input)
     msg <- tryCatch({
