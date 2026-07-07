@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import base64
 import json
 import os
@@ -17,7 +18,28 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+def find_codespringlab_root() -> Path:
+    env_root = os.environ.get("CSL_CODESPRINGLAB_ROOT", "").strip()
+    candidates = []
+    if env_root:
+        candidates.append(Path(env_root).expanduser())
+    app_path = Path(__file__).resolve()
+    candidates.extend([
+        app_path.parents[1],
+        Path.cwd(),
+        Path.cwd().parent,
+        Path("~/CodeSpringLab").expanduser(),
+        Path("~/CSH/CodeSpringLab").expanduser(),
+        Path("/grid/bsr/home/rouse/CodeSpringLab"),
+        Path("/Users/rouse/CSH/CodeSpringLab"),
+    ])
+    for candidate in candidates:
+        if (candidate / "scripts_DoNotTouch").is_dir():
+            return candidate
+    return app_path.parents[1]
+
+
+REPO_ROOT = find_codespringlab_root()
 SCRIPTS = REPO_ROOT / "scripts_DoNotTouch"
 APP_HOME = Path(os.environ.get("CSL_WEB_HOME", "~/.codespringlab_web")).expanduser()
 PROJECTS_PATH = APP_HOME / "projects.json"
@@ -107,6 +129,11 @@ def load_projects() -> Dict[str, dict]:
             except Exception:
                 continue
             projects[project_id(project)] = project
+
+    for project in discover_codespringlab_projects():
+        pid = project_id(project)
+        if pid not in projects:
+            projects[pid] = project
     return projects
 
 
@@ -122,6 +149,157 @@ def save_project(project: dict) -> dict:
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(json.dumps(project, indent=2, sort_keys=True))
     return project
+
+
+ANALYSIS_DIR_TO_LABEL = {
+    "rna": "RNA-seq",
+    "rnaseq": "RNA-seq",
+    "rna_seq": "RNA-seq",
+    "atac": "ATAC-seq",
+    "atacseq": "ATAC-seq",
+    "atac_seq": "ATAC-seq",
+    "chip": "ChIP-seq",
+    "chipseq": "ChIP-seq",
+    "chip_seq": "ChIP-seq",
+}
+
+ANALYSIS_NOTEBOOK_DIR = {
+    "rna": "bulkRNAseq",
+    "rnaseq": "bulkRNAseq",
+    "rna_seq": "bulkRNAseq",
+    "atac": "bulkATACseq",
+    "atacseq": "bulkATACseq",
+    "atac_seq": "bulkATACseq",
+    "chip": "bulkChIPseq",
+    "chipseq": "bulkChIPseq",
+    "chip_seq": "bulkChIPseq",
+}
+
+
+def read_python_config(path: Path) -> dict:
+    values = {}
+    try:
+        tree = ast.parse(path.read_text())
+    except Exception:
+        return values
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        try:
+            value = ast.literal_eval(node.value)
+        except Exception:
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name) and not target.id.startswith("_"):
+                values[target.id] = value
+    return values
+
+
+def legacy_analysis_key(path: Path, values: dict) -> str:
+    raw = str(values.get("analysis_type", "") or path.parent.name or "rna").lower()
+    if "atac" in raw:
+        return "atac"
+    if "chip" in raw:
+        return "chip"
+    return "rna"
+
+
+def legacy_base_dir(analysis_key: str) -> Path:
+    return REPO_ROOT / ANALYSIS_NOTEBOOK_DIR.get(analysis_key, "bulkRNAseq")
+
+
+def resolve_legacy_path(value, analysis_key: str, prefer_folder: bool = True) -> str:
+    value = str(value or "").strip()
+    if not value:
+        return ""
+    path = Path(value).expanduser()
+    if path.is_absolute():
+        resolved = path
+    else:
+        resolved = (legacy_base_dir(analysis_key) / path).resolve()
+    if prefer_folder and value.endswith("/"):
+        return str(resolved)
+    return str(resolved)
+
+
+def legacy_results_root(values: dict, analysis_key: str, project_name: str) -> str:
+    visualizer = str(values.get("visualizer_data_dir", "")).strip()
+    if visualizer:
+        data_path = Path(resolve_legacy_path(visualizer, analysis_key)).expanduser()
+        if data_path.name == "data" and data_path.parent.name == project_name:
+            return str(data_path.parent.parent)
+    raw = values.get("results_directory", "../../csl_results/")
+    return resolve_legacy_path(raw, analysis_key)
+
+
+def legacy_project_from_values(values: dict, config_path: Path) -> Optional[dict]:
+    analysis_key = legacy_analysis_key(config_path, values)
+    analysis_type = ANALYSIS_DIR_TO_LABEL.get(analysis_key, "RNA-seq")
+    project_name = str(values.get("project_name", "") or config_path.stem).strip()
+    if not project_name:
+        return None
+
+    results_root = legacy_results_root(values, analysis_key, project_name)
+    inpath_design = resolve_legacy_path(values.get("inpath_design", ""), analysis_key)
+    read_dest = resolve_legacy_path(values.get("read_path_destination", ""), analysis_key)
+    read_orig = resolve_legacy_path(values.get("read_path_original", ""), analysis_key)
+    visualizer = resolve_legacy_path(values.get("visualizer_data_dir", ""), analysis_key)
+    pairing = str(values.get("pairing", values.get("paired_end", ""))).strip().lower()
+    paired = False if pairing in ["n", "no", "false", "single", "single-end", "se"] else True
+
+    project = {
+        "name": clean_name(project_name, "project"),
+        "analysis_type": analysis_type,
+        "workflow_mode": "Visualize existing results",
+        "genome": str(values.get("genome", "mouse") or "mouse").strip().lower(),
+        "paired_end": paired,
+        "results_root": results_root,
+        "fastq_dir": read_dest or read_orig,
+        "design_matrix_path": inpath_design,
+        "data_dir_override": visualizer,
+        "metadata_columns": ["treatment"],
+        "source_config": str(config_path),
+        "source": "CodeSpringLab config",
+    }
+    project = normalize_project(project)
+    project = apply_project_inference(project)
+    project["source_config"] = str(config_path)
+    project["source"] = "CodeSpringLab config"
+    return project
+
+
+def legacy_config_candidates() -> List[Path]:
+    candidates = []
+    search_roots = [
+        SCRIPTS / "project_configs",
+        REPO_ROOT / "project_configs",
+    ]
+    for root in search_roots:
+        if root.is_dir():
+            candidates.extend(sorted(root.glob("*/*.py")))
+    active_config = SCRIPTS / "config.py"
+    if active_config.exists():
+        candidates.append(active_config)
+    seen = set()
+    unique = []
+    for path in candidates:
+        key = str(path.resolve())
+        if key not in seen:
+            seen.add(key)
+            unique.append(path)
+    return unique
+
+
+def discover_codespringlab_projects() -> List[dict]:
+    projects = []
+    for config_path in legacy_config_candidates():
+        values = read_python_config(config_path)
+        if not values and config_path.name != "config.py":
+            continue
+        project = legacy_project_from_values(values, config_path)
+        if project:
+            projects.append(project)
+    return projects
 
 
 def load_jobs() -> List[dict]:
@@ -183,6 +361,9 @@ def project_root(project: dict) -> Path:
 
 
 def data_dir(project: dict) -> Path:
+    override = str(project.get("data_dir_override", "")).strip()
+    if override:
+        return Path(override).expanduser()
     return project_root(project) / "data"
 
 
@@ -198,6 +379,10 @@ def design_matrix_path(project: dict) -> Path:
     override = str(project.get("design_matrix_path", "")).strip()
     if override:
         path = Path(override).expanduser()
+        return path if path.name == "design_matrix.txt" else path / "design_matrix.txt"
+    inpath_design = str(project.get("inpath_design", "")).strip()
+    if inpath_design:
+        path = Path(inpath_design).expanduser()
         return path if path.name == "design_matrix.txt" else path / "design_matrix.txt"
     return manifest_dir(project) / "design_matrix.txt"
 
@@ -1175,7 +1360,8 @@ def sidebar_project_selector() -> Optional[dict]:
         if option == "New project":
             return "New project"
         project = filtered[option]
-        return f"{project.get('name')} ({project.get('analysis_type', 'RNA-seq')})"
+        source = " · CSL config" if project.get("source_config") else ""
+        return f"{project.get('name')} ({project.get('analysis_type', 'RNA-seq')}{source})"
 
     choice = st.sidebar.selectbox(
         "Project config",
@@ -1184,6 +1370,10 @@ def sidebar_project_selector() -> Optional[dict]:
         key="selected_project",
         format_func=label_project,
     )
+    st.sidebar.caption(f"CodeSpringLab root: {REPO_ROOT}")
+    legacy_count = len([p for p in filtered.values() if p.get("source_config")])
+    if legacy_count:
+        st.sidebar.caption(f"Detected {legacy_count} CodeSpringLab project config(s).")
     if choice != "New project":
         return filtered[choice]
 
@@ -1240,6 +1430,8 @@ def setup_tab(project: dict) -> dict:
             project["results_root"] = st.text_input("Results root", value=str(project.get("results_root", Path("~/csl_results").expanduser())))
             project["fastq_dir"] = st.text_input("FASTQ folder", value=str(project.get("fastq_dir", "")))
             project["design_matrix_path"] = st.text_input("Design matrix path or folder", value=str(project.get("design_matrix_path", "")))
+            if project.get("data_dir_override"):
+                project["data_dir_override"] = st.text_input("Visualizer data folder", value=str(project.get("data_dir_override", "")))
             metadata = st.text_input("Design metadata columns", value=", ".join(project.get("metadata_columns", ["treatment"])))
         saved = st.form_submit_button("Save setup / re-detect paths", type="primary")
     if saved:
@@ -1254,6 +1446,9 @@ def setup_tab(project: dict) -> dict:
     c3.metric("Submitted jobs", len(project_jobs(project)))
     c4.metric("Next step", next_recommended_step(project))
 
+    if project.get("source_config"):
+        st.markdown("**Imported CodeSpringLab Config**")
+        st.code(str(project.get("source_config")))
     st.markdown("**Detected Project State**")
     render_step_status(project)
     return project

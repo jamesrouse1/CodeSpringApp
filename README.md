@@ -52,3 +52,19 @@ The sidebar is organized as `Analysis` then `Project config`. Each saved project
 ```
 
 The Progress tab reads the project config and existing output folders to show a pipeline-wide status table plus a sample-by-sample table for FastQC, trimming, STAR, Kallisto, and featureCounts. For RNA-seq, the same tab can run a selected step so an older project can be resumed from the point where outputs stop.
+
+
+## Existing CodeSpringLab configs
+
+The app automatically searches for finished notebook projects in:
+
+```text
+<CodeSpringLab>/scripts_DoNotTouch/project_configs/<analysis>/*.py
+<CodeSpringLab>/project_configs/<analysis>/*.py
+```
+
+If this web app is cloned as a standalone repo, point it at the pipeline checkout when launching:
+
+```bash
+CSL_CODESPRINGLAB_ROOT=~/CodeSpringLab streamlit run app.py --server.address 0.0.0.0 --server.port 8501
+```
