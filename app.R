@@ -1657,9 +1657,12 @@ table.dataTable tbody td:first-child, table.dataTable thead th:first-child {
 .selectize-control.single,
 .selectize-control.multi {
   position: relative;
-  z-index: 20;
+  z-index: 30;
+  margin-bottom: 12px;
 }
+.form-group:has(.selectize-control.dropdown-active),
 .selectize-control.dropdown-active {
+  position: relative;
   z-index: 100000 !important;
 }
 .selectize-input,
@@ -1669,7 +1672,17 @@ select.form-control,
   color: #132033 !important;
   background: #ffffff !important;
 }
+select.form-control {
+  color: #132033 !important;
+  background-color: #ffffff !important;
+  border: 1px solid #cfd9e6 !important;
+  border-radius: 8px !important;
+}
 .selectize-dropdown {
+  position: absolute !important;
+  top: 100% !important;
+  left: 0 !important;
+  width: 100% !important;
   z-index: 100000 !important;
   background: #ffffff !important;
   color: #132033 !important;
@@ -1679,6 +1692,8 @@ select.form-control,
 .selectize-dropdown-content {
   background: #ffffff !important;
   color: #132033 !important;
+  max-height: 320px !important;
+  overflow-y: auto !important;
 }
 .selectize-dropdown .option,
 .selectize-dropdown .optgroup-header,
@@ -1686,6 +1701,8 @@ select.form-control,
   color: #132033 !important;
   background: #ffffff !important;
   opacity: 1 !important;
+  padding: 8px 12px !important;
+  line-height: 1.3 !important;
 }
 .selectize-dropdown .option.active,
 .selectize-dropdown [data-selectable].active {
@@ -1701,7 +1718,8 @@ select.form-control,
 .tab-pane,
 .main-panel,
 .sidebar-panel,
-.well {
+.well,
+.form-group {
   overflow: visible;
 }
 
@@ -1749,7 +1767,7 @@ ui <- fluidPage(
   sidebarLayout(
     sidebarPanel(
       width = 2,
-      selectInput("analysis", "Analysis", choices = c("RNA-seq", "ATAC-seq", "ChIP-seq", "All analyses"), selected = "RNA-seq"),
+      selectInput("analysis", "Analysis", choices = c("RNA-seq", "ATAC-seq", "ChIP-seq"), selected = "RNA-seq", selectize = FALSE),
       uiOutput("project_ui"),
       uiOutput("new_project_ui"),
       tags$hr(),
@@ -1817,7 +1835,7 @@ server <- function(input, output, session) {
   filtered_projects <- reactive({
     p <- projects()
     analysis <- input$analysis
-    if (!length(analysis) || is.null(analysis) || !nzchar(analysis) || identical(analysis, "All analyses")) return(p)
+    if (!length(analysis) || is.null(analysis) || !nzchar(analysis)) return(p)
     p[vapply(p, function(x) identical(x$analysis, analysis), logical(1))]
   })
 
@@ -1825,7 +1843,7 @@ server <- function(input, output, session) {
     p <- filtered_projects()
     labels <- if (length(p)) vapply(p, function(x) x$label, character(1)) else character(0)
     choices <- c(stats::setNames(labels, labels), "Start a new project" = "__new__")
-    selectInput("project_id", "Project Name", choices = choices, selected = if (length(labels)) labels[[1]] else "__new__")
+    selectInput("project_id", "Project Name", choices = choices, selected = if (length(labels)) labels[[1]] else "__new__", selectize = FALSE)
   })
 
   output$new_project_ui <- renderUI({
@@ -1834,7 +1852,7 @@ server <- function(input, output, session) {
       tags$hr(),
       h4("New Project"),
       textInput("new_project_name", "Project name", value = "new_rnaseq_project"),
-      selectInput("new_project_analysis", "Analysis type", choices = c("RNA-seq", "ATAC-seq", "ChIP-seq"), selected = if (identical(input$analysis, "All analyses")) "RNA-seq" else input$analysis),
+      selectInput("new_project_analysis", "Analysis type", choices = c("RNA-seq", "ATAC-seq", "ChIP-seq"), selected = input$analysis, selectize = FALSE),
       selectInput("new_genome", "Genome", choices = c("mouse", "human"), selected = "mouse"),
       radioButtons("new_paired_end", "Reads", choices = c("Paired-end" = "paired", "Single-end" = "single"), selected = "paired"),
       textInput("new_fastq_dir", "Raw FASTQ folder", value = ""),
