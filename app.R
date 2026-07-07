@@ -638,22 +638,31 @@ server <- function(input, output, session) {
 
   filtered_projects <- reactive({
     p <- projects()
-    if (input$analysis == "All analyses") return(p)
-    p[vapply(p, function(x) identical(x$analysis, input$analysis), logical(1))]
+    analysis <- input$analysis
+    if (!length(analysis) || is.null(analysis) || !nzchar(analysis) || identical(analysis, "All analyses")) return(p)
+    p[vapply(p, function(x) identical(x$analysis, analysis), logical(1))]
   })
 
   output$project_ui <- renderUI({
     p <- filtered_projects()
+    if (!length(p)) {
+      return(div(class = "muted", "No project configs were found. Check CSL_CODESPRINGLAB_ROOT or create a new project config."))
+    }
     labels <- vapply(p, function(x) paste0(x$label, " (", x$analysis, if (nzchar(x$source_config)) " · CSL config" else "", ")"), character(1))
-    selectInput("project_id", "Project config", choices = labels, selected = labels[1] %||% character(0))
+    selectInput("project_id", "Project config", choices = labels, selected = labels[[1]])
   })
 
   current_project <- reactive({
     p <- filtered_projects()
     req(length(p) > 0)
     labels <- vapply(p, function(x) paste0(x$label, " (", x$analysis, if (nzchar(x$source_config)) " · CSL config" else "", ")"), character(1))
-    idx <- match(input$project_id, labels)
-    if (is.na(idx)) idx <- 1
+    selected <- input$project_id
+    if (!length(selected) || is.null(selected) || !nzchar(selected)) {
+      idx <- 1
+    } else {
+      idx <- match(selected, labels)
+      if (!length(idx) || is.na(idx)) idx <- 1
+    }
     p[[idx]]
   })
 
