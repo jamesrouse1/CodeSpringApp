@@ -536,7 +536,7 @@ def next_recommended_step(project: dict) -> str:
         return "Count matrix"
     if status.get("DESeq2") != "Complete":
         return "DESeq2"
-    return "Results / Shiny Viewer"
+    return "Results Explorer"
 
 
 def render_step_status(project: dict) -> None:
@@ -586,8 +586,8 @@ def resume_step_details(project: dict, step: str) -> Tuple[str, List[str]]:
             "Run differential expression from count_matrix.txt and design_matrix.txt.",
             [str(root / "counts" / "count_matrix.txt"), str(candidate_design_matrix_path(project)), str(root / "deseq2")],
         ),
-        "Shiny Viewer": (
-            "Launch the existing CodeSpringLab RNA-seq Results Explorer for completed outputs.",
+        "Results Explorer": (
+            "Open the integrated Streamlit results viewer for completed outputs.",
             [str(root), str(candidate_design_matrix_path(project))],
         ),
     }
@@ -599,37 +599,6 @@ def render_resume_card(project: dict, step: str) -> None:
     st.markdown("**Resume guidance**")
     st.caption(description)
     st.code("\n".join(paths))
-
-
-def render_shiny_launcher(project: dict, key_prefix: str) -> None:
-    st.markdown("**RNA-seq Results Explorer**")
-    st.caption("Launch the existing Shiny-style results viewer for this project. This is the closest match to the visualization flow from the notebook.")
-    data_ready = data_dir(project).exists()
-    design_ready = candidate_design_matrix_path(project).exists()
-    if not data_ready:
-        st.warning("The project data folder was not found. Check Results root and Project name in Setup.")
-    if not design_ready:
-        st.warning("The design matrix was not found. Provide it in Setup so the Results Explorer can label samples correctly.")
-    col1, col2 = st.columns([1, 3])
-    with col1:
-        port = st.number_input(
-            "Viewer port",
-            min_value=3838,
-            max_value=3900,
-            value=available_port(),
-            key=key_prefix+"_viewer_port",
-        )
-    with col2:
-        st.code("ssh -N -L {0}:localhost:{0} rouse@bamdev1".format(int(port)))
-    if st.button(
-        "Launch RNA-seq Results Explorer",
-        type="primary",
-        key=key_prefix+"_launch_viewer",
-        disabled=not (data_ready and design_ready),
-    ):
-        job_submission_result(submit_shiny(project, int(port)))
-        st.info(f"Tunnel from your laptop: ssh -N -L {int(port)}:localhost:{int(port)} rouse@bamdev1")
-        st.markdown(f"Then open [http://localhost:{int(port)}](http://localhost:{int(port)})")
 
 
 def split_fastq_suffix(filename: str) -> Tuple[str, str]:
@@ -870,12 +839,12 @@ def progress_tab(project: dict) -> None:
         return
 
     st.markdown("**Run One Step**")
-    steps = ["FastQC", "Trim", "STAR", "Kallisto", "featureCounts", "Count matrix", "DESeq2", "Shiny Viewer"]
+    steps = ["FastQC", "Trim", "STAR", "Kallisto", "featureCounts", "Count matrix", "DESeq2", "Results Explorer"]
     recommended = next_recommended_step(project)
     default = steps.index(recommended) if recommended in steps else 0
     selected_step = st.selectbox("Step", steps, index=default, key="progress_step_"+project_id(project))
-    if selected_step == "Shiny Viewer":
-        render_shiny_launcher(project, "progress_tab_"+project_id(project))
+    if selected_step == "Results Explorer":
+        integrated_results_explorer(project, key_prefix="progress_tab_"+project_id(project), compact=True)
         return
 
     use_trimmed = False
@@ -1149,38 +1118,6 @@ def submit_deseq2(project: dict, reference: str, comparison: str, redundant: str
         SCRIPTS / "DESeq2" / "qsub_deseq2.sh",
         [SCRIPTS / "DESeq2" / "DESeq2.R", count_matrix, design_matrix_path(project), outpath, reference, comparison, redundant or "NoRedundant", project["name"]],
         "deseq2",
-    )
-
-
-def write_shiny_config(project: dict, port: int) -> Path:
-    outdir = project_root(project) / "shiny"
-    outdir.mkdir(parents=True, exist_ok=True)
-    config = outdir / "shiny_results_config.R"
-    config.write_text(
-        "\n".join([
-            f'project_name <- "{project["name"]}"',
-            f'results_root <- "{Path(project["results_root"]).expanduser().resolve()}"',
-            f'data_dir <- "{data_dir(project).resolve()}"',
-            f'design_matrix_path <- "{design_matrix_path(project).resolve()}"',
-            'host <- "0.0.0.0"',
-            f"port <- {int(port)}",
-            "logo_search_dirs <- c(",
-            f'  "{SCRIPTS.resolve()}"',
-            ")",
-            "",
-        ])
-    )
-    return config
-
-
-def submit_shiny(project: dict, port: int) -> dict:
-    config = write_shiny_config(project, port)
-    return submit_sbatch(
-        project,
-        "RNA-seq Shiny Viewer",
-        SCRIPTS / "Shiny" / "sbatch_rnaseq_results_explorer.sh",
-        [config, "0.0.0.0", str(port)],
-        "rnaseq_shiny",
     )
 
 
@@ -1578,7 +1515,7 @@ def run_tab(project: dict) -> None:
     st.caption("Workflow: "+mode+" · recommended next step: "+next_recommended_step(project))
     with st.expander("Detected progress and resume guide", expanded=(mode != "Start new analysis")):
         render_step_status(project)
-        resume_options = ["FastQC", "Trim", "STAR", "Kallisto", "featureCounts", "Count matrix", "DESeq2", "Shiny Viewer"]
+        resume_options = ["FastQC", "Trim", "STAR", "Kallisto", "featureCounts", "Count matrix", "DESeq2", "Results Explorer"]
         recommended = next_recommended_step(project)
         resume_default = resume_options.index(recommended) if recommended in resume_options else 0
         resume_step = st.selectbox(
@@ -1598,7 +1535,7 @@ def run_tab(project: dict) -> None:
     else:
         st.warning("Local preview mode: sbatch is not available here, so run buttons will record the command but will not submit jobs. Run this app on the server to execute the pipeline.")
 
-    step_tabs = st.tabs(["FastQC", "Trim", "STAR", "Kallisto", "featureCounts", "DESeq2", "Shiny Viewer"])
+    step_tabs = st.tabs(["FastQC", "Trim", "STAR", "Kallisto", "featureCounts", "DESeq2", "Results Explorer"])
 
     with step_tabs[0]:
         trimmed = st.toggle("Use trimmed reads", value=False, key="fastqc_trimmed")
@@ -1659,7 +1596,7 @@ def run_tab(project: dict) -> None:
                     job_submission_result(submit_deseq2(project, ref, comp, redundant))
 
     with step_tabs[6]:
-        render_shiny_launcher(project, "run_tab_"+project_id(project))
+        integrated_results_explorer(project, key_prefix="run_tab_"+project_id(project), compact=True)
 
 
 def jobs_tab(project: dict) -> None:
@@ -1688,6 +1625,284 @@ def jobs_tab(project: dict) -> None:
     with col2:
         st.caption(job.get("stderr", ""))
         st.text_area("stderr tail", value=read_tail(job.get("stderr", "")), height=320)
+
+
+def safe_read_table(path: Path, preview_rows: Optional[int] = None) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame()
+    kwargs = {"sep": None, "engine": "python"}
+    if preview_rows is not None:
+        kwargs["nrows"] = preview_rows
+    try:
+        return pd.read_csv(path, **kwargs)
+    except Exception:
+        try:
+            return pd.read_table(path, nrows=preview_rows)
+        except Exception:
+            return pd.DataFrame()
+
+
+def download_df_button(df: pd.DataFrame, file_name: str, key: str) -> None:
+    if df is None or df.empty:
+        return
+    st.download_button(
+        "Download table",
+        data=df.to_csv(index=False).encode(),
+        file_name=file_name,
+        key=key,
+    )
+
+
+def dataframe_view(path: Path, label: str, key: str, preview_rows: int = 1000, height: int = 420) -> None:
+    st.markdown(f"**{label}**")
+    if not path.exists():
+        st.info(f"Not found: {path}")
+        return
+    df = safe_read_table(path, preview_rows=preview_rows)
+    if df.empty:
+        st.warning(f"Could not read table: {path}")
+        st.download_button(
+            f"Download {path.name}",
+            data=path.read_bytes(),
+            file_name=path.name,
+            key=key+"_raw_download",
+        )
+        return
+    st.caption(f"{path.name} · {format_size(path.stat().st_size)} · previewing up to {preview_rows} rows")
+    st.dataframe(df, use_container_width=True, height=height)
+    download_df_button(df, path.name.replace(".txt", ".csv"), key+"_df_download")
+
+
+def matching_files(root: Path, patterns: Iterable[str], limit: int = 500) -> List[Path]:
+    if not root.exists():
+        return []
+    found = []
+    for pattern in patterns:
+        found.extend(root.rglob(pattern))
+    files = sorted([p for p in found if p.is_file()])
+    return files[:limit]
+
+
+def select_file(label: str, files: List[Path], key: str, root: Optional[Path] = None) -> Optional[Path]:
+    if not files:
+        st.info(f"No {label.lower()} found.")
+        return None
+    root = root or files[0].parent
+    return st.selectbox(label, files, format_func=lambda p: p.relative_to(root).as_posix() if root in p.parents or p == root else p.name, key=key)
+
+
+def render_file_inline(path: Path, key: str, height: int = 850) -> None:
+    suffix = path.suffix.lower()
+    if suffix == ".png":
+        st.image(str(path), use_container_width=True)
+    elif suffix in [".jpg", ".jpeg", ".webp"]:
+        st.image(str(path), use_container_width=True)
+    elif suffix == ".html":
+        components.html(path.read_text(errors="replace"), height=height, scrolling=True)
+    elif suffix == ".pdf":
+        encoded = base64.b64encode(path.read_bytes()).decode()
+        components.html(
+            f'<iframe src="data:application/pdf;base64,{encoded}" width="100%" height="{height}" style="border:1px solid #d8dde8;border-radius:8px;"></iframe>',
+            height=height + 20,
+            scrolling=False,
+        )
+        st.download_button(f"Download {path.name}", data=path.read_bytes(), file_name=path.name, key=key+"_download_pdf")
+    elif suffix in [".txt", ".csv", ".tsv"]:
+        dataframe_view(path, path.name, key)
+    else:
+        st.download_button(f"Download {path.name}", data=path.read_bytes(), file_name=path.name, key=key+"_download")
+        st.code(str(path))
+
+
+def design_metadata(project: dict) -> pd.DataFrame:
+    design = read_design(project)
+    if design.empty:
+        return design
+    if "sample" not in design.columns:
+        first = design.columns[0]
+        design = design.rename(columns={first: "sample"})
+    return design
+
+
+def sorted_sample_options(project: dict, sort_col: Optional[str] = None) -> List[str]:
+    design = design_metadata(project)
+    if design.empty or "sample" not in design.columns:
+        return []
+    design = design.copy()
+    design["sample"] = design["sample"].astype(str)
+    if sort_col and sort_col in design.columns:
+        design = design.sort_values([sort_col, "sample"], kind="stable")
+    else:
+        design = design.sort_values("sample", kind="stable")
+    return design["sample"].tolist()
+
+
+def fastqc_reports(project: dict) -> List[Path]:
+    root = data_dir(project)
+    return matching_files(root / "fastqc", ["*.html"]) + matching_files(root / "fastqc_cutadapt", ["*.html"])
+
+
+def star_sample_files(project: dict, sample: str) -> List[Path]:
+    root = data_dir(project) / "star"
+    if not root.exists():
+        return []
+    candidates = []
+    for sample_dir in [root / sample, root]:
+        if sample_dir.exists():
+            candidates.extend(matching_files(sample_dir, [f"*{sample}*Log.final.out", f"*{sample}*SJ.out.tab", f"*{sample}*.txt"], limit=50))
+    return sorted(set(candidates))
+
+
+def featurecounts_sample_files(project: dict, sample: str) -> List[Path]:
+    root = data_dir(project) / "featurecounts"
+    if not root.exists():
+        return []
+    return matching_files(root / sample, ["*.txt", "*.summary"], limit=50) + matching_files(root, [f"*{sample}*.txt", f"*{sample}*.summary"], limit=50)
+
+
+def render_overview(project: dict, key_prefix: str) -> None:
+    root = data_dir(project)
+    rows = [
+        {"resource": "Data folder", "status": "found" if root.exists() else "missing", "path": str(root)},
+        {"resource": "Design matrix", "status": "found" if candidate_design_matrix_path(project).exists() else "missing", "path": str(candidate_design_matrix_path(project))},
+        {"resource": "FastQC reports", "status": str(len(fastqc_reports(project))), "path": str(root / "fastqc")},
+        {"resource": "STAR summary", "status": "found" if (root / "star_summary" / "summary_matrix.txt").exists() else "missing", "path": str(root / "star_summary" / "summary_matrix.txt")},
+        {"resource": "featureCounts summary", "status": "found" if (root / "counts" / "featurecounts_summary.txt").exists() else "missing", "path": str(root / "counts" / "featurecounts_summary.txt")},
+        {"resource": "Raw count matrix", "status": "found" if (root / "counts" / "count_matrix.txt").exists() else "missing", "path": str(root / "counts" / "count_matrix.txt")},
+        {"resource": "DESeq2 files", "status": str(len(matching_files(root / "deseq2", ["*.txt", "*.csv", "*.png", "*.pdf"]))), "path": str(root / "deseq2")},
+        {"resource": "GSEA files", "status": str(len(matching_files(root / "gseapy", ["*.txt", "*.csv", "*.png", "*.pdf"]))), "path": str(root / "gseapy")},
+    ]
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True, height=310)
+    design = design_metadata(project)
+    if not design.empty:
+        st.markdown("**Design Matrix**")
+        st.dataframe(design, use_container_width=True, hide_index=True, height=260)
+        download_df_button(design, f"{project.get('name', 'project')}_design_matrix.csv", key_prefix+"_download_design")
+
+
+def render_qc_explorer(project: dict, key_prefix: str) -> None:
+    root = data_dir(project)
+    reports = fastqc_reports(project)
+    selected = select_file("FastQC report", reports, key_prefix+"_fastqc", root)
+    if selected:
+        components.html(selected.read_text(errors="replace"), height=1050, scrolling=True)
+
+
+def render_alignment_explorer(project: dict, key_prefix: str) -> None:
+    root = data_dir(project)
+    design = design_metadata(project)
+    sort_cols = [c for c in design.columns if c not in ["sample", "filename"]] if not design.empty else []
+    sort_col = st.selectbox("Sort samples by", ["sample"] + sort_cols, key=key_prefix+"_sort_samples") if sort_cols else "sample"
+    samples = sorted_sample_options(project, None if sort_col == "sample" else sort_col)
+    sample = st.selectbox("Sample", samples or [""], key=key_prefix+"_sample")
+    col1, col2 = st.columns(2)
+    with col1:
+        dataframe_view(root / "star_summary" / "summary_matrix.txt", "STAR Summary Across Samples", key_prefix+"_star_summary")
+        sample_files = star_sample_files(project, sample) if sample else []
+        selected = select_file("Selected STAR sample file", sample_files, key_prefix+"_star_sample", root)
+        if selected:
+            render_file_inline(selected, key_prefix+"_star_sample_file", height=500)
+    with col2:
+        dataframe_view(root / "counts" / "featurecounts_summary.txt", "FeatureCounts Summary Across Samples", key_prefix+"_fc_summary")
+        fc_files = featurecounts_sample_files(project, sample) if sample else []
+        selected_fc = select_file("Selected featureCounts sample file", fc_files, key_prefix+"_fc_sample", root)
+        if selected_fc:
+            render_file_inline(selected_fc, key_prefix+"_fc_sample_file", height=500)
+
+
+def render_counts_explorer(project: dict, key_prefix: str) -> None:
+    root = data_dir(project)
+    tabs = st.tabs(["Raw Counts", "RSEM", "Kallisto", "DESeq2 Normalized"])
+    with tabs[0]:
+        dataframe_view(root / "counts" / "count_matrix.txt", "Raw Count Matrix", key_prefix+"_raw_counts", preview_rows=5000, height=560)
+    with tabs[1]:
+        files = matching_files(root / "rsem", ["*.genes.results", "*.isoforms.results", "*matrix*.txt", "*.txt", "*.csv"], limit=200)
+        selected = select_file("RSEM table", files, key_prefix+"_rsem", root)
+        if selected:
+            dataframe_view(selected, selected.relative_to(root).as_posix(), key_prefix+"_rsem_table", preview_rows=5000, height=560)
+    with tabs[2]:
+        files = matching_files(root / "kallisto", ["abundance.tsv", "*matrix*.txt", "*.tsv", "*.csv"], limit=300)
+        selected = select_file("Kallisto table", files, key_prefix+"_kallisto", root)
+        if selected:
+            dataframe_view(selected, selected.relative_to(root).as_posix(), key_prefix+"_kallisto_table", preview_rows=5000, height=560)
+    with tabs[3]:
+        files = matching_files(root / "deseq2", ["*normalized*.txt", "*normalized*.csv"], limit=100)
+        selected = select_file("DESeq2 normalized counts", files, key_prefix+"_norm_counts", root)
+        if selected:
+            dataframe_view(selected, selected.relative_to(root).as_posix(), key_prefix+"_norm_counts_table", preview_rows=5000, height=560)
+
+
+def render_deseq2_explorer(project: dict, key_prefix: str) -> None:
+    root = data_dir(project)
+    deseq2 = root / "deseq2"
+    tabs = st.tabs(["Tables", "Plots"])
+    with tabs[0]:
+        files = matching_files(deseq2, ["DEG*.txt", "DEG*.csv", "*.txt", "*.csv"], limit=300)
+        selected = select_file("DESeq2 table", files, key_prefix+"_deseq_table", root)
+        if selected:
+            dataframe_view(selected, selected.relative_to(root).as_posix(), key_prefix+"_deseq_table_view", preview_rows=5000, height=620)
+    with tabs[1]:
+        files = matching_files(deseq2, ["*.png", "*.pdf"], limit=300)
+        selected = select_file("DESeq2 plot", files, key_prefix+"_deseq_plot", root)
+        if selected:
+            render_file_inline(selected, key_prefix+"_deseq_plot_view", height=900)
+
+
+def render_gsea_explorer(project: dict, key_prefix: str) -> None:
+    root = data_dir(project)
+    gseapy = root / "gseapy"
+    tabs = st.tabs(["Tables", "Summary Plots", "Individual Pathway"])
+    with tabs[0]:
+        files = matching_files(gseapy, ["*.csv", "*.txt"], limit=500)
+        selected = select_file("GSEA table", files, key_prefix+"_gsea_table", root)
+        if selected:
+            dataframe_view(selected, selected.relative_to(root).as_posix(), key_prefix+"_gsea_table_view", preview_rows=5000, height=620)
+    with tabs[1]:
+        files = matching_files(gseapy, ["*.png", "*.pdf"], limit=500)
+        files = [p for p in files if "gseapy" in p.name.lower() or "summary" in p.name.lower() or p.parent == gseapy]
+        selected = select_file("GSEA summary plot", files, key_prefix+"_gsea_summary", root)
+        if selected:
+            render_file_inline(selected, key_prefix+"_gsea_summary_view", height=900)
+    with tabs[2]:
+        files = matching_files(gseapy, ["*.png", "*.pdf"], limit=1000)
+        selected = select_file("Pathway plot", files, key_prefix+"_gsea_pathway", root)
+        if selected:
+            render_file_inline(selected, key_prefix+"_gsea_pathway_view", height=950)
+
+
+def render_file_browser(project: dict, key_prefix: str) -> None:
+    root = data_dir(project)
+    files = result_files(project)
+    selected = select_file("Result file", files, key_prefix+"_all_files", root)
+    if selected:
+        st.caption(str(selected))
+        render_file_inline(selected, key_prefix+"_all_files_view", height=900)
+
+
+def integrated_results_explorer(project: dict, key_prefix: str = "results_explorer", compact: bool = False) -> None:
+    root = data_dir(project)
+    if not compact:
+        st.subheader("RNA-seq Results Explorer")
+    st.caption("Integrated Streamlit viewer. No separate Shiny app, no second port.")
+    st.code(str(root))
+    if not root.exists():
+        st.warning("The project data folder was not found. Check the project config, results root, or visualizer data folder.")
+        return
+    tabs = st.tabs(["Overview", "QC", "Alignment QC", "Counts", "DESeq2", "GSEA", "Files"])
+    with tabs[0]:
+        render_overview(project, key_prefix+"_overview")
+    with tabs[1]:
+        render_qc_explorer(project, key_prefix+"_qc")
+    with tabs[2]:
+        render_alignment_explorer(project, key_prefix+"_alignment")
+    with tabs[3]:
+        render_counts_explorer(project, key_prefix+"_counts")
+    with tabs[4]:
+        render_deseq2_explorer(project, key_prefix+"_deseq2")
+    with tabs[5]:
+        render_gsea_explorer(project, key_prefix+"_gsea")
+    with tabs[6]:
+        render_file_browser(project, key_prefix+"_files")
 
 
 def table_preview(path: Path, label: str, preview_rows: int = 500) -> None:
@@ -1725,68 +1940,21 @@ def result_files(project: dict, limit: int = 1000) -> List[Path]:
 
 def results_tab(project: dict) -> None:
     st.subheader("Outputs")
-    root = data_dir(project)
     col1, col2 = st.columns([3, 1])
     with col1:
-        st.code(str(root))
+        st.code(str(data_dir(project)))
     with col2:
         if st.button("Re-detect project paths"):
             project = apply_project_inference(project)
             save_project(project)
             st.success("Paths refreshed.")
-    if not root.exists():
-        st.info("No data folder exists yet.")
-        return
     with st.expander("Detected project state", expanded=False):
         render_step_status(project)
 
     if project.get("analysis_type") == "RNA-seq":
-        render_shiny_launcher(project, "outputs_tab_"+project_id(project))
-
-    result_tabs = st.tabs(["QC", "Tables", "Plots/Files"])
-    with result_tabs[0]:
-        fastqc_dirs = [root / "fastqc", root / "fastqc_cutadapt"]
-        htmls = []
-        for d in fastqc_dirs:
-            if d.exists():
-                htmls.extend(sorted(d.glob("*.html")))
-        if htmls:
-            selected = st.selectbox("FastQC report", htmls, format_func=lambda p: p.name)
-            components.html(selected.read_text(errors="replace"), height=900, scrolling=True)
-        else:
-            st.info("No FastQC HTML reports found.")
-
-    with result_tabs[1]:
-        candidates = [
-            (root / "star_summary" / "summary_matrix.txt", "STAR summary"),
-            (root / "counts" / "featurecounts_summary.txt", "featureCounts summary"),
-            (root / "counts" / "count_matrix.txt", "Raw count matrix"),
-        ]
-        for d in [root / "deseq2", root / "gseapy"]:
-            if d.exists():
-                for p in sorted(d.rglob("*.txt"))[:20] + sorted(d.rglob("*.csv"))[:20]:
-                    candidates.append((p, p.relative_to(root).as_posix()))
-        for path, label in candidates:
-            table_preview(path, label)
-
-    with result_tabs[2]:
-        files = result_files(project)
-        if not files:
-            st.info("No result files found.")
-            return
-        selected = st.selectbox("File", files, format_func=lambda p: p.relative_to(root).as_posix())
-        if selected.suffix.lower() in [".png"]:
-            st.image(str(selected))
-        elif selected.suffix.lower() == ".html":
-            components.html(selected.read_text(errors="replace"), height=900, scrolling=True)
-        else:
-            st.download_button(
-                f"Download {selected.name}",
-                data=selected.read_bytes(),
-                file_name=selected.name,
-                key="download_file_"+str(abs(hash(str(selected)))),
-            )
-            st.code(str(selected))
+        integrated_results_explorer(project, key_prefix="outputs_tab_"+project_id(project))
+    else:
+        render_file_browser(project, key_prefix="outputs_tab_"+project_id(project))
 
 
 def main() -> None:

@@ -32,7 +32,7 @@ http://localhost:8501
 - Submits RNA-seq jobs with existing CodeSpringLab `sbatch` wrappers from individual step tabs or the Progress tab
 - Tracks submitted job IDs and shows scheduler status/logs
 - Displays common output tables, FastQC HTML reports, plots, and downloadable files
-- Launches the existing RNA-seq Shiny Results Explorer from the Run Pipeline and Outputs tabs
+- Renders RNA-seq results directly inside Streamlit, replacing the separate Shiny Results Explorer port
 
 The notebooks and original scripts are still available. This app wraps the existing pipeline instead of replacing it.
 
@@ -40,7 +40,7 @@ The notebooks and original scripts are still available. This app wraps the exist
 
 - `Start new analysis`: choose FASTQ folder, scan samples, build `design_matrix.txt`, then run steps from the Run Pipeline tab.
 - `Resume existing analysis`: provide the old project name/results root, then click `Save setup / re-detect paths`; the app detects completed steps and recommends where to continue.
-- `Visualize existing results`: provide the project name/results root/design matrix path, then use the Outputs tab or launch the RNA-seq Results Explorer.
+- `Visualize existing results`: provide the project name/results root/design matrix path, then use the integrated Results Explorer in the Outputs tab.
 
 
 ## Project configs
@@ -68,3 +68,8 @@ If this web app is cloned as a standalone repo, point it at the pipeline checkou
 ```bash
 CSL_CODESPRINGLAB_ROOT=~/CodeSpringLab streamlit run app.py --server.address 0.0.0.0 --server.port 8501
 ```
+
+
+## Integrated Results Explorer
+
+The RNA-seq Results Explorer now renders directly in Streamlit under the same port as the web app. It includes overview/status, FastQC HTML reports, STAR and featureCounts QC, raw/RSEM/Kallisto/DESeq2 count tables, DESeq2 plots and tables, GSEA tables and plots, PDF embedding, and file downloads. The old Shiny viewer is no longer required for routine visualization.
