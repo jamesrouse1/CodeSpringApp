@@ -32,9 +32,9 @@ http://localhost:8501
 
 - `Setup`: selected project paths and imported config.
 - `Design Matrix`: scan FASTQs, edit metadata, and save `design_matrix.txt`.
-- `Progress`: project and sample-level completion tables.
-- `Run Pipeline`: submits real SLURM `sbatch` jobs for FastQC, cutadapt, STAR, Kallisto, featureCounts, and DESeq2. Submitted jobs keep running after the app or browser is closed.
-- `Results Explorer`: native Shiny viewer for QC, counts, DESeq2, GSEA, plots, PDFs, and files.
+- `Progress`: color-coded `Active`, `Complete`, and `Not started` step cards plus sample-level progress.
+- `Run Pipeline`: professional run cards that submit real SLURM `sbatch` jobs for FastQC, cutadapt, STAR, Kallisto, featureCounts, and DESeq2. Submitted jobs keep running after the app or browser is closed.
+- `Results Explorer`: sources CodeSpringLab's native `scripts_DoNotTouch/Shiny/app_server.R`, so the viewer matches the RNA-seq Shiny app instead of maintaining a separate clone.
 - `Logs`: job submissions started from this app.
 
 ## R Packages
@@ -57,3 +57,12 @@ install.packages(c("DT", "base64enc"))
 ## Job Submission
 
 Run buttons call `sbatch` from the matching CodeSpringLab analysis folder, so jobs are owned by SLURM after submission. Closing the browser or stopping the Shiny app does not cancel jobs that were already accepted by `sbatch`.
+
+
+## Port Cleanup
+
+By default, CodeSpringWeb checks for older CodeSpring/R Shiny sessions and stops them before starting. To disable that behavior:
+
+```bash
+CSL_WEB_AUTOKILL_SHINY=0 CSL_CODESPRINGLAB_ROOT=~/CodeSpringLab Rscript -e 'shiny::runApp(".", host="0.0.0.0", port=8501)'
+```

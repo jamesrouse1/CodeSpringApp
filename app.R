@@ -58,6 +58,65 @@ APP_HOME <- path.expand(Sys.getenv("CSL_WEB_HOME", unset = "~/.codespringweb"))
 dir.create(APP_HOME, recursive = TRUE, showWarnings = FALSE)
 JOBS_PATH <- file.path(APP_HOME, "jobs.tsv")
 
+cleanup_previous_shiny_processes <- function() {
+  if (identical(Sys.getenv("CSL_WEB_AUTOKILL_SHINY", unset = "1"), "0")) return(invisible(character(0)))
+  current_pid <- as.integer(Sys.getpid())
+  killed <- character(0)
+
+  kill_pid <- function(pid, reason) {
+    pid <- suppressWarnings(as.integer(pid))
+    if (is.na(pid) || pid <= 1 || identical(pid, current_pid)) return(invisible(FALSE))
+    ok <- tryCatch({
+      tools::pskill(pid, tools::SIGTERM)
+      TRUE
+    }, error = function(e) FALSE)
+    if (ok) killed <<- unique(c(killed, paste0("pid:", pid, " (", reason, ")")))
+    invisible(ok)
+  }
+
+  pidfiles <- list.files(APP_HOME, pattern = "^codespringweb_.*\\.pid$|^rnaseq_shiny_.*\\.pid$", full.names = TRUE)
+  for (pf in pidfiles) {
+    pid <- suppressWarnings(as.integer(readLines(pf, warn = FALSE, n = 1)))
+    kill_pid(pid, paste0("pidfile:", basename(pf)))
+    unlink(pf, force = TRUE)
+  }
+
+  ps_lines <- tryCatch(system2("ps", c("-eo", "pid=,command="), stdout = TRUE, stderr = FALSE), error = function(e) character(0))
+  for (line in ps_lines) {
+    line <- trimws(line)
+    m <- regexec("^([0-9]+)\\s+(.+)$", line)
+    hit <- regmatches(line, m)[[1]]
+    if (length(hit) != 3) next
+    pid <- suppressWarnings(as.integer(hit[2]))
+    cmd <- hit[3]
+    is_r <- grepl("(^|/)(R|Rscript)(\\s|$)", cmd)
+    is_shiny <- grepl("shiny::runApp|runApp\\(|CodeSpringWeb|scripts_DoNotTouch/Shiny|RNASEQ_SHINY", cmd)
+    if (is_r && is_shiny && !identical(pid, current_pid)) kill_pid(pid, "R/Shiny process")
+  }
+
+  if (nzchar(Sys.which("lsof"))) {
+    ports <- c(3838:3850, 8501:8515)
+    for (port in ports) {
+      pids <- tryCatch(system2("lsof", c("-nP", paste0("-iTCP:", port), "-sTCP:LISTEN", "-t"), stdout = TRUE, stderr = FALSE), error = function(e) character(0))
+      for (pid in unique(pids[nzchar(pids)])) {
+        cmd <- tryCatch(system2("ps", c("-p", pid, "-o", "command="), stdout = TRUE, stderr = FALSE), error = function(e) "")
+        if (grepl("(^|/)(R|Rscript)(\\s|$)", cmd) && grepl("shiny|runApp|CodeSpringWeb", cmd, ignore.case = TRUE)) {
+          kill_pid(pid, paste0("port:", port))
+        }
+      }
+    }
+  }
+
+  pid_path <- file.path(APP_HOME, paste0("codespringweb_", current_pid, ".pid"))
+  writeLines(as.character(current_pid), pid_path)
+  if (length(killed)) {
+    cat("Stopped previous CodeSpring/R Shiny sessions before starting CodeSpringWeb: ", paste(killed, collapse = ", "), "\n", sep = "")
+  } else {
+    cat("Checked for previous CodeSpring/R Shiny sessions; none needed cleanup.\n")
+  }
+  invisible(killed)
+}
+
 analysis_label <- function(x) {
   x <- tolower(as.character(x %||% "rna"))
   if (grepl("atac", x)) return("ATAC-seq")
@@ -302,23 +361,48 @@ count_files <- function(path, pattern) {
   length(list.files(path, pattern = pattern, recursive = TRUE, full.names = TRUE))
 }
 
+active_job_steps <- function(project) {
+  if (!file.exists(JOBS_PATH)) return(character(0))
+  jobs <- tryCatch(utils::read.delim(JOBS_PATH, check.names = FALSE, stringsAsFactors = FALSE), error = function(e) data.frame())
+  if (!NROW(jobs) || !"project" %in% names(jobs) || !"step" %in% names(jobs) || !"output" %in% names(jobs)) return(character(0))
+  jobs <- jobs[jobs$project == project$name, , drop = FALSE]
+  if (!NROW(jobs)) return(character(0))
+  extract_job_id <- function(x) {
+    m <- regexpr("job_id:[[:space:]]*[0-9]+", x)
+    if (m < 0) return("")
+    sub("job_id:[[:space:]]*", "", regmatches(x, m))
+  }
+  jobs$job_id <- vapply(as.character(jobs$output), extract_job_id, character(1))
+  ids <- jobs$job_id[nzchar(jobs$job_id)]
+  if (!length(ids) || !nzchar(Sys.which("squeue"))) return(character(0))
+  sq <- tryCatch(system2("squeue", c("-h", "-j", paste(unique(ids), collapse = ","), "-o", "%A"), stdout = TRUE, stderr = FALSE), error = function(e) character(0))
+  active_ids <- unique(trimws(sq[nzchar(sq)]))
+  if (!length(active_ids)) return(character(0))
+  unique(jobs$step[jobs$job_id %in% active_ids])
+}
+
+normalize_pipeline_status <- function(status) {
+  status <- as.character(status)
+  ifelse(status %in% c("Complete"), "Complete", ifelse(status %in% c("Active"), "Active", "Not started"))
+}
+
 project_status <- function(project) {
   data_dir <- project$data_dir
   design <- project$design_matrix_path
-  data.frame(
+  raw <- data.frame(
     step = c("Setup", "Design matrix", "FASTQ reads", "FastQC", "Cutadapt", "STAR", "Kallisto", "featureCounts", "Count matrix", "DESeq2", "GSEA"),
     status = c(
-      if (nzchar(project$name)) "Complete" else "Needs attention",
-      if (file.exists(design)) "Complete" else "Missing",
-      if (dir.exists(project$fastq_dir) && length(fastq_files(project$fastq_dir))) "Complete" else "Optional/missing",
-      if (count_files(file.path(data_dir, "fastqc"), "\\.html$") + count_files(file.path(data_dir, "fastqc_cutadapt"), "\\.html$") > 0) "Complete" else "Not found",
-      if (count_files(file.path(data_dir, "cutadapt"), fastq_suffix_regex) > 0) "Complete" else "Not found",
-      if (count_files(file.path(data_dir, "star"), "Aligned\\.sortedByCoord\\.out\\.bam$") > 0) "Complete" else "Not found",
-      if (count_files(file.path(data_dir, "kallisto"), "abundance\\.tsv$") > 0) "Complete" else "Not found",
-      if (count_files(file.path(data_dir, "featurecounts"), "_counts\\.txt$") > 0) "Complete" else "Not found",
-      if (file.exists(file.path(data_dir, "counts", "count_matrix.txt"))) "Complete" else "Not found",
-      if (count_files(file.path(data_dir, "deseq2"), "DEG|normalized") > 0) "Complete" else "Not found",
-      if (count_files(file.path(data_dir, "gseapy"), "\\.(csv|txt|png|pdf)$") > 0) "Complete" else "Not found"
+      if (nzchar(project$name)) "Complete" else "Not started",
+      if (file.exists(design)) "Complete" else "Not started",
+      if (dir.exists(project$fastq_dir) && length(fastq_files(project$fastq_dir))) "Complete" else "Not started",
+      if (count_files(file.path(data_dir, "fastqc"), "\\.html$") + count_files(file.path(data_dir, "fastqc_cutadapt"), "\\.html$") > 0) "Complete" else "Not started",
+      if (count_files(file.path(data_dir, "cutadapt"), fastq_suffix_regex) > 0) "Complete" else "Not started",
+      if (count_files(file.path(data_dir, "star"), "Aligned\\.sortedByCoord\\.out\\.bam$") > 0) "Complete" else "Not started",
+      if (count_files(file.path(data_dir, "kallisto"), "abundance\\.tsv$") > 0) "Complete" else "Not started",
+      if (count_files(file.path(data_dir, "featurecounts"), "_counts\\.txt$") > 0) "Complete" else "Not started",
+      if (file.exists(file.path(data_dir, "counts", "count_matrix.txt"))) "Complete" else "Not started",
+      if (count_files(file.path(data_dir, "deseq2"), "DEG|normalized") > 0) "Complete" else "Not started",
+      if (count_files(file.path(data_dir, "gseapy"), "\\.(csv|txt|png|pdf)$") > 0) "Complete" else "Not started"
     ),
     path = c(
       dirname(data_dir),
@@ -335,6 +419,33 @@ project_status <- function(project) {
     ),
     stringsAsFactors = FALSE
   )
+  active <- active_job_steps(project)
+  raw$status[raw$step %in% active & raw$status != "Complete"] <- "Active"
+  raw$status <- normalize_pipeline_status(raw$status)
+  raw
+}
+
+status_rank <- function(status) {
+  match(status, c("Active", "Complete", "Not started"), nomatch = 99)
+}
+
+status_pill <- function(status) {
+  cls <- switch(status, "Active" = "active", "Complete" = "complete", "not-started")
+  tags$span(class = paste("status-pill", cls), status)
+}
+
+status_cards <- function(df) {
+  if (!NROW(df)) return(div(class = "empty-box", "No steps available."))
+  df <- df[order(status_rank(df$status), df$step), , drop = FALSE]
+  tagList(lapply(seq_len(NROW(df)), function(i) {
+    div(class = "status-card",
+        div(class = "status-card-top",
+            tags$strong(df$step[i]),
+            status_pill(df$status[i])
+        ),
+        div(class = "status-path", df$path[i])
+    )
+  }))
 }
 
 sample_progress <- function(project) {
@@ -522,6 +633,65 @@ submit_deseq2_job <- function(project, reference, comparison, redundant = "NoRed
   submit_sbatch(project, "DESeq2", script, c(rscript, count_matrix, project$design_matrix_path, outdir, reference, comparison, redundant, project$name), "deseq2")
 }
 
+write_native_shiny_config <- function(project) {
+  cfg_dir <- file.path(APP_HOME, "native_configs")
+  dir.create(cfg_dir, recursive = TRUE, showWarnings = FALSE)
+  cfg <- file.path(cfg_dir, paste0(clean_name(project$id, "project"), "_shiny_results_config.R"))
+  lines <- c(
+    sprintf("project_name <- %s", deparse(project$name)),
+    sprintf("results_root <- %s", deparse(project$results_root)),
+    sprintf("data_dir <- %s", deparse(project$data_dir)),
+    sprintf("design_matrix_path <- %s", deparse(project$design_matrix_path)),
+    sprintf("app_dir <- %s", deparse(file.path(SCRIPTS_DIR, "Shiny"))),
+    sprintf("logo_search_dirs <- c(%s)", paste(vapply(c(SCRIPTS_DIR, file.path(SCRIPTS_DIR, "Shiny")), deparse, character(1)), collapse = ", "))
+  )
+  writeLines(lines, cfg)
+  cfg
+}
+
+load_native_rnaseq_viewer <- function(project) {
+  if (!identical(project$analysis_key, "rna")) {
+    return(list(id = project$id, ui = div(class = "empty-box", "The native Results Explorer is currently available for RNA-seq projects."), server = function(input, output, session) NULL))
+  }
+  app_file <- file.path(SCRIPTS_DIR, "Shiny", "app_server.R")
+  if (!file.exists(app_file)) {
+    return(list(id = project$id, ui = div(class = "empty-box", "Could not find CodeSpringLab's native Shiny app_server.R."), server = function(input, output, session) NULL))
+  }
+  cfg <- write_native_shiny_config(project)
+  old_cfg <- Sys.getenv("RNASEQ_SHINY_CONFIG", unset = NA_character_)
+  old_wd <- getwd()
+  on.exit({
+    if (is.na(old_cfg)) Sys.unsetenv("RNASEQ_SHINY_CONFIG") else Sys.setenv(RNASEQ_SHINY_CONFIG = old_cfg)
+    setwd(old_wd)
+  }, add = TRUE)
+  Sys.setenv(RNASEQ_SHINY_CONFIG = cfg)
+  setwd(file.path(SCRIPTS_DIR, "Shiny"))
+  env <- new.env(parent = globalenv())
+  sys.source(app_file, envir = env)
+  list(
+    id = paste(project$id, normalizePath(cfg, winslash = "/", mustWork = FALSE), sep = "::"),
+    ui = div(class = "native-results-host", env$ui),
+    server = env$server
+  )
+}
+
+run_step_meta <- function() {
+  data.frame(
+    step = c("FastQC", "Cutadapt", "STAR", "Kallisto", "featureCounts", "DESeq2"),
+    description = c(
+      "Generate per-read quality reports.",
+      "Trim adapters and short reads.",
+      "Align reads and write BAM files.",
+      "Quantify transcript abundance.",
+      "Create gene-level count files.",
+      "Run differential expression and normalized counts."
+    ),
+    button = c("run_fastqc", "run_cutadapt", "run_star", "run_kallisto", "run_featurecounts", "run_deseq2"),
+    label = c("Run FastQC", "Run cutadapt", "Run STAR", "Run Kallisto", "Run featureCounts", "Run DESeq2"),
+    stringsAsFactors = FALSE
+  )
+}
+
 list_result_files <- function(project, pattern = "\\.(txt|csv|tsv|html|png|pdf)$") {
   if (!dir.exists(project$data_dir)) return(character(0))
   list.files(project$data_dir, pattern = pattern, recursive = TRUE, full.names = TRUE)
@@ -553,6 +723,18 @@ body { background:#f5f7fb; color:#17202f; }
 .muted { color:#657084; }
 .empty-box { background:white; border:1px solid #d8dde8; border-radius:8px; padding:18px; color:#657084; }
 .btn-primary { background:#1f5eff; border-color:#1f5eff; }
+.status-toolbar { display:flex; gap:12px; align-items:flex-end; flex-wrap:wrap; margin-bottom:16px; }
+.status-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(250px, 1fr)); gap:12px; margin-bottom:18px; }
+.status-card, .run-card { background:white; border:1px solid #d8dde8; border-radius:8px; padding:14px; box-shadow:0 1px 2px rgba(15,23,36,0.04); }
+.status-card-top, .run-card-top { display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:8px; }
+.status-path { color:#657084; font-size:12px; overflow-wrap:anywhere; }
+.status-pill { display:inline-flex; align-items:center; border-radius:999px; padding:4px 9px; font-size:12px; font-weight:700; white-space:nowrap; }
+.status-pill.active { color:#7c3d00; background:#fff4d6; border:1px solid #f0c36d; }
+.status-pill.complete { color:#0b6b3a; background:#def7e8; border:1px solid #8fd8ad; }
+.status-pill.not-started { color:#526070; background:#eef2f7; border:1px solid #cfd7e3; }
+.run-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(260px, 1fr)); gap:12px; margin-top:14px; }
+.run-card p { min-height:38px; margin-bottom:12px; }
+.native-results-host { margin: -15px; }
 "
 
 ui <- fluidPage(
@@ -575,7 +757,7 @@ ui <- fluidPage(
     mainPanel(
       width = 9,
       tabsetPanel(
-        id = "main_tabs",
+        id = "web_main_tabs",
         tabPanel("Setup", br(), h3("Project Setup"), tableOutput("setup_table"), uiOutput("source_config_ui")),
         tabPanel("Design Matrix", br(), h3("Design Matrix Builder"),
                  fluidRow(
@@ -586,9 +768,19 @@ ui <- fluidPage(
                  br(),
                  actionButton("save_design", "Save design_matrix.txt", class = "btn-primary"),
                  verbatimTextOutput("design_save_status")),
-        tabPanel("Progress", br(), h3("Pipeline Progress"), table_output("status_table"), br(), h4("Sample Progress"), table_output("sample_progress_table")),
+        tabPanel("Progress", br(),
+                 h3("Pipeline Progress"),
+                 div(class = "status-toolbar",
+                     selectInput("progress_status_filter", "Show steps", choices = c("All", "Active", "Complete", "Not started"), selected = "All"),
+                     actionButton("refresh_progress", "Refresh", class = "btn-primary")
+                 ),
+                 uiOutput("status_cards_ui"),
+                 table_output("status_table"),
+                 br(),
+                 h4("Sample Progress"),
+                 table_output("sample_progress_table")),
         tabPanel("Run Pipeline", br(), h3("Run Pipeline"),
-                 tags$p(class = "muted", "Buttons submit SLURM sbatch jobs. After submission, jobs keep running even if this app or browser is closed."),
+                 tags$p(class = "muted", "Each action submits a SLURM sbatch job. Accepted jobs keep running after this app or browser is closed."),
                  fluidRow(
                    column(3, checkboxInput("use_trimmed_reads", "Use trimmed reads", value = FALSE)),
                    column(3, selectInput("feature_attr", "featureCounts attribute", choices = c("gene_id", "gene_name"), selected = "gene_id")),
@@ -600,31 +792,10 @@ ui <- fluidPage(
                    column(4, textInput("adapter2", "R2 adapter", value = "AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT")),
                    column(4, textInput("min_length", "Minimum read length", value = "20"))
                  ),
-                 fluidRow(
-                   column(2, actionButton("run_fastqc", "FastQC", class = "btn-primary")),
-                   column(2, actionButton("run_cutadapt", "cutadapt", class = "btn-primary")),
-                   column(2, actionButton("run_star", "STAR", class = "btn-primary")),
-                   column(2, actionButton("run_kallisto", "Kallisto", class = "btn-primary")),
-                   column(2, actionButton("run_featurecounts", "featureCounts", class = "btn-primary")),
-                   column(2, actionButton("run_deseq2", "DESeq2", class = "btn-primary"))
-                 ),
+                 uiOutput("run_step_cards"),
                  br(),
                  verbatimTextOutput("run_output")),
-        tabPanel("Results Explorer", br(),
-                 tabsetPanel(
-                   tabPanel("Overview", br(), table_output("results_overview"), br(), h4("Design Matrix"), table_output("design_table")),
-                   tabPanel("QC", br(), uiOutput("fastqc_select_ui"), uiOutput("fastqc_view")),
-                   tabPanel("Alignment QC", br(), h4("STAR Summary"), table_output("star_summary"), br(), h4("featureCounts Summary"), table_output("featurecounts_summary")),
-                   tabPanel("Counts", br(), tabsetPanel(
-                     tabPanel("Raw Counts", br(), table_output("count_matrix")),
-                     tabPanel("RSEM", br(), uiOutput("rsem_file_ui"), table_output("rsem_table")),
-                     tabPanel("Kallisto", br(), uiOutput("kallisto_file_ui"), table_output("kallisto_table")),
-                     tabPanel("DESeq2 Normalized", br(), uiOutput("norm_file_ui"), table_output("norm_table"))
-                   )),
-                   tabPanel("DESeq2", br(), uiOutput("deseq_file_ui"), uiOutput("deseq_file_view")),
-                   tabPanel("GSEA", br(), uiOutput("gsea_file_ui"), uiOutput("gsea_file_view")),
-                   tabPanel("Files", br(), uiOutput("all_file_ui"), uiOutput("all_file_view"))
-                 )),
+        tabPanel("Results Explorer", uiOutput("native_results_ui")),
         tabPanel("Logs", br(), h3("Submitted Jobs"), table_output("jobs_table"))
       )
     )
@@ -635,6 +806,8 @@ server <- function(input, output, session) {
   projects <- reactiveVal(discover_projects())
   design_state <- reactiveVal(data.frame())
   run_message <- reactiveVal("")
+  progress_refresh <- reactiveVal(Sys.time())
+  native_registered_id <- reactiveVal("")
 
   filtered_projects <- reactive({
     p <- projects()
@@ -738,9 +911,41 @@ server <- function(input, output, session) {
     output$design_save_status <- renderText(msg)
   })
 
-  output$status_table <- render_csl_table(project_status(current_project()), page_length = 20)
+  progress_status <- reactive({
+    progress_refresh()
+    df <- project_status(current_project())
+    filt <- input$progress_status_filter %||% "All"
+    if (!identical(filt, "All")) df <- df[df$status == filt, , drop = FALSE]
+    df[order(status_rank(df$status), df$step), , drop = FALSE]
+  })
 
-  output$sample_progress_table <- render_csl_table(sample_progress(current_project()), page_length = 25)
+  observeEvent(input$refresh_progress, {
+    progress_refresh(Sys.time())
+  })
+
+  output$status_cards_ui <- renderUI({
+    div(class = "status-grid", status_cards(progress_status()))
+  })
+
+  output$status_table <- render_csl_table(progress_status(), page_length = 20)
+
+  output$sample_progress_table <- render_csl_table({
+    progress_refresh()
+    sample_progress(current_project())
+  }, page_length = 25)
+
+  output$run_step_cards <- renderUI({
+    status <- project_status(current_project())
+    meta <- run_step_meta()
+    div(class = "run-grid", lapply(seq_len(NROW(meta)), function(i) {
+      st <- status$status[match(meta$step[i], status$step)] %||% "Not started"
+      div(class = "run-card",
+          div(class = "run-card-top", tags$strong(meta$step[i]), status_pill(st)),
+          tags$p(class = "muted", meta$description[i]),
+          actionButton(meta$button[i], meta$label[i], class = "btn-primary")
+      )
+    }))
+  })
 
   observeEvent(input$run_fastqc, {
     run_message(submit_fastqc_jobs(current_project(), isTRUE(input$use_trimmed_reads)))
@@ -765,6 +970,23 @@ server <- function(input, output, session) {
     }
   })
   output$run_output <- renderText(run_message())
+
+
+  native_results_app <- reactive({
+    load_native_rnaseq_viewer(current_project())
+  })
+
+  output$native_results_ui <- renderUI({
+    native_results_app()$ui
+  })
+
+  observeEvent(native_results_app(), {
+    app <- native_results_app()
+    if (!identical(native_registered_id(), app$id)) {
+      app$server(input, output, session)
+      native_registered_id(app$id)
+    }
+  }, ignoreInit = FALSE)
 
   output$results_overview <- render_csl_table(project_status(current_project()), page_length = 20)
   output$design_table <- render_csl_table(safe_read_table(current_project()$design_matrix_path), page_length = 25)
@@ -813,4 +1035,4 @@ server <- function(input, output, session) {
   }, page_length = 25)
 }
 
-shinyApp(ui, server)
+shinyApp(ui, server, onStart = cleanup_previous_shiny_processes)
