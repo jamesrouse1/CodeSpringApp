@@ -956,30 +956,44 @@ status_class <- function(status) {
   paste("sample-status", key)
 }
 
-sample_progress_matrix <- function(progress_df) {
-  if (!NROW(progress_df)) return(data.frame())
+sample_progress_matrix_ui <- function(progress_df) {
+  if (!NROW(progress_df)) return(div(class = "empty-box", "No sample progress available yet."))
   steps <- c("FastQC", "Cutadapt", "STAR", "RSEM optional", "Kallisto optional", "featureCounts")
   samples <- unique(progress_df$sample)
-  out <- data.frame(Sample = samples, stringsAsFactors = FALSE)
-  for (step in steps) {
-    out[[step]] <- vapply(samples, function(sample) {
-      hit <- progress_df[progress_df$sample == sample & progress_df$step == step, , drop = FALSE]
-      if (!NROW(hit)) return("")
-      title <- paste0(
-        "Status: ", hit$status[1],
-        "\nBytes: ", hit$output_bytes[1],
-        "\nPath: ", hit$target[1],
-        if (nzchar(hit$note[1])) paste0("\nNote: ", hit$note[1]) else ""
-      )
-      sprintf(
-        '<span class="%s" title="%s">%s</span>',
-        status_class(hit$status[1]),
-        htmltools::htmlEscape(title),
-        htmltools::htmlEscape(hit$display_status[1])
-      )
-    }, character(1))
-  }
-  out
+  div(
+    class = "sample-matrix-wrap",
+    tags$table(
+      class = "sample-matrix",
+      tags$thead(
+        tags$tr(c(
+          list(tags$th("Sample")),
+          lapply(steps, tags$th)
+        ))
+      ),
+      tags$tbody(lapply(samples, function(sample) {
+        tags$tr(c(
+          list(tags$td(class = "sample-name", sample)),
+          lapply(steps, function(step) {
+            hit <- progress_df[progress_df$sample == sample & progress_df$step == step, , drop = FALSE]
+            if (!NROW(hit)) return(tags$td(""))
+            title <- paste0(
+              "Status: ", hit$status[1],
+              "\nBytes: ", hit$output_bytes[1],
+              "\nPath: ", hit$target[1],
+              if (nzchar(hit$note[1])) paste0("\nNote: ", hit$note[1]) else ""
+            )
+            tags$td(
+              tags$span(
+                class = status_class(hit$status[1]),
+                title = title,
+                hit$display_status[1]
+              )
+            )
+          })
+        ))
+      }))
+    )
+  )
 }
 
 save_job <- function(project, step, command, output = "") {
@@ -1395,6 +1409,13 @@ body { background:#eef3f8; color:#17202f; }
 .button-row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
 .setup-logo-panel { min-height:280px; background:white; border:1px solid #d8dde8; border-radius:8px; padding:24px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:24px; box-shadow:0 8px 20px rgba(15,23,36,.05); }
 .setup-logo-panel img { max-width:100%; max-height:150px; object-fit:contain; }
+.sample-matrix-wrap { width:100%; overflow:auto; background:white; border:1px solid #d8dde8; border-radius:8px; padding:10px; box-shadow:0 1px 2px rgba(15,23,36,.04); }
+.sample-matrix { width:100%; min-width:860px; border-collapse:separate; border-spacing:0; }
+.sample-matrix th { position:sticky; top:0; z-index:1; background:#edf4fb; color:#304a66; font-size:12px; text-transform:uppercase; letter-spacing:.04em; padding:10px 8px; border-bottom:1px solid #c7d6e8; text-align:center; }
+.sample-matrix td { padding:9px 8px; border-bottom:1px solid #edf1f6; text-align:center; vertical-align:middle; }
+.sample-matrix tr:nth-child(even) td { background:#f8fafc; }
+.sample-matrix .sample-name { position:sticky; left:0; z-index:2; background:white; text-align:left; font-weight:800; color:#17202f; min-width:130px; }
+.sample-matrix tr:nth-child(even) .sample-name { background:#f8fafc; }
 .sample-status { display:inline-flex; width:100%; min-width:112px; justify-content:center; border-radius:999px; padding:5px 9px; font-size:12px; font-weight:800; border:1px solid #cfd7e3; background:#eef2f7; color:#526070; cursor:help; }
 .sample-status.completed { background:#def7e8; color:#0b6b3a; border-color:#8fd8ad; }
 .sample-status.running, .sample-status.running-no-growth-yet { background:#fff4d6; color:#7c3d00; border-color:#f0c36d; }
@@ -1485,7 +1506,7 @@ ui <- fluidPage(
                  table_output("status_table"),
                  br(),
                  h4("Sample Progress"),
-                 table_output("sample_progress_table"),
+                 uiOutput("sample_progress_matrix_ui"),
                  div(class = "job-table-wrap", h4("Submitted Jobs"), table_output("active_jobs_table"))),
         tabPanel("Run Pipeline", br(), h3("Run Pipeline"),
                  tags$p(class = "muted", "Each tool has its own settings. Jobs are submitted with SLURM sbatch and keep running after this app or browser is closed."),
@@ -1701,9 +1722,9 @@ server <- function(input, output, session) {
     sample_progress_state(res$table)
   })
 
-  output$sample_progress_table <- render_csl_table({
-    sample_progress_matrix(sample_progress_state())
-  }, page_length = 25, escape = FALSE)
+  output$sample_progress_matrix_ui <- renderUI({
+    sample_progress_matrix_ui(sample_progress_state())
+  })
 
   output$active_jobs_table <- render_csl_table({
     progress_refresh()
