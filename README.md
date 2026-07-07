@@ -42,14 +42,16 @@ http://localhost:8501
 Required:
 
 ```r
-install.packages(c("shiny", "DT"))
+install.packages("shiny")
 ```
 
-Recommended for inline PNG/PDF rendering:
+Optional but nicer:
 
 ```r
-install.packages("base64enc")
+install.packages(c("DT", "base64enc"))
 ```
+
+`DT` enables editable/searchable/scrollable tables. Without it, the app still launches with standard Shiny tables, matching the original CodeSpringLab Shiny fallback behavior.
 
 
 ## Job Submission

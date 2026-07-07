@@ -1,10 +1,27 @@
 library(shiny)
 
 DT_AVAILABLE <- requireNamespace("DT", quietly = TRUE)
-if (!DT_AVAILABLE) {
-  stop("The DT package is required. Install it with install.packages('DT').")
-}
 BASE64_AVAILABLE <- requireNamespace("base64enc", quietly = TRUE)
+
+table_output <- function(output_id) {
+  if (DT_AVAILABLE) DT::dataTableOutput(output_id) else tableOutput(output_id)
+}
+
+render_csl_table <- function(expr, page_length = 25, editable = FALSE) {
+  if (DT_AVAILABLE) {
+    DT::renderDataTable({
+      df <- expr
+      if (!NROW(df)) df <- data.frame()
+      DT::datatable(df, editable = editable, rownames = FALSE, options = list(scrollX = TRUE, pageLength = page_length))
+    })
+  } else {
+    renderTable({
+      df <- expr
+      if (!NROW(df)) return(data.frame())
+      utils::head(df, 500)
+    }, striped = TRUE, bordered = TRUE, spacing = "s")
+  }
+}
 
 `%||%` <- function(x, y) {
   if (is.null(x) || length(x) == 0 || (length(x) == 1 && is.na(x)) || !nzchar(as.character(x)[1])) y else x
@@ -565,11 +582,11 @@ ui <- fluidPage(
                    column(8, textInput("metadata_cols", "Metadata columns", value = "treatment", placeholder = "treatment, batch, replicate")),
                    column(4, br(), actionButton("scan_fastqs", "Scan FASTQ folder", class = "btn-primary"))
                  ),
-                 DT::dataTableOutput("design_editor"),
+                 table_output("design_editor"),
                  br(),
                  actionButton("save_design", "Save design_matrix.txt", class = "btn-primary"),
                  verbatimTextOutput("design_save_status")),
-        tabPanel("Progress", br(), h3("Pipeline Progress"), DT::dataTableOutput("status_table"), br(), h4("Sample Progress"), DT::dataTableOutput("sample_progress_table")),
+        tabPanel("Progress", br(), h3("Pipeline Progress"), table_output("status_table"), br(), h4("Sample Progress"), table_output("sample_progress_table")),
         tabPanel("Run Pipeline", br(), h3("Run Pipeline"),
                  tags$p(class = "muted", "Buttons submit SLURM sbatch jobs. After submission, jobs keep running even if this app or browser is closed."),
                  fluidRow(
@@ -595,20 +612,20 @@ ui <- fluidPage(
                  verbatimTextOutput("run_output")),
         tabPanel("Results Explorer", br(),
                  tabsetPanel(
-                   tabPanel("Overview", br(), DT::dataTableOutput("results_overview"), br(), h4("Design Matrix"), DT::dataTableOutput("design_table")),
+                   tabPanel("Overview", br(), table_output("results_overview"), br(), h4("Design Matrix"), table_output("design_table")),
                    tabPanel("QC", br(), uiOutput("fastqc_select_ui"), uiOutput("fastqc_view")),
-                   tabPanel("Alignment QC", br(), h4("STAR Summary"), DT::dataTableOutput("star_summary"), br(), h4("featureCounts Summary"), DT::dataTableOutput("featurecounts_summary")),
+                   tabPanel("Alignment QC", br(), h4("STAR Summary"), table_output("star_summary"), br(), h4("featureCounts Summary"), table_output("featurecounts_summary")),
                    tabPanel("Counts", br(), tabsetPanel(
-                     tabPanel("Raw Counts", br(), DT::dataTableOutput("count_matrix")),
-                     tabPanel("RSEM", br(), uiOutput("rsem_file_ui"), DT::dataTableOutput("rsem_table")),
-                     tabPanel("Kallisto", br(), uiOutput("kallisto_file_ui"), DT::dataTableOutput("kallisto_table")),
-                     tabPanel("DESeq2 Normalized", br(), uiOutput("norm_file_ui"), DT::dataTableOutput("norm_table"))
+                     tabPanel("Raw Counts", br(), table_output("count_matrix")),
+                     tabPanel("RSEM", br(), uiOutput("rsem_file_ui"), table_output("rsem_table")),
+                     tabPanel("Kallisto", br(), uiOutput("kallisto_file_ui"), table_output("kallisto_table")),
+                     tabPanel("DESeq2 Normalized", br(), uiOutput("norm_file_ui"), table_output("norm_table"))
                    )),
                    tabPanel("DESeq2", br(), uiOutput("deseq_file_ui"), uiOutput("deseq_file_view")),
                    tabPanel("GSEA", br(), uiOutput("gsea_file_ui"), uiOutput("gsea_file_view")),
                    tabPanel("Files", br(), uiOutput("all_file_ui"), uiOutput("all_file_view"))
                  )),
-        tabPanel("Logs", br(), h3("Submitted Jobs"), DT::dataTableOutput("jobs_table"))
+        tabPanel("Logs", br(), h3("Submitted Jobs"), table_output("jobs_table"))
       )
     )
   )
@@ -688,11 +705,11 @@ server <- function(input, output, session) {
     }
   }, ignoreInit = FALSE)
 
-  output$design_editor <- DT::renderDataTable({
+  output$design_editor <- render_csl_table({
     df <- design_state()
     if (!NROW(df)) df <- data.frame(include = logical(), sample = character(), treatment = character(), filename = character(), status = character())
-    DT::datatable(df, editable = TRUE, rownames = FALSE, options = list(scrollX = TRUE, pageLength = 25))
-  })
+    df
+  }, page_length = 25, editable = TRUE)
 
   observeEvent(input$design_editor_cell_edit, {
     info <- input$design_editor_cell_edit
@@ -712,13 +729,9 @@ server <- function(input, output, session) {
     output$design_save_status <- renderText(msg)
   })
 
-  output$status_table <- DT::renderDataTable({
-    DT::datatable(project_status(current_project()), rownames = FALSE, options = list(pageLength = 20, scrollX = TRUE))
-  })
+  output$status_table <- render_csl_table(project_status(current_project()), page_length = 20)
 
-  output$sample_progress_table <- DT::renderDataTable({
-    DT::datatable(sample_progress(current_project()), rownames = FALSE, options = list(pageLength = 25, scrollX = TRUE))
-  })
+  output$sample_progress_table <- render_csl_table(sample_progress(current_project()), page_length = 25)
 
   observeEvent(input$run_fastqc, {
     run_message(submit_fastqc_jobs(current_project(), isTRUE(input$use_trimmed_reads)))
@@ -744,12 +757,8 @@ server <- function(input, output, session) {
   })
   output$run_output <- renderText(run_message())
 
-  output$results_overview <- DT::renderDataTable({
-    DT::datatable(project_status(current_project()), rownames = FALSE, options = list(scrollX = TRUE, pageLength = 20))
-  })
-  output$design_table <- DT::renderDataTable({
-    DT::datatable(safe_read_table(current_project()$design_matrix_path), rownames = FALSE, options = list(scrollX = TRUE, pageLength = 25))
-  })
+  output$results_overview <- render_csl_table(project_status(current_project()), page_length = 20)
+  output$design_table <- render_csl_table(safe_read_table(current_project()$design_matrix_path), page_length = 25)
   output$fastqc_select_ui <- renderUI({
     p <- current_project()
     files <- c(list.files(file.path(p$data_dir, "fastqc"), pattern = "\\.html$", full.names = TRUE),
@@ -757,42 +766,42 @@ server <- function(input, output, session) {
     selectInput("fastqc_file", "FastQC report", choices = files, selected = files[1] %||% character(0))
   })
   output$fastqc_view <- renderUI({ req(input$fastqc_file); image_or_file_ui(input$fastqc_file, "1050px") })
-  output$star_summary <- DT::renderDataTable({ DT::datatable(safe_read_table(file.path(current_project()$data_dir, "star_summary", "summary_matrix.txt")), rownames = FALSE, options = list(scrollX = TRUE)) })
-  output$featurecounts_summary <- DT::renderDataTable({ DT::datatable(safe_read_table(file.path(current_project()$data_dir, "counts", "featurecounts_summary.txt")), rownames = FALSE, options = list(scrollX = TRUE)) })
-  output$count_matrix <- DT::renderDataTable({ DT::datatable(safe_read_table(file.path(current_project()$data_dir, "counts", "count_matrix.txt"), 5000), rownames = FALSE, options = list(scrollX = TRUE, pageLength = 25)) })
+  output$star_summary <- render_csl_table(safe_read_table(file.path(current_project()$data_dir, "star_summary", "summary_matrix.txt")), page_length = 25)
+  output$featurecounts_summary <- render_csl_table(safe_read_table(file.path(current_project()$data_dir, "counts", "featurecounts_summary.txt")), page_length = 25)
+  output$count_matrix <- render_csl_table(safe_read_table(file.path(current_project()$data_dir, "counts", "count_matrix.txt"), 5000), page_length = 25)
 
   file_select <- function(id, label, dir, pattern) {
     files <- if (dir.exists(dir)) list.files(dir, pattern = pattern, recursive = TRUE, full.names = TRUE) else character(0)
     selectInput(id, label, choices = files, selected = files[1] %||% character(0))
   }
   output$rsem_file_ui <- renderUI({ file_select("rsem_file", "RSEM table", file.path(current_project()$data_dir, "rsem"), "\\.(txt|csv|results)$") })
-  output$rsem_table <- DT::renderDataTable({ req(input$rsem_file); DT::datatable(safe_read_table(input$rsem_file, 5000), rownames = FALSE, options = list(scrollX = TRUE)) })
+  output$rsem_table <- render_csl_table({ req(input$rsem_file); safe_read_table(input$rsem_file, 5000) }, page_length = 25)
   output$kallisto_file_ui <- renderUI({ file_select("kallisto_file", "Kallisto table", file.path(current_project()$data_dir, "kallisto"), "\\.(tsv|txt|csv)$") })
-  output$kallisto_table <- DT::renderDataTable({ req(input$kallisto_file); DT::datatable(safe_read_table(input$kallisto_file, 5000), rownames = FALSE, options = list(scrollX = TRUE)) })
+  output$kallisto_table <- render_csl_table({ req(input$kallisto_file); safe_read_table(input$kallisto_file, 5000) }, page_length = 25)
   output$norm_file_ui <- renderUI({ file_select("norm_file", "DESeq2 normalized counts", file.path(current_project()$data_dir, "deseq2"), "normalized.*\\.(txt|csv)$") })
-  output$norm_table <- DT::renderDataTable({ req(input$norm_file); DT::datatable(safe_read_table(input$norm_file, 5000), rownames = FALSE, options = list(scrollX = TRUE)) })
+  output$norm_table <- render_csl_table({ req(input$norm_file); safe_read_table(input$norm_file, 5000) }, page_length = 25)
   output$deseq_file_ui <- renderUI({ file_select("deseq_file", "DESeq2 file", file.path(current_project()$data_dir, "deseq2"), "\\.(txt|csv|png|pdf)$") })
   output$deseq_file_view <- renderUI({
     req(input$deseq_file)
     if (tolower(tools::file_ext(input$deseq_file)) %in% c("txt", "csv", "tsv")) {
-      DT::dataTableOutput("deseq_selected_table")
+      table_output("deseq_selected_table")
     } else image_or_file_ui(input$deseq_file)
   })
-  output$deseq_selected_table <- DT::renderDataTable({ req(input$deseq_file); DT::datatable(safe_read_table(input$deseq_file, 5000), rownames = FALSE, options = list(scrollX = TRUE)) })
+  output$deseq_selected_table <- render_csl_table({ req(input$deseq_file); safe_read_table(input$deseq_file, 5000) }, page_length = 25)
   output$gsea_file_ui <- renderUI({ file_select("gsea_file", "GSEA file", file.path(current_project()$data_dir, "gseapy"), "\\.(txt|csv|png|pdf)$") })
   output$gsea_file_view <- renderUI({
     req(input$gsea_file)
     if (tolower(tools::file_ext(input$gsea_file)) %in% c("txt", "csv", "tsv")) {
-      DT::dataTableOutput("gsea_selected_table")
+      table_output("gsea_selected_table")
     } else image_or_file_ui(input$gsea_file, "950px")
   })
-  output$gsea_selected_table <- DT::renderDataTable({ req(input$gsea_file); DT::datatable(safe_read_table(input$gsea_file, 5000), rownames = FALSE, options = list(scrollX = TRUE)) })
+  output$gsea_selected_table <- render_csl_table({ req(input$gsea_file); safe_read_table(input$gsea_file, 5000) }, page_length = 25)
   output$all_file_ui <- renderUI({ file_select("all_file", "Result file", current_project()$data_dir, "\\.(txt|csv|tsv|html|png|pdf)$") })
   output$all_file_view <- renderUI({ req(input$all_file); image_or_file_ui(input$all_file) })
-  output$jobs_table <- DT::renderDataTable({
-    if (!file.exists(JOBS_PATH)) return(DT::datatable(data.frame()))
-    DT::datatable(utils::read.delim(JOBS_PATH, check.names = FALSE), rownames = FALSE, options = list(scrollX = TRUE))
-  })
+  output$jobs_table <- render_csl_table({
+    if (!file.exists(JOBS_PATH)) return(data.frame())
+    utils::read.delim(JOBS_PATH, check.names = FALSE)
+  }, page_length = 25)
 }
 
 shinyApp(ui, server)
