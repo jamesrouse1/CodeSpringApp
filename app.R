@@ -7,7 +7,7 @@ table_output <- function(output_id) {
   if (DT_AVAILABLE) DT::dataTableOutput(output_id) else tableOutput(output_id)
 }
 
-render_csl_table <- function(expr, page_length = 25, editable = FALSE, scroll_y = "520px", escape = TRUE) {
+render_csl_table <- function(expr, page_length = 50, editable = FALSE, scroll_y = "520px", escape = TRUE) {
   if (DT_AVAILABLE) {
     DT::renderDataTable({
       df <- expr
@@ -17,14 +17,23 @@ render_csl_table <- function(expr, page_length = 25, editable = FALSE, scroll_y 
         editable = editable,
         rownames = FALSE,
         escape = escape,
-        options = list(scrollX = TRUE, scrollY = scroll_y, pageLength = page_length)
+        options = list(
+          scrollX = TRUE,
+          scrollY = scroll_y,
+          pageLength = page_length,
+          lengthMenu = list(c(25, 50, 100, -1), c("25", "50", "100", "All")),
+          paging = TRUE,
+          pagingType = "full_numbers",
+          dom = "lfrtip",
+          autoWidth = FALSE
+        )
       )
     })
   } else {
     renderTable({
       df <- expr
       if (!NROW(df)) return(data.frame())
-      utils::head(df, 500)
+      utils::head(df, 50)
     }, striped = TRUE, bordered = TRUE, spacing = "s")
   }
 }
@@ -385,14 +394,23 @@ safe_read_table <- function(path, n = Inf) {
   })
 }
 
-render_data_table <- function(df, page_length = 25, height = NULL) {
+render_data_table <- function(df, page_length = 50, height = NULL) {
   if (!NROW(df)) return(tags$div(class = "empty-box", "No rows available."))
   if (DT_AVAILABLE) {
     DT::datatable(
       df,
       rownames = FALSE,
       filter = "top",
-      options = list(pageLength = page_length, scrollX = TRUE, scrollY = height %||% "520px")
+      options = list(
+        pageLength = page_length,
+        lengthMenu = list(c(25, 50, 100, -1), c("25", "50", "100", "All")),
+        paging = TRUE,
+        pagingType = "full_numbers",
+        dom = "lfrtip",
+        scrollX = TRUE,
+        scrollY = height %||% "520px",
+        autoWidth = FALSE
+      )
     )
   } else {
     tableOutput(NULL)
@@ -1858,7 +1876,7 @@ server <- function(input, output, session) {
   }, ignoreInit = FALSE)
 
   output$results_overview <- render_csl_table(project_status(current_project()), page_length = 20)
-  output$design_table <- render_csl_table(safe_read_table(current_project()$design_matrix_path), page_length = 25)
+  output$design_table <- render_csl_table(safe_read_table(current_project()$design_matrix_path), page_length = 50)
   output$fastqc_select_ui <- renderUI({
     p <- current_project()
     files <- c(list.files(file.path(p$data_dir, "fastqc"), pattern = "\\.html$", full.names = TRUE),
@@ -1866,20 +1884,20 @@ server <- function(input, output, session) {
     selectInput("fastqc_file", "FastQC report", choices = files, selected = files[1] %||% character(0))
   })
   output$fastqc_view <- renderUI({ req(input$fastqc_file); image_or_file_ui(input$fastqc_file, "1050px") })
-  output$star_summary <- render_csl_table(safe_read_table(file.path(current_project()$data_dir, "star_summary", "summary_matrix.txt")), page_length = 25)
-  output$featurecounts_summary <- render_csl_table(safe_read_table(file.path(current_project()$data_dir, "counts", "featurecounts_summary.txt")), page_length = 25)
-  output$count_matrix <- render_csl_table(safe_read_table(file.path(current_project()$data_dir, "counts", "count_matrix.txt"), 5000), page_length = 25)
+  output$star_summary <- render_csl_table(safe_read_table(file.path(current_project()$data_dir, "star_summary", "summary_matrix.txt")), page_length = 50)
+  output$featurecounts_summary <- render_csl_table(safe_read_table(file.path(current_project()$data_dir, "counts", "featurecounts_summary.txt")), page_length = 50)
+  output$count_matrix <- render_csl_table(safe_read_table(file.path(current_project()$data_dir, "counts", "count_matrix.txt"), 5000), page_length = 50)
 
   file_select <- function(id, label, dir, pattern) {
     files <- if (dir.exists(dir)) list.files(dir, pattern = pattern, recursive = TRUE, full.names = TRUE) else character(0)
     selectInput(id, label, choices = files, selected = files[1] %||% character(0))
   }
   output$rsem_file_ui <- renderUI({ file_select("rsem_file", "RSEM table", file.path(current_project()$data_dir, "rsem"), "\\.(txt|csv|results)$") })
-  output$rsem_table <- render_csl_table({ req(input$rsem_file); safe_read_table(input$rsem_file, 5000) }, page_length = 25)
+  output$rsem_table <- render_csl_table({ req(input$rsem_file); safe_read_table(input$rsem_file, 5000) }, page_length = 50)
   output$kallisto_file_ui <- renderUI({ file_select("kallisto_file", "Kallisto table", file.path(current_project()$data_dir, "kallisto"), "\\.(tsv|txt|csv)$") })
-  output$kallisto_table <- render_csl_table({ req(input$kallisto_file); safe_read_table(input$kallisto_file, 5000) }, page_length = 25)
+  output$kallisto_table <- render_csl_table({ req(input$kallisto_file); safe_read_table(input$kallisto_file, 5000) }, page_length = 50)
   output$norm_file_ui <- renderUI({ file_select("norm_file", "DESeq2 normalized counts", file.path(current_project()$data_dir, "deseq2"), "normalized.*\\.(txt|csv)$") })
-  output$norm_table <- render_csl_table({ req(input$norm_file); safe_read_table(input$norm_file, 5000) }, page_length = 25)
+  output$norm_table <- render_csl_table({ req(input$norm_file); safe_read_table(input$norm_file, 5000) }, page_length = 50)
   output$deseq_file_ui <- renderUI({ file_select("deseq_file", "DESeq2 file", file.path(current_project()$data_dir, "deseq2"), "\\.(txt|csv|png|pdf)$") })
   output$deseq_file_view <- renderUI({
     req(input$deseq_file)
@@ -1887,7 +1905,7 @@ server <- function(input, output, session) {
       table_output("deseq_selected_table")
     } else image_or_file_ui(input$deseq_file)
   })
-  output$deseq_selected_table <- render_csl_table({ req(input$deseq_file); safe_read_table(input$deseq_file, 5000) }, page_length = 25)
+  output$deseq_selected_table <- render_csl_table({ req(input$deseq_file); safe_read_table(input$deseq_file, 5000) }, page_length = 50)
   output$gsea_file_ui <- renderUI({ file_select("gsea_file", "GSEA file", file.path(current_project()$data_dir, "gseapy"), "\\.(txt|csv|png|pdf)$") })
   output$gsea_file_view <- renderUI({
     req(input$gsea_file)
@@ -1895,13 +1913,13 @@ server <- function(input, output, session) {
       table_output("gsea_selected_table")
     } else image_or_file_ui(input$gsea_file, "950px")
   })
-  output$gsea_selected_table <- render_csl_table({ req(input$gsea_file); safe_read_table(input$gsea_file, 5000) }, page_length = 25)
+  output$gsea_selected_table <- render_csl_table({ req(input$gsea_file); safe_read_table(input$gsea_file, 5000) }, page_length = 50)
   output$all_file_ui <- renderUI({ file_select("all_file", "Result file", current_project()$data_dir, "\\.(txt|csv|tsv|html|png|pdf)$") })
   output$all_file_view <- renderUI({ req(input$all_file); image_or_file_ui(input$all_file) })
   output$jobs_table <- render_csl_table({
     progress_refresh()
     job_history_display(current_project())
-  }, page_length = 25)
+  }, page_length = 50)
 
   output$log_file_ui <- renderUI({
     choices <- log_file_choices(current_project())
