@@ -1487,6 +1487,49 @@ body {
   color: #132033;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 }
+
+body > .container-fluid > .row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-left: 0;
+  margin-right: 0;
+}
+body > .container-fluid > .row > .col-sm-2 {
+  float: none;
+  width: 220px;
+  min-width: 220px;
+  padding-left: 4px;
+  padding-right: 4px;
+}
+body > .container-fluid > .row > .col-sm-10 {
+  float: none;
+  width: calc(100% - 232px);
+  max-width: calc(100% - 232px);
+  padding-left: 4px;
+  padding-right: 0;
+}
+.native-results-host .col-sm-2 {
+  width: 220px !important;
+  min-width: 220px !important;
+}
+.native-results-host .col-sm-10 {
+  width: calc(100% - 220px) !important;
+  max-width: calc(100% - 220px) !important;
+}
+@media (max-width: 900px) {
+  body > .container-fluid > .row {
+    display: block;
+  }
+  body > .container-fluid > .row > .col-sm-2,
+  body > .container-fluid > .row > .col-sm-10,
+  .native-results-host .col-sm-2,
+  .native-results-host .col-sm-10 {
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+  }
+}
 .container-fluid { padding: 22px 28px 34px 28px; }
 .csl-header {
   background: linear-gradient(135deg, #07111f 0%, #0b2b4a 58%, #0f6b68 100%);
@@ -1606,7 +1649,7 @@ table.dataTable tbody td:first-child, table.dataTable thead th:first-child {
   max-width: 190px;
 }
 .native-results-host .qc-report-frame {
-  min-width: 1120px !important;
+  min-width: 1320px !important;
 }
 
 .progress-header-row {
