@@ -2727,9 +2727,19 @@ server <- function(input, output, session) {
     progress_refresh(Sys.time())
   }
 
+  safe_refresh_progress_now <- function(context = "refresh") {
+    tryCatch(
+      refresh_progress_now(),
+      error = function(e) {
+        run_message(paste("Progress", context, "failed:", conditionMessage(e)))
+        progress_refresh(Sys.time())
+      }
+    )
+  }
+
   finish_submit_refresh <- function() {
     session$onFlushed(function() {
-      refresh_progress_now()
+      safe_refresh_progress_now("refresh")
     }, once = TRUE)
   }
 
@@ -2757,7 +2767,10 @@ server <- function(input, output, session) {
     msg <- tryCatch(force(expr), error = function(e) paste("ERROR submitting", label, ":", conditionMessage(e)))
     run_message(msg)
     if (!startsWith(msg, "ERROR")) {
-      mark_submission_active(label, input_mode)
+      tryCatch(
+        mark_submission_active(label, input_mode),
+        error = function(e) run_message(paste(msg, "\nProgress display update failed:", conditionMessage(e)))
+      )
       finish_submit_refresh()
     } else {
       progress_refresh(Sys.time())
@@ -2928,7 +2941,7 @@ server <- function(input, output, session) {
 
   observeEvent(input$project_id, {
     write_last_project_id(input$project_id %||% "__new__")
-    refresh_progress_now()
+    safe_refresh_progress_now("project switch")
   }, ignoreInit = FALSE)
 
   output$project_card <- renderUI({
@@ -3094,11 +3107,11 @@ server <- function(input, output, session) {
 
   observe({
     invalidateLater(PROGRESS_REFRESH_MS, session)
-    if ((input$web_main_tabs %||% "") %in% c("Progress", "Run Pipeline")) refresh_progress_now()
+    if ((input$web_main_tabs %||% "") %in% c("Progress", "Run Pipeline")) safe_refresh_progress_now("auto refresh")
   })
 
   observeEvent(input$web_main_tabs, {
-    if ((input$web_main_tabs %||% "") %in% c("Progress", "Run Pipeline")) refresh_progress_now()
+    if ((input$web_main_tabs %||% "") %in% c("Progress", "Run Pipeline")) safe_refresh_progress_now("tab refresh")
   }, ignoreInit = TRUE)
 
   output$progress_updated <- renderText({
@@ -3113,7 +3126,7 @@ server <- function(input, output, session) {
   })
 
   observeEvent(input$refresh_progress, {
-    refresh_progress_now()
+    safe_refresh_progress_now("manual refresh")
   })
 
   output$pipeline_stepper <- renderUI({
