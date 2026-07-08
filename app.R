@@ -790,6 +790,10 @@ job_history_display <- function(project) {
 
 job_history_progress_display <- function(project) {
   jobs <- job_history(project)
+  job_history_progress_display_from_jobs(jobs)
+}
+
+job_history_progress_display_from_jobs <- function(jobs) {
   if (!NROW(jobs)) return(jobs)
   keep <- intersect(c("time", "step", "sample", "job_id", "slurm_state", "elapsed", "start_time", "end_time"), names(jobs))
   jobs[, keep, drop = FALSE]
@@ -797,6 +801,10 @@ job_history_progress_display <- function(project) {
 
 last_job_modes <- function(project) {
   jobs <- job_history(project)
+  last_job_modes_from_jobs(jobs)
+}
+
+last_job_modes_from_jobs <- function(jobs) {
   if (!NROW(jobs) || !"input_mode" %in% names(jobs)) return(setNames(character(0), character(0)))
   jobs <- jobs[nzchar(jobs$input_mode), , drop = FALSE]
   if (!NROW(jobs)) return(setNames(character(0), character(0)))
@@ -938,6 +946,10 @@ active_job_steps <- function(project) {
 
 active_job_state_map <- function(project) {
   jobs <- job_history(project)
+  active_job_state_map_from_jobs(jobs)
+}
+
+active_job_state_map_from_jobs <- function(jobs) {
   if (!NROW(jobs) || !"slurm_state" %in% names(jobs)) return(setNames(character(0), character(0)))
   active_states <- c("PENDING", "CONFIGURING", "COMPLETING", "RUNNING", "SUSPENDED", "Submitted")
   jobs <- jobs[jobs$slurm_state %in% active_states, , drop = FALSE]
@@ -951,9 +963,11 @@ normalize_pipeline_status <- function(status) {
   ifelse(status %in% c("Complete"), "Complete", ifelse(status %in% c("Active"), "Active", "Not started"))
 }
 
-project_status <- function(project) {
+project_status <- function(project, jobs = NULL, progress = NULL, active_states = NULL) {
   data_dir <- project$data_dir
   design <- project$design_matrix_path
+  if (is.null(jobs)) jobs <- job_history(project)
+  if (is.null(active_states)) active_states <- active_job_state_map_from_jobs(jobs)
   feature_count_files <- count_files(file.path(data_dir, "featurecounts"), "_counts\\.txt$")
   feature_matrix_exists <- file.exists(file.path(data_dir, "counts", "count_matrix.txt"))
   raw <- data.frame(
@@ -982,10 +996,10 @@ project_status <- function(project) {
     ),
     stringsAsFactors = FALSE
   )
-  modes <- last_job_modes(project)
+  modes <- last_job_modes_from_jobs(jobs)
   raw$input <- unname(modes[raw$step])
   raw$input[is.na(raw$input)] <- ""
-  progress <- tryCatch(sample_progress(project, active_job_state_map(project), data.frame())$table, error = function(e) data.frame())
+  if (is.null(progress)) progress <- tryCatch(sample_progress(project, active_states, data.frame(), jobs = jobs)$table, error = function(e) data.frame())
   if (NROW(progress)) {
     for (step in c("FastQC", "Cutadapt", "STAR", "RSEM optional", "Kallisto optional", "featureCounts")) {
       hit <- progress[progress$step == step, , drop = FALSE]
@@ -1001,7 +1015,7 @@ project_status <- function(project) {
       }
     }
   }
-  active <- active_job_steps(project)
+  active <- names(active_states)
   raw$status[raw$step %in% active & raw$status != "Complete"] <- "Active"
   if (!feature_matrix_exists && feature_count_files > 0) raw$status[raw$step == "featureCounts"] <- "Active"
   raw$status <- normalize_pipeline_status(raw$status)
@@ -1117,11 +1131,11 @@ previous_size_for <- function(cache, path) {
   as.numeric(tail(hit$size, 1))
 }
 
-sample_progress <- function(project, active_states = active_job_state_map(project), previous_cache = data.frame()) {
+sample_progress <- function(project, active_states = active_job_state_map(project), previous_cache = data.frame(), jobs = NULL) {
   design <- safe_read_table(project$design_matrix_path)
   if (!NROW(design) || !"sample" %in% names(design)) return(list(table = data.frame(), cache = previous_cache))
   sample_steps <- c("FastQC", "Cutadapt", "STAR", "RSEM optional", "Kallisto optional", "featureCounts")
-  jobs <- job_history(project)
+  if (is.null(jobs)) jobs <- job_history(project)
   active_job_states <- c("PENDING", "CONFIGURING", "COMPLETING", "RUNNING", "SUSPENDED", "Submitted")
   active_jobs <- if (NROW(jobs) && "slurm_state" %in% names(jobs)) jobs[jobs$slurm_state %in% active_job_states, , drop = FALSE] else data.frame()
   rows <- list()
@@ -1858,8 +1872,8 @@ run_step_meta <- function() {
   )
 }
 
-pipeline_stepper_ui <- function(project) {
-  status <- project_status(project)
+pipeline_stepper_ui <- function(project, status = NULL) {
+  if (is.null(status) || !NROW(status)) status <- project_status(project)
   meta <- run_step_meta()
   div(class = "pipeline-stepper", lapply(seq_len(NROW(meta)), function(i) {
     st <- status$status[match(meta$step[i], status$step)] %||% "Not started"
@@ -2495,14 +2509,23 @@ server <- function(input, output, session) {
   run_message <- reactiveVal("")
   progress_refresh <- reactiveVal(Sys.time())
   native_registered_id <- reactiveVal("")
+  job_history_state <- reactiveVal(data.frame())
+  project_status_state <- reactiveVal(data.frame())
+  progress_job_filter_state <- reactiveVal("All")
   sample_size_cache <- reactiveVal(data.frame(path = character(), size = numeric(), checked = character(), stringsAsFactors = FALSE))
   sample_progress_state <- reactiveVal(data.frame())
   path_browser <- reactiveValues(target = "", mode = "dir", path = path.expand("~"))
 
   refresh_progress_now <- function() {
-    res <- sample_progress(current_project(), active_job_state_map(current_project()), isolate(sample_size_cache()))
+    p <- current_project()
+    jobs <- job_history(p)
+    active_states <- active_job_state_map_from_jobs(jobs)
+    res <- sample_progress(p, active_states, isolate(sample_size_cache()), jobs = jobs)
+    status <- project_status(p, jobs = jobs, progress = res$table, active_states = active_states)
+    job_history_state(jobs)
     sample_size_cache(res$cache)
     sample_progress_state(res$table)
+    project_status_state(status)
     progress_refresh(Sys.time())
   }
 
@@ -2661,6 +2684,7 @@ server <- function(input, output, session) {
 
   observeEvent(input$project_id, {
     write_last_project_id(input$project_id %||% "__new__")
+    refresh_progress_now()
   }, ignoreInit = FALSE)
 
   output$project_card <- renderUI({
@@ -2825,8 +2849,12 @@ server <- function(input, output, session) {
 
   observe({
     invalidateLater(PROGRESS_REFRESH_MS, session)
-    refresh_progress_now()
+    if ((input$web_main_tabs %||% "") %in% c("Progress", "Run Pipeline")) refresh_progress_now()
   })
+
+  observeEvent(input$web_main_tabs, {
+    if ((input$web_main_tabs %||% "") %in% c("Progress", "Run Pipeline")) refresh_progress_now()
+  }, ignoreInit = TRUE)
 
   output$progress_updated <- renderText({
     paste("Auto-refreshes every", PROGRESS_REFRESH_MS / 1000, "seconds. Last checked:", format(progress_refresh(), "%Y-%m-%d %H:%M:%S"))
@@ -2834,7 +2862,8 @@ server <- function(input, output, session) {
 
   progress_status <- reactive({
     progress_refresh()
-    df <- project_status(current_project())
+    df <- project_status_state()
+    if (!NROW(df)) df <- project_status(current_project())
     df[order(step_order(df$step)), , drop = FALSE]
   })
 
@@ -2843,7 +2872,7 @@ server <- function(input, output, session) {
   })
 
   output$pipeline_stepper <- renderUI({
-    pipeline_stepper_ui(current_project())
+    pipeline_stepper_ui(current_project(), progress_status())
   })
 
   output$sample_progress_matrix_ui <- renderUI({
@@ -2856,24 +2885,39 @@ server <- function(input, output, session) {
 
   output$active_jobs_table <- render_csl_table({
     progress_refresh()
-    jobs <- job_history_progress_display(current_project())
-    tool <- input$progress_job_tool_filter %||% "All"
+    jobs <- job_history_progress_display_from_jobs(job_history_state())
+    tool <- progress_job_filter_state()
     if (NROW(jobs) && !identical(tool, "All") && "step" %in% names(jobs)) jobs <- jobs[jobs$step == tool, , drop = FALSE]
     jobs
   }, page_length = 10)
 
   output$progress_job_filter_ui <- renderUI({
     progress_refresh()
-    jobs <- job_history_progress_display(current_project())
+    jobs <- job_history_progress_display_from_jobs(job_history_state())
     steps <- if (NROW(jobs) && "step" %in% names(jobs)) sort(unique(jobs$step)) else pipeline_order()
-    selected <- input$progress_job_tool_filter %||% "All"
+    selected <- progress_job_filter_state()
     if (!selected %in% c("All", steps)) selected <- "All"
-    selectInput("progress_job_tool_filter", "Filter submitted jobs by tool", choices = c("All", steps), selected = selected, selectize = FALSE)
+    div(class = "button-row",
+        div(style = "min-width:260px; flex:1;", selectInput("progress_job_tool_filter", "Filter submitted jobs by tool", choices = c("All", steps), selected = selected, selectize = FALSE)),
+        div(style = "padding-top:25px;", actionButton("apply_progress_job_filter", "Apply filter", class = "btn-primary")),
+        div(style = "padding-top:25px;", actionButton("clear_progress_job_filter", "Clear", class = "btn-default"))
+    )
+  })
+
+  observeEvent(input$apply_progress_job_filter, {
+    progress_job_filter_state(input$progress_job_tool_filter %||% "All")
+    progress_refresh(Sys.time())
+  })
+
+  observeEvent(input$clear_progress_job_filter, {
+    progress_job_filter_state("All")
+    updateSelectInput(session, "progress_job_tool_filter", selected = "All")
+    progress_refresh(Sys.time())
   })
 
   output$run_pipeline_stepper <- renderUI({
     progress_refresh()
-    pipeline_stepper_ui(current_project())
+    pipeline_stepper_ui(current_project(), progress_status())
   })
 
   output$run_resource_strip <- renderUI({
@@ -2893,7 +2937,7 @@ server <- function(input, output, session) {
   output$run_step_cards <- renderUI({
     progress_refresh()
     p <- current_project()
-    status <- project_status(p)
+    status <- progress_status()
     progress_df <- sample_progress_state()
     div(class = "run-grid",
       tool_panel("FastQC", status, "Quality reports for raw or trimmed reads.",
