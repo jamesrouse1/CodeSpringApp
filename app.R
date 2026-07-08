@@ -1140,12 +1140,16 @@ sample_progress <- function(project, active_states = active_job_state_map(projec
       complete_outputs <- length(sizes) > 0 && all(sizes >= min_size)
       growing <- active && has_previous && size > previous_size
       optional <- step %in% c("RSEM optional", "Kallisto optional")
-      status <- if (complete_outputs && !growing) {
+      slurm_running <- active && slurm_state %in% c("RUNNING", "COMPLETING")
+      slurm_waiting <- active && slurm_state %in% c("PENDING", "CONFIGURING", "Submitted")
+      status <- if (complete_outputs && !growing && !slurm_running) {
         "Completed"
-      } else if (active && slurm_state %in% c("PENDING", "CONFIGURING")) {
-        "Waiting"
+      } else if (slurm_running) {
+        "Running"
       } else if (active && growing) {
         "Running"
+      } else if (slurm_waiting) {
+        "Waiting"
       } else if (active && size > 0) {
         "Running, no growth yet"
       } else if (active) {
@@ -1161,8 +1165,10 @@ sample_progress <- function(project, active_states = active_job_state_map(projec
         paste0("Output exists but is smaller than expected (<", min_size, " bytes).")
       } else if (identical(status, "Running, no growth yet")) {
         "File exists but size did not increase since the last refresh."
-      } else if (identical(status, "Running")) {
+      } else if (identical(status, "Running") && growing) {
         "Output file size increased since the last refresh."
+      } else if (identical(status, "Running") && size == 0) {
+        "SLURM reports this sample is running; output has not been written yet."
       } else {
         ""
       }
@@ -1252,7 +1258,7 @@ sample_progress_step_ui <- function(progress_df, step) {
       tags$thead(tags$tr(
         tags$th("Sample"),
         tags$th("Status"),
-        tags$th("Bytes"),
+        tags$th("Output"),
         tags$th("SLURM")
       )),
       tags$tbody(lapply(seq_len(NROW(hit)), function(i) {
@@ -1265,7 +1271,7 @@ sample_progress_step_ui <- function(progress_df, step) {
         tags$tr(
           tags$td(class = "sample-name", hit$sample[i]),
           tags$td(tags$span(class = status_class(hit$status[i]), title = title, hit$display_status[i])),
-          tags$td(format(hit$output_bytes[i], big.mark = ",", scientific = FALSE)),
+          tags$td(if (hit$status[i] %in% c("Completed", "Possibly incomplete") && hit$output_bytes[i] > 0) paste(format(hit$output_bytes[i], big.mark = ",", scientific = FALSE), "bytes") else "-"),
           tags$td(if (nzchar(hit$slurm_state[i])) hit$slurm_state[i] else "-")
         )
       }))
@@ -1889,13 +1895,13 @@ body { background:#eef3f8; color:#17202f; }
 .tool-right small { color:#657084; }
 .tool-body { padding:0 16px 16px 16px; border-top:1px solid #edf1f6; }
 .tool-body .form-group { margin-bottom:10px; }
-.tool-progress-wrap { margin-top:14px; border:1px solid #d8dde8; border-radius:8px; overflow:hidden; background:#f8fafc; }
-.tool-progress-title { padding:9px 11px; font-size:12px; font-weight:800; color:#304a66; text-transform:uppercase; letter-spacing:.04em; border-bottom:1px solid #d8dde8; background:#edf4fb; }
+.tool-progress-wrap { margin-top:16px; border:1px solid #d8dde8; border-radius:8px; overflow:hidden; background:#f8fafc; }
+.tool-progress-title { padding:12px 14px; font-size:13px; font-weight:800; color:#304a66; text-transform:uppercase; letter-spacing:.04em; border-bottom:1px solid #d8dde8; background:#edf4fb; }
 .tool-progress-table { width:100%; border-collapse:separate; border-spacing:0; table-layout:fixed; }
-.tool-progress-table th { padding:8px 10px; font-size:11px; color:#657084; text-align:left; border-bottom:1px solid #e4eaf2; background:white; }
-.tool-progress-table td { padding:8px 10px; font-size:12px; border-bottom:1px solid #edf1f6; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.tool-progress-table th { padding:11px 14px; font-size:12px; color:#657084; text-align:left; border-bottom:1px solid #e4eaf2; background:white; }
+.tool-progress-table td { padding:11px 14px; font-size:13px; border-bottom:1px solid #edf1f6; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .tool-progress-table tr:last-child td { border-bottom:0; }
-.tool-progress-table .sample-status { min-width:0; width:auto; max-width:100%; }
+.tool-progress-table .sample-status { min-width:118px; width:auto; max-width:100%; padding:6px 11px; font-size:12px; }
 .tool-progress-table .sample-name { font-weight:800; color:#17202f; }
 .resource-strip { display:grid; grid-template-columns:minmax(280px,.85fr) minmax(460px,1.45fr); gap:16px; align-items:stretch; margin:12px 0 18px 0; }
 .resource-card { background:white; border:1px solid #d8dde8; border-radius:8px; padding:16px; }
