@@ -72,6 +72,14 @@ The launcher handles these automatically:
 - `ggplot2`: publication-style GSEA plots
 - `fgsea`: R-native GSEA engine used by CodeSpringWeb pathway analysis
 
+On bamdev1, some R source package installs can fail if the system compiler points at a missing `gcc-annobin` plugin. The launcher avoids this by using a CodeSpringWeb-specific temporary Makevars file at:
+
+```text
+~/.codespringweb/Makevars.codespringweb
+```
+
+This is only used during package checks/installs from `run_codespringweb.sh`; it does not overwrite your normal R configuration.
+
 ## Job Submission
 
 Run buttons submit jobs through `sbatch`, so jobs are owned by SLURM after submission. Closing the browser or stopping the Shiny app does not cancel jobs already accepted by SLURM.

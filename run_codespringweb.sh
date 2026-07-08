@@ -8,6 +8,22 @@ CSL_ROOT="${CSL_CODESPRINGLAB_ROOT:-$HOME/CodeSpringLab}"
 LOG_DIR="${CSL_WEB_LOG_DIR:-$HOME/.codespringweb}"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/codespringweb_${PORT}.log"
+R_MAKEVARS_FILE="$LOG_DIR/Makevars.codespringweb"
+
+write_codespring_r_makevars() {
+  if [[ ! -f "$R_MAKEVARS_FILE" ]]; then
+    {
+      printf 'CFLAGS=-O2 -pipe -fPIC\n'
+      printf 'CXXFLAGS=-O2 -pipe -fPIC\n'
+      printf 'CXX11FLAGS=-O2 -pipe -fPIC\n'
+      printf 'CXX14FLAGS=-O2 -pipe -fPIC\n'
+      printf 'CXX17FLAGS=-O2 -pipe -fPIC\n'
+      printf 'CXX20FLAGS=-O2 -pipe -fPIC\n'
+    } > "$R_MAKEVARS_FILE"
+  fi
+}
+
+write_codespring_r_makevars
 
 if [[ ! -d "$CSL_ROOT/scripts_DoNotTouch" ]]; then
   printf '\033[31mCodeSpringLab root not found:\033[0m %s\n' "$CSL_ROOT"
@@ -17,22 +33,22 @@ fi
 
 install_r_package_if_missing() {
   local pkg="$1"
-  if Rscript -e "quit(status = if (requireNamespace('$pkg', quietly = TRUE)) 0 else 1)" >/dev/null 2>&1; then
+  if R_MAKEVARS_USER="$R_MAKEVARS_FILE" Rscript -e "quit(status = if (requireNamespace('$pkg', quietly = TRUE)) 0 else 1)" >/dev/null 2>&1; then
     return 0
   fi
 
   printf '\033[33mInstalling required R package %s into your user library...\033[0m\n' "$pkg"
-  Rscript -e 'pkg <- commandArgs(TRUE)[1]; lib <- Sys.getenv("R_LIBS_USER"); if (!nzchar(lib)) lib <- file.path(path.expand("~"), "R", paste0(R.version$platform, "-library"), paste(R.version$major, sub("\\..*", "", R.version$minor), sep = ".")); lib <- path.expand(lib); dir.create(lib, recursive = TRUE, showWarnings = FALSE); .libPaths(c(lib, .libPaths())); install.packages(pkg, lib = lib, repos = "https://cloud.r-project.org"); if (!requireNamespace(pkg, quietly = TRUE)) stop("Could not install required R package: ", pkg)' "$pkg"
+  R_MAKEVARS_USER="$R_MAKEVARS_FILE" Rscript -e 'pkg <- commandArgs(TRUE)[1]; lib <- Sys.getenv("R_LIBS_USER"); if (!nzchar(lib)) lib <- file.path(path.expand("~"), "R", paste0(R.version$platform, "-library"), paste(R.version$major, sub("\\..*", "", R.version$minor), sep = ".")); lib <- path.expand(lib); dir.create(lib, recursive = TRUE, showWarnings = FALSE); .libPaths(c(lib, .libPaths())); install.packages(pkg, lib = lib, repos = "https://cloud.r-project.org"); if (!requireNamespace(pkg, quietly = TRUE)) stop("Could not install required R package: ", pkg)' "$pkg"
 }
 
 install_bioc_package_if_missing() {
   local pkg="$1"
-  if Rscript -e "quit(status = if (requireNamespace('$pkg', quietly = TRUE)) 0 else 1)" >/dev/null 2>&1; then
+  if R_MAKEVARS_USER="$R_MAKEVARS_FILE" Rscript -e "quit(status = if (requireNamespace('$pkg', quietly = TRUE)) 0 else 1)" >/dev/null 2>&1; then
     return 0
   fi
 
   printf '\033[33mInstalling required Bioconductor package %s into your user library...\033[0m\n' "$pkg"
-  Rscript -e 'pkg <- commandArgs(TRUE)[1]; lib <- Sys.getenv("R_LIBS_USER"); if (!nzchar(lib)) lib <- file.path(path.expand("~"), "R", paste0(R.version$platform, "-library"), paste(R.version$major, sub("\\..*", "", R.version$minor), sep = ".")); lib <- path.expand(lib); dir.create(lib, recursive = TRUE, showWarnings = FALSE); .libPaths(c(lib, .libPaths())); if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager", lib = lib, repos = "https://cloud.r-project.org"); BiocManager::install(pkg, lib = lib, ask = FALSE, update = FALSE); if (!requireNamespace(pkg, quietly = TRUE)) stop("Could not install required Bioconductor package: ", pkg)' "$pkg"
+  R_MAKEVARS_USER="$R_MAKEVARS_FILE" Rscript -e 'pkg <- commandArgs(TRUE)[1]; lib <- Sys.getenv("R_LIBS_USER"); if (!nzchar(lib)) lib <- file.path(path.expand("~"), "R", paste0(R.version$platform, "-library"), paste(R.version$major, sub("\\..*", "", R.version$minor), sep = ".")); lib <- path.expand(lib); dir.create(lib, recursive = TRUE, showWarnings = FALSE); .libPaths(c(lib, .libPaths())); if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager", lib = lib, repos = "https://cloud.r-project.org"); BiocManager::install(pkg, lib = lib, ask = FALSE, update = FALSE); if (!requireNamespace(pkg, quietly = TRUE)) stop("Could not install required Bioconductor package: ", pkg)' "$pkg"
 }
 
 install_r_package_if_missing "DT"
