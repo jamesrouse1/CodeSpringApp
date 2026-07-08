@@ -871,8 +871,15 @@ read_log_excerpt <- function(path, mode = "tail", n = 120) {
   paste(lines, collapse = "\n")
 }
 
+first_scalar_string <- function(x, fallback = "") {
+  x <- as.character(x %||% fallback)
+  x <- x[!is.na(x)]
+  if (!length(x) || !nzchar(trimws(x[[1]]))) return(fallback)
+  x[[1]]
+}
+
 server_browser_choices <- function(path, mode = "dir") {
-  path <- path.expand(trimws(as.character(path %||% ""))[1])
+  path <- path.expand(trimws(first_scalar_string(path, path.expand("~"))))
   if (!nzchar(path) || !dir.exists(path)) path <- path.expand("~")
   path <- normalizePath(path, winslash = "/", mustWork = FALSE)
   dirs <- list.dirs(path, recursive = FALSE, full.names = TRUE)
@@ -880,24 +887,30 @@ server_browser_choices <- function(path, mode = "dir") {
   dirs <- dirs[!grepl("^\\.", basename(dirs))]
   dirs <- dirs[basename(dirs) != "__pycache__"]
   dirs <- sort(dirs)
-  choices <- stats::setNames(dirs, paste0(basename(dirs), "/"))
+  choices <- stats::setNames(character(0), character(0))
+  if (length(dirs)) {
+    choices <- stats::setNames(dirs, paste0(basename(dirs), "/"))
+  }
   if (identical(mode, "file")) {
     files <- list.files(path, recursive = FALSE, full.names = TRUE)
     files <- files[file.exists(files) & !dir.exists(files)]
     files <- files[!grepl("^\\.", basename(files))]
     files <- files[basename(files) != "__pycache__"]
     files <- sort(files)
-    file_choices <- stats::setNames(files, basename(files))
-    choices <- c(choices, file_choices)
+    if (length(files)) {
+      file_choices <- stats::setNames(files, basename(files))
+      choices <- c(choices, file_choices)
+    }
   }
   if (!length(choices)) {
-    choices <- stats::setNames(path, "(empty folder)")
+    fallback <- first_scalar_string(path, path.expand("~"))
+    choices <- stats::setNames(fallback, "(empty folder)")
   }
   choices
 }
 
 browser_start_path <- function(value, mode = "dir") {
-  value <- path.expand(trimws(as.character(value %||% ""))[1])
+  value <- path.expand(trimws(first_scalar_string(value, "")))
   if (nzchar(value) && identical(mode, "file") && file.exists(value)) return(dirname(value))
   if (nzchar(value) && dir.exists(value)) return(value)
   if (nzchar(value) && dir.exists(dirname(value))) return(dirname(value))
@@ -2372,8 +2385,10 @@ server <- function(input, output, session) {
 
   output$browser_choices_ui <- renderUI({
     choices <- server_browser_choices(path_browser$path, path_browser$mode)
+    if (!length(choices)) choices <- stats::setNames(first_scalar_string(path_browser$path, path.expand("~")), "(empty folder)")
     label <- if (identical(path_browser$mode, "file")) "Folders and files" else "Folders"
-    selectInput("browser_choice", label, choices = choices, selected = choices[[1]], selectize = FALSE, size = min(max(length(choices), 4), 18))
+    selected <- unname(choices[[1]])
+    selectInput("browser_choice", label, choices = choices, selected = selected, selectize = FALSE, size = min(max(length(choices), 4), 18))
   })
 
   observeEvent(input$browse_new_fastq_dir, {
