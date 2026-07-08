@@ -898,6 +898,72 @@ empty_job_filter_message <- function(jobs, original_jobs, tool) {
   out
 }
 
+elapsed_to_seconds <- function(x) {
+  x <- trimws(as.character(x %||% ""))
+  if (!nzchar(x) || identical(x, "NA")) return(0)
+  days <- 0
+  if (grepl("-", x, fixed = TRUE)) {
+    parts <- strsplit(x, "-", fixed = TRUE)[[1]]
+    days <- suppressWarnings(as.numeric(parts[1]))
+    if (is.na(days)) days <- 0
+    x <- parts[length(parts)]
+  }
+  bits <- suppressWarnings(as.numeric(strsplit(x, ":", fixed = TRUE)[[1]]))
+  bits <- bits[!is.na(bits)]
+  secs <- switch(
+    as.character(length(bits)),
+    "3" = bits[1] * 3600 + bits[2] * 60 + bits[3],
+    "2" = bits[1] * 60 + bits[2],
+    "1" = bits[1],
+    0
+  )
+  total <- days * 86400 + secs
+  if (is.na(total)) total <- 0
+  as.integer(total)
+}
+
+format_elapsed_seconds <- function(seconds) {
+  seconds <- max(0, as.integer(seconds %||% 0))
+  days <- seconds %/% 86400
+  rest <- seconds %% 86400
+  hours <- rest %/% 3600
+  minutes <- (rest %% 3600) %/% 60
+  secs <- rest %% 60
+  if (days > 0) sprintf("%s-%02d:%02d:%02d", days, hours, minutes, secs) else sprintf("%02d:%02d:%02d", hours, minutes, secs)
+}
+
+active_slurm_states <- function() {
+  c("PENDING", "CONFIGURING", "COMPLETING", "RUNNING", "SUSPENDED", "Submitted")
+}
+
+escape_job_table <- function(df) {
+  if (!NROW(df)) return(df)
+  out <- df
+  for (nm in names(out)) {
+    if (is.character(out[[nm]])) out[[nm]] <- htmltools::htmlEscape(out[[nm]])
+  }
+  out
+}
+
+prepare_job_table_for_display <- function(jobs) {
+  if (!NROW(jobs)) return(jobs)
+  out <- escape_job_table(jobs)
+  if (!all(c("elapsed", "slurm_state") %in% names(jobs))) return(out)
+  active <- as.character(jobs$slurm_state) %in% active_slurm_states()
+  if (!any(active)) return(out)
+  captured <- as.integer(Sys.time())
+  elapsed <- as.character(jobs$elapsed)
+  elapsed[!nzchar(elapsed)] <- "00:00:00"
+  base <- vapply(elapsed, elapsed_to_seconds, integer(1))
+  out$elapsed[active] <- sprintf(
+    '<span class="elapsed-live" data-base="%s" data-captured="%s">%s</span>',
+    base[active],
+    captured,
+    vapply(base[active], format_elapsed_seconds, character(1))
+  )
+  out
+}
+
 run_manifest_path <- function(project) {
   file.path(dirname(project$data_dir), "log", "codespringweb_run_manifest.tsv")
 }
@@ -909,7 +975,6 @@ read_run_manifest <- function(project) {
 }
 
 project_methods_summary <- function(project) {
-  res <- genome_resources(project)
   data.frame(
     Field = c(
       "Project",
@@ -917,35 +982,58 @@ project_methods_summary <- function(project) {
       "Species",
       "Genome/reference version",
       "Reference key",
-      "Paired-end",
-      "Results root",
-      "Data folder",
-      "Design matrix",
-      "STAR index",
-      "GTF",
-      "RSEM index",
-      "Kallisto index",
-      "RSeQC strand BED"
+      "Read type",
+      "Design matrix"
     ),
     Value = c(
       project$label,
       project$analysis,
       genome_species(project),
-      res$label,
+      gencode_label(project),
       genome_reference_key(project),
-      as.character(isTRUE(project$paired_end)),
-      project$results_root,
-      project$data_dir,
-      project$design_matrix_path,
-      res$star_index,
-      res$gtf,
-      res$rsem_index,
-      res$kallisto_index,
-      res$strand_bed
+      if (isTRUE(project$paired_end)) "Paired-end" else "Single-end",
+      if (file.exists(project$design_matrix_path)) "Provided or created in app" else "Not created yet"
     ),
     check.names = FALSE,
     stringsAsFactors = FALSE
   )
+}
+
+r_package_version <- function(pkg) {
+  if (!requireNamespace(pkg, quietly = TRUE)) return("not detected")
+  as.character(utils::packageVersion(pkg))
+}
+
+command_version <- function(command, args = "--version", pattern = NULL) {
+  bin <- Sys.which(command)
+  if (!nzchar(bin)) return("not detected in app environment")
+  out <- tryCatch(system2(bin, args, stdout = TRUE, stderr = TRUE), error = function(e) character(0))
+  out <- out[nzchar(out)]
+  if (!length(out)) return("detected")
+  value <- trimws(out[1])
+  if (!is.null(pattern)) {
+    hit <- regmatches(value, regexpr(pattern, value, perl = TRUE))
+    if (length(hit) && nzchar(hit)) value <- hit
+  }
+  value
+}
+
+tool_reference_summary <- function(project) {
+  rows <- list(
+    c("Reference", "Genome annotation", gencode_label(project), paste0(genome_species(project), " / ", genome_reference_key(project)), "STAR, featureCounts, DESeq2, RSEM, Kallisto"),
+    c("Tool", "FastQC", command_version("fastqc", "--version"), "Read quality control", "Raw or trimmed FASTQ"),
+    c("Tool", "cutadapt", command_version("cutadapt", "--version"), "Adapter trimming", "Raw FASTQ"),
+    c("Tool", "STAR", command_version("STAR", "--version"), "Spliced alignment", gencode_label(project)),
+    c("Tool", "featureCounts / Subread", command_version("featureCounts", "-v"), "Gene-level counting", gencode_label(project)),
+    c("Tool", "DESeq2", r_package_version("DESeq2"), "Differential expression", "featureCounts count_matrix.txt"),
+    c("Tool", "GSEApy", "recorded in GSEA stdout when run", "Pathway analysis", "Selected Enrichr/MSigDB-style gene set database"),
+    c("Tool", "RSEM", command_version("rsem-calculate-expression", "--version"), "Optional gene/transcript quantification", gencode_label(project)),
+    c("Tool", "Kallisto", command_version("kallisto", "version"), "Optional transcript abundance quantification", gencode_label(project)),
+    c("Tool", "RSeQC", "not required for core run; strand BED generated with reference", "Optional strand/QC support", gencode_label(project))
+  )
+  out <- as.data.frame(do.call(rbind, rows), stringsAsFactors = FALSE)
+  colnames(out) <- c("Type", "Name", "Version/reference", "Used for", "Input/reference")
+  out
 }
 
 methods_sentence_for_step <- function(step, manifest_rows, project) {
@@ -979,7 +1067,7 @@ project_methods_text <- function(project) {
     paste0("Analysis: ", project$analysis),
     paste0("Reference genome: ", gencode_label(project), " (", genome_reference_key(project), ")."),
     paste0("Species: ", genome_species(project), "."),
-    paste0("Design matrix: ", project$design_matrix_path),
+    paste0("Read type: ", if (isTRUE(project$paired_end)) "paired-end" else "single-end", "."),
     ""
   )
   if (length(steps)) {
@@ -3021,6 +3109,27 @@ ui <- fluidPage(
   tags$head(
     tags$style(HTML(app_css)),
     tags$script(HTML("
+      function cslFormatElapsed(total) {
+        total = Math.max(0, Math.floor(total || 0));
+        var days = Math.floor(total / 86400);
+        var rest = total % 86400;
+        var hours = Math.floor(rest / 3600);
+        var minutes = Math.floor((rest % 3600) / 60);
+        var seconds = rest % 60;
+        function pad(x) { return String(x).padStart(2, '0'); }
+        var hms = pad(hours) + ':' + pad(minutes) + ':' + pad(seconds);
+        return days > 0 ? days + '-' + hms : hms;
+      }
+      function cslTickElapsed() {
+        var now = Math.floor(Date.now() / 1000);
+        $('.elapsed-live').each(function() {
+          var base = parseInt($(this).attr('data-base') || '0', 10);
+          var captured = parseInt($(this).attr('data-captured') || now, 10);
+          $(this).text(cslFormatElapsed(base + Math.max(0, now - captured)));
+        });
+      }
+      setInterval(cslTickElapsed, 1000);
+      $(document).on('shiny:value.dt', cslTickElapsed);
       $(document).on('dblclick', '#browser_choice', function() {
         $('#browser_open_choice').trigger('click');
       });
@@ -3055,7 +3164,7 @@ ui <- fluidPage(
                                  if (file.exists(LOGO_CSL_PATH)) tags$img(src = file.path("csl_logo", basename(LOGO_CSL_PATH))) else NULL))
                  )),
         tabPanel("Design Matrix", br(), h3("Design Matrix Builder"),
-                 tags$p(class = "muted", "Scan the raw FASTQ folder, then edit include/sample/metadata cells directly. Filenames stay on the right so the run steps know which reads belong to each sample."),
+                 tags$p(class = "muted", "If no design_matrix.txt was provided during setup, build it here: scan the raw FASTQ folder, then edit include/sample/metadata cells directly. Filenames stay on the right so run steps know which reads belong to each sample."),
                  fluidRow(
                    column(7, textInput("metadata_cols", "Metadata columns", value = "treatment", placeholder = "treatment, batch, replicate")),
                    column(5, br(),
@@ -3090,12 +3199,12 @@ ui <- fluidPage(
         tabPanel("Logs", br(), h3("Submitted Jobs"), uiOutput("job_filter_ui"), table_output("jobs_table"), br(), uiOutput("log_file_ui"), tags$pre(class = "log-viewer", textOutput("selected_log_text"))),
         tabPanel("Methods", br(),
                  h3("Methods Documentation"),
-                 tags$p(class = "muted", "Project-specific methods, parameters, references, and submitted tool records."),
+                 tags$p(class = "muted", "Project-level methods, reference genome, tool usage, and detected versions where available."),
                  h4("Project and Reference"),
                  table_output("methods_project_table"),
                  br(),
-                 h4("Submitted Tool Manifest"),
-                 table_output("methods_manifest_table"),
+                 h4("Tools and References"),
+                 table_output("methods_tools_table"),
                  br(),
                  h4("Copyable Methods Text"),
                  tags$pre(class = "log-viewer", textOutput("methods_text")))
@@ -3334,7 +3443,8 @@ server <- function(input, output, session) {
       ),
       div(class = "new-project-path-control",
           textInput("new_design_matrix_path", "Design matrix folder", value = "", placeholder = "Optional; folder containing or receiving design_matrix.txt"),
-          actionButton("browse_new_design_matrix_path", "Browse server", class = "btn-default")
+          actionButton("browse_new_design_matrix_path", "Browse server", class = "btn-default"),
+          tags$p(class = "muted", "Leave this blank to create the design matrix in the Design Matrix tab after the project is created.")
       ),
       checkboxInput("new_clear_existing_results", "Clear existing results if this project folder already exists", value = FALSE),
       actionButton("create_project_config", "Create project", class = "btn-primary"),
@@ -3599,15 +3709,15 @@ server <- function(input, output, session) {
 
   output$active_jobs_table <- render_csl_table({
     progress_refresh()
-    all_jobs <- job_history_progress_display_from_jobs(job_history_state())
+    all_jobs <- job_history_progress_display(current_project())
     tool <- progress_job_filter_state()
     jobs <- filter_jobs_by_tool(all_jobs, tool)
-    empty_job_filter_message(jobs, all_jobs, tool)
-  }, page_length = 10)
+    prepare_job_table_for_display(empty_job_filter_message(jobs, all_jobs, tool))
+  }, page_length = 10, escape = FALSE)
 
   output$progress_job_filter_ui <- renderUI({
     progress_refresh()
-    jobs <- job_history_progress_display_from_jobs(job_history_state())
+    jobs <- job_history_progress_display(current_project())
     choices <- job_filter_choices_from_jobs(jobs)
     selected <- isolate(input$progress_job_tool_filter %||% progress_job_filter_state())
     if (!selected %in% choices) selected <- "All"
@@ -3856,8 +3966,8 @@ server <- function(input, output, session) {
     all_jobs <- job_history_display(current_project())
     tool <- job_filter_state()
     jobs <- filter_jobs_by_tool(all_jobs, tool)
-    empty_job_filter_message(jobs, all_jobs, tool)
-  }, page_length = 50)
+    prepare_job_table_for_display(empty_job_filter_message(jobs, all_jobs, tool))
+  }, page_length = 50, escape = FALSE)
 
   output$job_filter_ui <- renderUI({
     progress_refresh()
@@ -3918,14 +4028,9 @@ server <- function(input, output, session) {
     project_methods_summary(current_project())
   }, page_length = 25, scroll_y = "360px")
 
-  output$methods_manifest_table <- render_csl_table({
-    manifest <- read_run_manifest(current_project())
-    if (!NROW(manifest)) {
-      return(data.frame(Message = paste("No CodeSpringWeb run manifest found yet at", run_manifest_path(current_project())), stringsAsFactors = FALSE))
-    }
-    keep <- intersect(c("time", "step", "sample", "job_id", "input_mode", "genome", "reference", "output_target"), names(manifest))
-    manifest[, keep, drop = FALSE]
-  }, page_length = 25, scroll_y = "420px")
+  output$methods_tools_table <- render_csl_table({
+    tool_reference_summary(current_project())
+  }, page_length = 25, scroll_y = "520px")
 
   output$methods_text <- renderText({
     project_methods_text(current_project())
