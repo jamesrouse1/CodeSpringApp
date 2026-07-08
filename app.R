@@ -1256,10 +1256,11 @@ sample_progress_step_table <- function(progress_df, step) {
   active_statuses <- c("Waiting", "Running", "Running, no growth yet", "Possibly incomplete")
   if (!any(hit$status %in% active_statuses)) return(NULL)
   hit <- hit[order(hit$sample), , drop = FALSE]
+  time_running <- if ("time_running" %in% names(hit)) as.character(hit$time_running) else rep("", NROW(hit))
   data.frame(
     Sample = hit$sample,
     Status = hit$display_status,
-    `Time running` = ifelse(nzchar(hit$time_running %||% ""), hit$time_running, "-"),
+    `Time running` = ifelse(nzchar(time_running), time_running, "-"),
     check.names = FALSE,
     stringsAsFactors = FALSE
   )
@@ -2847,6 +2848,15 @@ server <- function(input, output, session) {
         "run_deseq2", "Submit DESeq2", progress_df)
     )
   })
+
+  for (step in c("FastQC", "Cutadapt", "STAR", "RSEM optional", "Kallisto optional", "featureCounts")) {
+    local({
+      this_step <- step
+      output[[tool_progress_output_id(this_step)]] <- render_csl_table({
+        sample_progress_step_table(sample_progress_state(), this_step)
+      }, page_length = 20, scroll_y = "360px")
+    })
+  }
 
   output$deseq_controls_ui <- renderUI({
     p <- current_project()
