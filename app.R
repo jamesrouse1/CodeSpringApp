@@ -89,6 +89,24 @@ JOBS_PATH <- file.path(APP_HOME, "jobs.tsv")
 LAST_PROJECT_PATH <- file.path(APP_HOME, "last_project_id.txt")
 PROGRESS_REFRESH_MS <- 30000
 SAMPLE_PROGRESS_NICE_LIMIT <- 30
+GSEAPY_GENESET_OPTIONS <- c(
+  "MSigDB_Hallmark_2020",
+  "KEGG_2021_Human",
+  "GO_Biological_Process_2025",
+  "Reactome_Pathways_2024",
+  "ARCHS4_TFs_Coexp",
+  "ENCODE_TF_ChIP-seq_2015",
+  "ENCODE_Histone_Modifications_2015",
+  "FANTOM6_lncRNA_KD_DEGs",
+  "miRTarBase_2017",
+  "TRANSFAC_and_JASPAR_PWMs",
+  "GTEx_Tissues_V8_2023",
+  "CellMarker_2024",
+  "Cancer_Cell_Line_Encyclopedia",
+  "ClinVar_2019",
+  "GTEx_Aging_Signatures_2021",
+  "Proteomics_Drug_Atlas_2023"
+)
 LOGO_CSL_PATH <- file.path(SCRIPTS_DIR, "Logo_CSL.png")
 LOGO_PATH <- file.path(SCRIPTS_DIR, "Logo.png")
 FLOWCHART_PATH <- file.path(SCRIPTS_DIR, "flowchart.png")
@@ -1975,6 +1993,86 @@ submit_deseq2_job <- function(project, compare_col, reference, comparison, redun
   submit_sbatch(project, "DESeq2", script, c(rscript, count_matrix, design_matrix, outdir, reference, comparison, redundant, project$name), "deseq2", paste(compare_col, reference, "vs", comparison))
 }
 
+write_gseapy_script <- function(project) {
+  log_dir <- file.path(dirname(project$data_dir), "log")
+  dir.create(log_dir, recursive = TRUE, showWarnings = FALSE)
+  script <- file.path(log_dir, "run_gseapy_pathway.py")
+  lines <- c(
+    "import os",
+    "import sys",
+    "",
+    "script_dir = sys.argv[1]",
+    "project_name = sys.argv[2]",
+    "results_root = sys.argv[3]",
+    "geneset = sys.argv[4]",
+    "genome = sys.argv[5]",
+    "feature = sys.argv[6]",
+    "design_dir = sys.argv[7]",
+    "deseq_dir = sys.argv[8]",
+    "outpath_pathway = sys.argv[9]",
+    "refcond = sys.argv[10]",
+    "compared = sys.argv[11]",
+    "",
+    "if script_dir not in sys.path:",
+    "    sys.path.insert(0, script_dir)",
+    "import bulkRNAseq as csl",
+    "",
+    "if not results_root.endswith(os.sep):",
+    "    results_root = results_root + os.sep",
+    "os.makedirs(outpath_pathway, exist_ok=True)",
+    "csl.project_name = project_name",
+    "csl.res_dir = results_root",
+    "",
+    "gs, gs_res, pathways, terms, project_name_out = csl.gseapy_RunPathway(",
+    "    geneset, genome, feature, design_dir, deseq_dir, outpath_pathway, refcond, compared",
+    ")",
+    "try:",
+    "    csl.gseapy_DotPlot(outpath_pathway, pathways, geneset)",
+    "except Exception as exc:",
+    "    print('WARNING: GSEA completed, but dot plot creation failed: {}'.format(exc))",
+    "print('GSEA completed for {} vs {} using {}'.format(compared, refcond, geneset))",
+    "print('Results:', outpath_pathway)"
+  )
+  writeLines(lines, script)
+  script
+}
+
+submit_gseapy_job <- function(project, compare_col, reference, comparison, geneset) {
+  geneset <- trimws(geneset %||% "")
+  if (!nzchar(geneset)) stop("Choose a GSEA gene-set database.")
+  deseq_dir <- file.path(project$data_dir, "deseq2")
+  normalized_file <- file.path(deseq_dir, paste0("normalized_counts_", comparison, "_vs_", reference, "(ref).txt"))
+  if (!file.exists(normalized_file)) {
+    stop("Expected DESeq2 normalized counts file was not found: ", normalized_file)
+  }
+  outpath_pathway <- paste0(file.path(project$data_dir, "gseapy", paste0(comparison, "_vs_", reference)), "/")
+  dir.create(outpath_pathway, recursive = TRUE, showWarnings = FALSE)
+  design_matrix <- deseq_design_for_column(project, compare_col)
+  design_dir <- dirname(design_matrix)
+  script <- write_gseapy_script(project)
+  python_bin <- Sys.getenv("CSL_PYTHON_BIN", unset = Sys.getenv("PYTHON_BIN", unset = ""))
+  if (!nzchar(python_bin)) python_bin <- Sys.which("python3") %||% "python3"
+  if (!nzchar(python_bin)) python_bin <- "python3"
+  results_root <- project$results_root %||% dirname(dirname(project$data_dir))
+  cmd <- paste(
+    shQuote(python_bin),
+    shQuote(script),
+    shQuote(SCRIPTS_DIR),
+    shQuote(project$name),
+    shQuote(results_root),
+    shQuote(geneset),
+    shQuote(genome_species(project)),
+    shQuote("auto"),
+    shQuote(design_dir),
+    shQuote(deseq_dir),
+    shQuote(outpath_pathway),
+    shQuote(reference),
+    shQuote(comparison)
+  )
+  target <- file.path(outpath_pathway, "gseapy.gene_set.gsea.report.csv")
+  submit_sbatch_wrap(project, "GSEA", cmd, "gseapy", paste(compare_col, comparison, "vs", reference, geneset), target = target, reference = geneset)
+}
+
 write_native_shiny_config <- function(project) {
   cfg_dir <- file.path(APP_HOME, "native_configs")
   dir.create(cfg_dir, recursive = TRUE, showWarnings = FALSE)
@@ -2751,11 +2849,14 @@ server <- function(input, output, session) {
       "GSEApy" = "GSEA",
       label
     )
-    optimistic <- optimistic_step_progress(p, step, input_mode)
-    if (NROW(optimistic)) {
-      old <- isolate(sample_progress_state())
-      if (NROW(old) && "step" %in% names(old)) old <- old[old$step != step, , drop = FALSE]
-      sample_progress_state(rbind(old, optimistic))
+    sample_level_steps <- c("FastQC", "Cutadapt", "STAR", "featureCounts", "RSEM (optional)", "Kallisto (optional)")
+    if (step %in% sample_level_steps) {
+      optimistic <- optimistic_step_progress(p, step, input_mode)
+      if (NROW(optimistic)) {
+        old <- isolate(sample_progress_state())
+        if (NROW(old) && "step" %in% names(old)) old <- old[old$step != step, , drop = FALSE]
+        sample_progress_state(rbind(old, optimistic))
+      }
     }
     project_status_state(optimistic_status(isolate(project_status_state()), step, input_mode))
     progress_refresh(Sys.time())
@@ -3218,7 +3319,10 @@ server <- function(input, output, session) {
         "run_featurecounts", "Submit featureCounts", progress_df),
       tool_panel("DESeq2", status, "Run differential expression from count_matrix.txt.",
         uiOutput("deseq_controls_ui"),
-        "run_deseq2", "Submit DESeq2", progress_df),
+        "run_deseq2", "Submit DESeq2", data.frame()),
+      tool_panel("GSEA", status, "Run pathway analysis from DESeq2 normalized counts.",
+        uiOutput("gsea_run_controls_ui"),
+        "run_gsea", "Submit GSEA", data.frame()),
       tool_panel("RSEM (optional)", status, "Optional quantification from STAR BAM/transcriptome outputs.",
         tagList(selectInput("rsem_feature_attr", "RSEM feature attribute", choices = c("gene_id", "gene_name"), selected = "gene_id", selectize = FALSE)),
         "run_rsem", "Submit RSEM", progress_df),
@@ -3250,6 +3354,23 @@ server <- function(input, output, session) {
       selectInput("deseq_compare_col", "Comparison column", choices = cols, selected = selected_col, selectize = FALSE),
       selectInput("deseq_reference", "Reference/baseline", choices = vals, selected = ref, selectize = FALSE),
       selectInput("deseq_comparison", "Comparison", choices = vals, selected = comp, selectize = FALSE)
+    )
+  })
+
+  output$gsea_run_controls_ui <- renderUI({
+    p <- current_project()
+    cols <- design_compare_columns(p)
+    if (!length(cols)) return(div(class = "empty-box", "No comparison columns found between sample and filename in design_matrix.txt."))
+    selected_col <- input$gsea_compare_col %||% if ("treatment" %in% cols) "treatment" else cols[[1]]
+    if (!selected_col %in% cols) selected_col <- cols[[1]]
+    vals <- design_compare_values(p, selected_col)
+    ref <- input$gsea_reference %||% if (length(vals)) vals[[1]] else ""
+    comp <- input$gsea_comparison %||% if (length(vals) > 1) vals[[2]] else ref
+    tagList(
+      selectInput("gsea_compare_col", "Comparison column", choices = cols, selected = selected_col, selectize = FALSE),
+      selectInput("gsea_reference", "Reference/baseline", choices = vals, selected = ref, selectize = FALSE),
+      selectInput("gsea_comparison", "Comparison", choices = vals, selected = comp, selectize = FALSE),
+      selectInput("gsea_geneset", "Gene-set database", choices = GSEAPY_GENESET_OPTIONS, selected = "MSigDB_Hallmark_2020", selectize = FALSE)
     )
   })
 
@@ -3288,6 +3409,14 @@ server <- function(input, output, session) {
       finish_submit_refresh()
     } else {
       run_submission("DESeq2", submit_deseq2_job(current_project(), input$deseq_compare_col, input$deseq_reference, input$deseq_comparison, "NoRedundant"), paste(input$deseq_compare_col, input$deseq_comparison, "vs", input$deseq_reference))
+    }
+  })
+  observeEvent(input$run_gsea, {
+    if (identical(input$gsea_reference, input$gsea_comparison)) {
+      run_message("Reference and comparison must be different.")
+      finish_submit_refresh()
+    } else {
+      run_submission("GSEA", submit_gseapy_job(current_project(), input$gsea_compare_col, input$gsea_reference, input$gsea_comparison, input$gsea_geneset), paste(input$gsea_compare_col, input$gsea_comparison, "vs", input$gsea_reference, input$gsea_geneset))
     }
   })
   output$run_output <- renderText(run_message())
