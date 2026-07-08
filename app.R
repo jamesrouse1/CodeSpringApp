@@ -1359,6 +1359,49 @@ sample_progress_step_ui <- function(progress_df, step) {
   )
 }
 
+optimistic_step_progress <- function(project, step, input_mode = "") {
+  design <- safe_read_table(project$design_matrix_path)
+  if (!NROW(design) || !"sample" %in% names(design)) return(data.frame())
+  samples <- as.character(design$sample)
+  samples <- samples[nzchar(samples)]
+  if (!length(samples)) return(data.frame())
+  rows <- lapply(samples, function(sample) {
+    target <- sample_output_target(project, sample, step)
+    data.frame(
+      sample = sample,
+      step = step,
+      status = "Waiting",
+      display_status = "Waiting",
+      slurm_state = "Submitted",
+      time_running = "-",
+      output_bytes = 0,
+      target = target,
+      note = "Submitted; waiting for scheduler status refresh.",
+      stringsAsFactors = FALSE
+    )
+  })
+  do.call(rbind, rows)
+}
+
+optimistic_status <- function(current_status, step, input_mode = "") {
+  if (!NROW(current_status)) {
+    current_status <- data.frame(
+      step = pipeline_order(),
+      status = "Not started",
+      path = "",
+      input = "",
+      stringsAsFactors = FALSE
+    )
+  }
+  if (!step %in% current_status$step) {
+    current_status <- rbind(current_status, data.frame(step = step, status = "Not started", path = "", input = "", stringsAsFactors = FALSE))
+  }
+  current_status$status[current_status$step == step] <- "Active"
+  if (!"input" %in% names(current_status)) current_status$input <- ""
+  current_status$input[current_status$step == step] <- input_mode
+  current_status[order(step_order(current_status$step)), , drop = FALSE]
+}
+
 save_job <- function(project, step, command, output = "") {
   row <- data.frame(
     time = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
@@ -2685,18 +2728,40 @@ server <- function(input, output, session) {
   }
 
   finish_submit_refresh <- function() {
-    refresh_progress_now()
     session$onFlushed(function() {
       refresh_progress_now()
     }, once = TRUE)
   }
 
-  run_submission <- function(label, expr) {
+  mark_submission_active <- function(label, input_mode = "") {
+    p <- current_project()
+    step <- switch(label,
+      "RSEM" = "RSEM (optional)",
+      "Kallisto" = "Kallisto (optional)",
+      "GSEApy" = "GSEA",
+      label
+    )
+    optimistic <- optimistic_step_progress(p, step, input_mode)
+    if (NROW(optimistic)) {
+      old <- isolate(sample_progress_state())
+      if (NROW(old) && "step" %in% names(old)) old <- old[old$step != step, , drop = FALSE]
+      sample_progress_state(rbind(old, optimistic))
+    }
+    project_status_state(optimistic_status(isolate(project_status_state()), step, input_mode))
+    progress_refresh(Sys.time())
+  }
+
+  run_submission <- function(label, expr, input_mode = "") {
     run_message(paste("Submitting", label, "..."))
     progress_refresh(Sys.time())
     msg <- tryCatch(force(expr), error = function(e) paste("ERROR submitting", label, ":", conditionMessage(e)))
     run_message(msg)
-    finish_submit_refresh()
+    if (!startsWith(msg, "ERROR")) {
+      mark_submission_active(label, input_mode)
+      finish_submit_refresh()
+    } else {
+      progress_refresh(Sys.time())
+    }
   }
 
   open_server_browser <- function(target, mode = "dir", current = "") {
@@ -3176,7 +3241,8 @@ server <- function(input, output, session) {
   })
 
   observeEvent(input$run_fastqc, {
-    run_submission("FastQC", submit_fastqc_jobs(current_project(), isTRUE(input$fastqc_use_trimmed)))
+    trimmed <- isTRUE(input$fastqc_use_trimmed)
+    run_submission("FastQC", submit_fastqc_jobs(current_project(), trimmed), if (trimmed) "trimmed reads" else "raw reads")
   })
   observeEvent(input$run_cutadapt, {
     adapter1 <- selected_adapter_value(input$cutadapt_adapter1, input$cutadapt_adapter1_custom)
@@ -3185,28 +3251,30 @@ server <- function(input, output, session) {
       run_message("Custom adapter sequences cannot be blank.")
       finish_submit_refresh()
     } else {
-      run_submission("Cutadapt", submit_cutadapt_jobs(current_project(), adapter1, adapter2, input$cutadapt_min_length))
+      run_submission("Cutadapt", submit_cutadapt_jobs(current_project(), adapter1, adapter2, input$cutadapt_min_length), "raw reads")
     }
   })
   observeEvent(input$run_star, {
-    run_submission("STAR", submit_star_jobs(current_project(), isTRUE(input$star_use_trimmed)))
+    trimmed <- isTRUE(input$star_use_trimmed)
+    run_submission("STAR", submit_star_jobs(current_project(), trimmed), if (trimmed) "trimmed reads" else "raw reads")
   })
   observeEvent(input$run_rsem, {
-    run_submission("RSEM", submit_rsem_jobs(current_project(), input$rsem_feature_attr))
+    run_submission("RSEM", submit_rsem_jobs(current_project(), input$rsem_feature_attr), paste("STAR BAM; feature", input$rsem_feature_attr))
   })
   observeEvent(input$run_kallisto, {
-    run_submission("Kallisto", submit_kallisto_jobs(current_project(), isTRUE(input$kallisto_use_trimmed)))
+    trimmed <- isTRUE(input$kallisto_use_trimmed)
+    run_submission("Kallisto", submit_kallisto_jobs(current_project(), trimmed), if (trimmed) "trimmed reads" else "raw reads")
   })
   observeEvent(input$run_featurecounts, {
     featurecounts_matrix_autosubmitted(setdiff(featurecounts_matrix_autosubmitted(), current_project()$id))
-    run_submission("featureCounts", submit_featurecounts_jobs(current_project(), input$feature_attr))
+    run_submission("featureCounts", submit_featurecounts_jobs(current_project(), input$feature_attr), paste("STAR BAM; feature", input$feature_attr))
   })
   observeEvent(input$run_deseq2, {
     if (identical(input$deseq_reference, input$deseq_comparison)) {
       run_message("Reference and comparison must be different.")
       finish_submit_refresh()
     } else {
-      run_submission("DESeq2", submit_deseq2_job(current_project(), input$deseq_compare_col, input$deseq_reference, input$deseq_comparison, "NoRedundant"))
+      run_submission("DESeq2", submit_deseq2_job(current_project(), input$deseq_compare_col, input$deseq_reference, input$deseq_comparison, "NoRedundant"), paste(input$deseq_compare_col, input$deseq_comparison, "vs", input$deseq_reference))
     }
   })
   output$run_output <- renderText(run_message())
