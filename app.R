@@ -1854,7 +1854,7 @@ expected_featurecounts_files <- function(project) {
 
 featurecounts_outputs_ready <- function(project) {
   files <- expected_featurecounts_files(project)
-  length(files) > 0 && all(file.exists(files)) && all(vapply(files, file_size_for, numeric(1)) >= minimum_expected_bytes("featureCounts"))
+  length(files) > 0 && all(file.exists(files)) && all(vapply(files, file_size_for, numeric(1)) > 0)
 }
 
 featurecounts_matrix_job_active <- function(jobs, matrix_path) {
