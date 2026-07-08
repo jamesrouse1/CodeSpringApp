@@ -88,6 +88,7 @@ dir.create(APP_HOME, recursive = TRUE, showWarnings = FALSE)
 JOBS_PATH <- file.path(APP_HOME, "jobs.tsv")
 LAST_PROJECT_PATH <- file.path(APP_HOME, "last_project_id.txt")
 PROGRESS_REFRESH_MS <- 30000
+SAMPLE_PROGRESS_NICE_LIMIT <- 30
 LOGO_CSL_PATH <- file.path(SCRIPTS_DIR, "Logo_CSL.png")
 LOGO_PATH <- file.path(SCRIPTS_DIR, "Logo.png")
 FLOWCHART_PATH <- file.path(SCRIPTS_DIR, "flowchart.png")
@@ -1209,6 +1210,13 @@ sample_progress_matrix_ui <- function(progress_df) {
   if (!NROW(progress_df)) return(div(class = "empty-box", "No sample progress available yet."))
   steps <- c("FastQC", "Cutadapt", "STAR", "RSEM optional", "Kallisto optional", "featureCounts")
   samples <- unique(progress_df$sample)
+  if (length(samples) > SAMPLE_PROGRESS_NICE_LIMIT) {
+    return(div(
+      class = "sample-matrix-wrap",
+      div(class = "adaptive-table-note", paste("Showing paginated sample progress because this project has", length(samples), "samples.")),
+      table_output("sample_progress_detail_table")
+    ))
+  }
   div(
     class = "sample-matrix-wrap",
     tags$table(
@@ -1245,6 +1253,20 @@ sample_progress_matrix_ui <- function(progress_df) {
   )
 }
 
+sample_progress_detail_table <- function(progress_df) {
+  if (!NROW(progress_df)) return(data.frame())
+  time_running <- if ("time_running" %in% names(progress_df)) as.character(progress_df$time_running) else rep("", NROW(progress_df))
+  out <- data.frame(
+    Sample = progress_df$sample,
+    Step = progress_df$step,
+    Status = progress_df$display_status,
+    `Time running` = ifelse(nzchar(time_running), time_running, "-"),
+    check.names = FALSE,
+    stringsAsFactors = FALSE
+  )
+  out[order(out$Sample, step_order(out$Step)), , drop = FALSE]
+}
+
 tool_progress_output_id <- function(step) {
   paste0("tool_progress_", tolower(gsub("[^A-Za-z0-9]+", "_", step)))
 }
@@ -1269,9 +1291,38 @@ sample_progress_step_table <- function(progress_df, step) {
 sample_progress_step_ui <- function(progress_df, step) {
   table <- sample_progress_step_table(progress_df, step)
   if (!NROW(table)) return(NULL)
+  if (NROW(table) <= SAMPLE_PROGRESS_NICE_LIMIT) {
+    hit <- progress_df[progress_df$step == step, , drop = FALSE]
+    active_statuses <- c("Waiting", "Running", "Running, no growth yet", "Possibly incomplete")
+    hit <- hit[hit$status %in% active_statuses, , drop = FALSE]
+    hit <- hit[order(hit$sample), , drop = FALSE]
+    return(div(
+      class = "tool-progress-wrap",
+      div(class = "tool-progress-title", "Sample progress"),
+      tags$table(
+        class = "tool-progress-table",
+        tags$thead(tags$tr(tags$th("Sample"), tags$th("Status"), tags$th("Time running"))),
+        tags$tbody(lapply(seq_len(NROW(hit)), function(i) {
+          title <- paste0(
+            "Status: ", hit$status[i],
+            "\nSLURM: ", if (nzchar(hit$slurm_state[i])) hit$slurm_state[i] else "-",
+            "\nBytes: ", hit$output_bytes[i],
+            "\nPath: ", hit$target[i],
+            if (nzchar(hit$note[i])) paste0("\nNote: ", hit$note[i]) else ""
+          )
+          time_running <- if ("time_running" %in% names(hit) && nzchar(hit$time_running[i])) hit$time_running[i] else "-"
+          tags$tr(
+            tags$td(class = "sample-name", hit$sample[i]),
+            tags$td(tags$span(class = status_class(hit$status[i]), title = title, hit$display_status[i])),
+            tags$td(time_running)
+          )
+        }))
+      )
+    ))
+  }
   div(
     class = "tool-progress-wrap",
-    div(class = "tool-progress-title", "Sample progress"),
+    div(class = "tool-progress-title", paste("Sample progress - paginated", NROW(table), "samples")),
     table_output(tool_progress_output_id(step))
   )
 }
@@ -1900,6 +1951,7 @@ body { background:#eef3f8; color:#17202f; }
 .tool-progress-table tr:last-child td { border-bottom:0; }
 .tool-progress-table .sample-status { min-width:118px; width:auto; max-width:100%; padding:6px 11px; font-size:12px; }
 .tool-progress-table .sample-name { font-weight:800; color:#17202f; }
+.adaptive-table-note { color:#657084; font-size:13px; font-weight:700; margin:0 0 10px 0; }
 .resource-strip { display:grid; grid-template-columns:minmax(280px,.85fr) minmax(460px,1.45fr); gap:16px; align-items:stretch; margin:12px 0 18px 0; }
 .resource-card { background:white; border:1px solid #d8dde8; border-radius:8px; padding:16px; }
 .resource-card.flowchart-card { display:flex; align-items:center; justify-content:center; min-height:360px; overflow:hidden; }
@@ -2788,6 +2840,10 @@ server <- function(input, output, session) {
   output$sample_progress_matrix_ui <- renderUI({
     sample_progress_matrix_ui(sample_progress_state())
   })
+
+  output$sample_progress_detail_table <- render_csl_table({
+    sample_progress_detail_table(sample_progress_state())
+  }, page_length = 20, scroll_y = "520px")
 
   output$active_jobs_table <- render_csl_table({
     progress_refresh()
