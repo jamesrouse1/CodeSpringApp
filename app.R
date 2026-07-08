@@ -1000,37 +1000,53 @@ project_methods_summary <- function(project) {
   )
 }
 
-r_package_version <- function(pkg) {
-  if (!requireNamespace(pkg, quietly = TRUE)) return("not detected")
-  as.character(utils::packageVersion(pkg))
-}
-
-command_version <- function(command, args = "--version", pattern = NULL) {
-  bin <- Sys.which(command)
-  if (!nzchar(bin)) return("not detected in app environment")
-  out <- tryCatch(system2(bin, args, stdout = TRUE, stderr = TRUE), error = function(e) character(0))
-  out <- out[nzchar(out)]
-  if (!length(out)) return("detected")
-  value <- trimws(out[1])
-  if (!is.null(pattern)) {
-    hit <- regmatches(value, regexpr(pattern, value, perl = TRUE))
-    if (length(hit) && nzchar(hit)) value <- hit
-  }
-  value
+module_versions_from_scripts <- function(files, fallback = "listed in CodeSpringLab script") {
+  files <- files[file.exists(files)]
+  if (!length(files)) return(fallback)
+  lines <- unlist(lapply(files, function(path) tryCatch(readLines(path, warn = FALSE), error = function(e) character(0))), use.names = FALSE)
+  module_lines <- grep("^\\s*module\\s+load\\s+", lines, value = TRUE)
+  modules <- sub("^\\s*module\\s+load\\s+", "", module_lines)
+  modules <- trimws(sub("\\s*(#.*)?$", "", modules))
+  modules <- unlist(strsplit(modules, "\\s+"), use.names = FALSE)
+  modules <- modules[nzchar(modules) & !modules %in% c("EBModules")]
+  modules <- unique(modules)
+  if (!length(modules)) fallback else paste(modules, collapse = "; ")
 }
 
 tool_reference_summary <- function(project) {
+  fastqc_modules <- module_versions_from_scripts(file.path(SCRIPTS_DIR, "FastQC", "fastqc.sh"))
+  cutadapt_modules <- module_versions_from_scripts(c(
+    file.path(SCRIPTS_DIR, "cutadapt_PE", "cutadapt_PE.sh"),
+    file.path(SCRIPTS_DIR, "cutadapt_SE", "cutadapt_SE.sh")
+  ))
+  star_modules <- module_versions_from_scripts(c(
+    file.path(SCRIPTS_DIR, "STAR", "star_PE.sh"),
+    file.path(SCRIPTS_DIR, "STAR", "star_SE.sh")
+  ))
+  featurecounts_modules <- module_versions_from_scripts(c(
+    file.path(SCRIPTS_DIR, "featureCounts", "featurecounts_PE.sh"),
+    file.path(SCRIPTS_DIR, "featureCounts", "featurecounts_SE.sh")
+  ))
+  deseq_modules <- module_versions_from_scripts(file.path(SCRIPTS_DIR, "DESeq2", "deseq2.sh"), "R module in CodeSpringLab DESeq2 script")
+  rsem_modules <- module_versions_from_scripts(c(
+    file.path(SCRIPTS_DIR, "RSEM", "RSEM_PE.sh"),
+    file.path(SCRIPTS_DIR, "RSEM", "RSEM_SE.sh")
+  ))
+  kallisto_modules <- module_versions_from_scripts(c(
+    file.path(SCRIPTS_DIR, "Kallisto", "kallisto_PE.sh"),
+    file.path(SCRIPTS_DIR, "Kallisto", "kallisto_SE.sh")
+  ))
   rows <- list(
     c("Reference", "Genome annotation", gencode_label(project), paste0(genome_species(project), " / ", genome_reference_key(project)), "STAR, featureCounts, DESeq2, RSEM, Kallisto"),
-    c("Tool", "FastQC", command_version("fastqc", "--version"), "Read quality control", "Raw or trimmed FASTQ"),
-    c("Tool", "cutadapt", command_version("cutadapt", "--version"), "Adapter trimming", "Raw FASTQ"),
-    c("Tool", "STAR", command_version("STAR", "--version"), "Spliced alignment", gencode_label(project)),
-    c("Tool", "featureCounts / Subread", command_version("featureCounts", "-v"), "Gene-level counting", gencode_label(project)),
-    c("Tool", "DESeq2", r_package_version("DESeq2"), "Differential expression", "featureCounts count_matrix.txt"),
-    c("Tool", "GSEApy", "BSR Python/3.7.4-GCCcore-8.3.0 with gseapy", "Pathway analysis", "Selected Enrichr/MSigDB-style gene set database"),
-    c("Tool", "RSEM", command_version("rsem-calculate-expression", "--version"), "Optional gene/transcript quantification", gencode_label(project)),
-    c("Tool", "Kallisto", command_version("kallisto", "version"), "Optional transcript abundance quantification", gencode_label(project)),
-    c("Tool", "RSeQC", "not required for core run; strand BED generated with reference", "Optional strand/QC support", gencode_label(project))
+    c("Tool", "FastQC", fastqc_modules, "Read quality control", "Raw or trimmed FASTQ"),
+    c("Tool", "cutadapt", cutadapt_modules, "Adapter trimming", "Raw FASTQ"),
+    c("Tool", "STAR", star_modules, "Spliced alignment", gencode_label(project)),
+    c("Tool", "featureCounts / Subread", featurecounts_modules, "Gene-level counting", gencode_label(project)),
+    c("Tool", "DESeq2", deseq_modules, "Differential expression", "featureCounts count_matrix.txt"),
+    c("Tool", "GSEApy", "BSR; Python/3.7.4-GCCcore-8.3.0; gseapy 1.1.4 on bamdev1", "Pathway analysis", "Selected Enrichr/MSigDB-style gene set database"),
+    c("Tool", "RSEM", rsem_modules, "Optional gene/transcript quantification", gencode_label(project)),
+    c("Tool", "Kallisto", kallisto_modules, "Optional transcript abundance quantification", gencode_label(project)),
+    c("Tool", "RSeQC", "RSeQC module listed in featureCounts/RSEM scripts; strand BED generated with reference", "Optional strand/QC support", gencode_label(project))
   )
   out <- as.data.frame(do.call(rbind, rows), stringsAsFactors = FALSE)
   colnames(out) <- c("Type", "Name", "Version/reference", "Used for", "Input/reference")
@@ -2429,58 +2445,6 @@ write_gseapy_shell_script <- function(project, python_script, script_dir, projec
   script
 }
 
-gsea_native_runner_path <- function() {
-  candidates <- unique(c(
-    file.path(getwd(), "gsea_native_runner.R"),
-    file.path(dirname(normalizePath("app.R", winslash = "/", mustWork = FALSE)), "gsea_native_runner.R"),
-    file.path(path.expand("~/CodeSpringWeb"), "gsea_native_runner.R")
-  ))
-  hit <- candidates[file.exists(candidates)]
-  if (length(hit)) return(hit[[1]])
-  candidates[[1]]
-}
-
-write_gsea_r_shell_script <- function(project, runner_script, script_dir, project_name, results_root, geneset, genome,
-                                      compare_col, design_dir, deseq_dir, outpath_pathway, reference, comparison,
-                                      gtf_path, ortholog_path) {
-  log_dir <- file.path(dirname(project$data_dir), "log")
-  dir.create(log_dir, recursive = TRUE, showWarnings = FALSE)
-  script <- file.path(log_dir, "run_gsea_r_pathway.sh")
-  lines <- c(
-    "#!/usr/bin/env bash",
-    "set -euo pipefail",
-    "module load EBModules >/dev/null 2>&1 || true",
-    "module load R >/dev/null 2>&1 || true",
-    "if ! command -v Rscript >/dev/null 2>&1; then",
-    "  echo 'ERROR: Rscript was not found in this server environment.' >&2",
-    "  exit 1",
-    "fi",
-    "echo \"Using Rscript: $(command -v Rscript)\"",
-    "Rscript --version || true",
-    "Rscript -e 'cat(\"R library paths:\\n\", paste(.libPaths(), collapse=\"\\n\"), \"\\n\", sep=\"\"); cat(\"fgsea available: \", requireNamespace(\"fgsea\", quietly=TRUE), \"\\n\", sep=\"\"); if (!requireNamespace(\"fgsea\", quietly=TRUE)) stop(\"fgsea is not available to this SLURM job. Re-run run_codespringweb.sh or check R_LIBS_USER.\")'",
-    paste(
-      "Rscript",
-      shQuote(runner_script),
-      shQuote(script_dir),
-      shQuote(project_name),
-      shQuote(results_root),
-      shQuote(geneset),
-      shQuote(genome),
-      shQuote(compare_col),
-      shQuote(design_dir),
-      shQuote(deseq_dir),
-      shQuote(outpath_pathway),
-      shQuote(reference),
-      shQuote(comparison),
-      shQuote(gtf_path),
-      shQuote(ortholog_path)
-    )
-  )
-  writeLines(lines, script)
-  Sys.chmod(script, mode = "0755")
-  script
-}
-
 submit_gseapy_job <- function(project, compare_col, reference, comparison, geneset) {
   geneset <- trimws(geneset %||% "")
   if (!nzchar(geneset)) stop("Choose a GSEA gene-set database.")
@@ -2869,15 +2833,20 @@ body { background:#eef3f8; color:#17202f; }
 .native-results-host .main-tabs { padding: 6px 6px 10px 6px !important; overflow-x:auto !important; }
 .native-results-host .tab-content, .native-results-host .tab-pane, .native-results-host .main-panel { max-width:100% !important; overflow-x:auto !important; padding-left:0 !important; padding-right:0 !important; }
 .native-results-host img { max-width:100% !important; height:auto !important; object-fit:contain !important; }
-.native-results-host .shiny-plot-output, .native-results-host .plot-output { max-width:100% !important; }
-.web-tab-strip { display:flex; align-items:center; justify-content:flex-start; gap:8px; min-height:0; margin:0 0 2px 0; }
+.native-results-host .shiny-plot-output, .native-results-host .plot-output { max-width:100% !important; max-height:620px !important; }
+.native-results-host img[src*='pca'], .native-results-host img[src*='volcano'] { max-height:620px !important; width:auto !important; }
+.web-tab-strip { display:none; align-items:center; justify-content:flex-start; gap:10px; min-height:0; margin:0 0 2px 0; }
+.web-tab-select { display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap; }
+.web-tab-select .form-group { margin-bottom:0; min-width:190px; }
+.web-tab-select label { margin-bottom:2px; font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:#657084; }
+.web-tab-select select { height:32px; border-radius:8px; border:1px solid #d8dde8; box-shadow:none; font-weight:700; color:#25364d; }
 .web-context-chip { display:inline-flex; align-items:center; gap:6px; border:1px solid #d8dde8; border-radius:999px; background:#ffffff; color:#304a66; font-size:12px; font-weight:800; padding:6px 10px; box-shadow:0 6px 16px rgba(20,38,64,.05); max-width:100%; }
 .web-context-chip span { color:#657084; font-weight:700; }
 body.results-explorer-mode .csl-header { display:none !important; }
 body.results-explorer-mode .container-fluid { padding:2px 4px 10px 4px !important; }
 body.results-explorer-mode .web-sidebar { display:none !important; }
 body.results-explorer-mode .web-main { width:100% !important; max-width:100% !important; padding-left:0 !important; padding-right:0 !important; }
-body.results-explorer-mode .web-tab-strip { margin:2px 0 0 4px; }
+body.results-explorer-mode .web-tab-strip { display:flex; margin:2px 0 2px 4px; }
 body.results-explorer-mode .tabbable > .nav-tabs { margin-bottom:6px; }
 body.results-explorer-mode .tabbable > .tab-content { padding-top:0 !important; }
 .dataTables_wrapper { width:100%; max-width:100%; overflow-x:auto; }
@@ -2887,28 +2856,32 @@ body.results-explorer-mode .tabbable > .tab-content { padding-top:0 !important; 
 .native-results-host .table, .native-results-host table { max-width:100%; }
 .native-results-host .shiny-html-output { max-width:100%; overflow-x:auto !important; }
 .native-results-host .row > .col-sm-3 {
-  width: 18% !important;
-  min-width: 180px !important;
+  width: 14% !important;
+  min-width: 145px !important;
   padding-left: 2px !important;
-  padding-right: 6px !important;
+  padding-right: 4px !important;
 }
 .native-results-host .row > .col-sm-9 {
-  width: 82% !important;
-  max-width: calc(82% - 2px) !important;
-  padding-left: 6px !important;
+  width: 86% !important;
+  max-width: calc(86% - 2px) !important;
+  padding-left: 4px !important;
   padding-right: 2px !important;
 }
 .native-results-host .row > .col-sm-4 {
-  width: 22% !important;
-  min-width: 210px !important;
+  width: 18% !important;
+  min-width: 175px !important;
   padding-left: 2px !important;
-  padding-right: 6px !important;
+  padding-right: 4px !important;
 }
 .native-results-host .row > .col-sm-8 {
-  width: 78% !important;
-  max-width: calc(78% - 2px) !important;
-  padding-left: 6px !important;
+  width: 82% !important;
+  max-width: calc(82% - 2px) !important;
+  padding-left: 4px !important;
   padding-right: 2px !important;
+}
+.native-results-host .well {
+  padding: 8px !important;
+  margin-bottom: 8px !important;
 }
 
 
@@ -2941,12 +2914,12 @@ body > .container-fluid > .row > .col-sm-10 {
   padding-right: 0;
 }
 .native-results-host .col-sm-2 {
-  width: 170px !important;
-  min-width: 170px !important;
+  width: 140px !important;
+  min-width: 140px !important;
 }
 .native-results-host .col-sm-10 {
-  width: calc(100% - 170px) !important;
-  max-width: calc(100% - 170px) !important;
+  width: calc(100% - 140px) !important;
+  max-width: calc(100% - 140px) !important;
 }
 @media (max-width: 900px) {
   body > .container-fluid > .row {
@@ -3396,7 +3369,7 @@ ui <- fluidPage(
                  br(),
                  h4("Sample Progress"),
                  uiOutput("sample_progress_matrix_ui"),
-                 div(class = "job-table-wrap", h4("Submitted Jobs"), uiOutput("progress_job_filter_ui"), table_output("active_jobs_table"))),
+                div(class = "job-table-wrap", h4("Submitted Jobs"), table_output("active_jobs_table"))),
         tabPanel("Run Pipeline", br(), h3("Run Pipeline"),
                  tags$p(class = "muted", "Each tool has its own settings. Jobs are submitted with SLURM sbatch and keep running after this app or browser is closed."),
                  uiOutput("run_resource_strip"),
@@ -3405,7 +3378,7 @@ ui <- fluidPage(
                  br(),
                  verbatimTextOutput("run_output")),
         tabPanel("Results Explorer", uiOutput("native_results_ui")),
-        tabPanel("Logs", br(), h3("Submitted Jobs"), uiOutput("job_filter_ui"), table_output("jobs_table"), br(), uiOutput("log_file_ui"), tags$pre(class = "log-viewer", textOutput("selected_log_text"))),
+        tabPanel("Logs", br(), h3("Submitted Jobs"), table_output("jobs_table"), br(), uiOutput("log_file_ui"), tags$pre(class = "log-viewer", textOutput("selected_log_text"))),
         tabPanel("Methods", br(),
                  h3("Methods Documentation"),
                  tags$p(class = "muted", "Project-level methods, reference genome, tool usage, and detected versions where available."),
@@ -3430,8 +3403,6 @@ server <- function(input, output, session) {
   native_registered_id <- reactiveVal("")
   job_history_state <- reactiveVal(data.frame())
   project_status_state <- reactiveVal(data.frame())
-  progress_job_filter_state <- reactiveVal("All")
-  job_filter_state <- reactiveVal("All")
   featurecounts_matrix_autosubmitted <- reactiveVal(character(0))
   sample_size_cache <- reactiveVal(data.frame(path = character(), size = numeric(), checked = character(), stringsAsFactors = FALSE))
   sample_progress_state <- reactiveVal(data.frame())
@@ -3624,6 +3595,12 @@ server <- function(input, output, session) {
     p[vapply(p, function(x) identical(x$analysis, analysis), logical(1))]
   })
 
+  projects_for_analysis <- function(analysis) {
+    p <- projects()
+    if (!length(analysis) || is.null(analysis) || !nzchar(analysis)) return(p)
+    p[vapply(p, function(x) identical(x$analysis, analysis), logical(1))]
+  }
+
   output$project_ui <- renderUI({
     p <- filtered_projects()
     labels <- if (length(p)) vapply(p, function(x) x$label, character(1)) else character(0)
@@ -3733,12 +3710,41 @@ server <- function(input, output, session) {
   })
 
   output$tab_context_ui <- renderUI({
-    p <- current_project()
-    tagList(
-      span(class = "web-context-chip", span("Analysis"), p$analysis),
-      span(class = "web-context-chip", span("Project"), p$label)
+    if (!identical(input$web_main_tabs, "Results Explorer")) return(NULL)
+    div(class = "web-tab-select",
+      selectInput("top_analysis", "Analysis", choices = c("RNA-seq", "ATAC-seq", "ChIP-seq"), selected = input$analysis %||% "RNA-seq", selectize = FALSE),
+      uiOutput("top_project_ui")
     )
   })
+
+  output$top_project_ui <- renderUI({
+    analysis <- input$top_analysis %||% input$analysis %||% "RNA-seq"
+    p <- projects_for_analysis(analysis)
+    labels <- if (length(p)) vapply(p, function(x) x$label, character(1)) else character(0)
+    ids <- if (length(p)) names(p) else character(0)
+    choices <- c("Start a new project" = "__new__", stats::setNames(ids, labels))
+    selected <- input$project_id %||% "__new__"
+    if (!selected %in% unname(choices)) selected <- "__new__"
+    selectInput("top_project_id", "Project", choices = choices, selected = selected, selectize = FALSE)
+  })
+
+  observeEvent(input$top_analysis, {
+    if (!identical(input$analysis, input$top_analysis)) {
+      updateSelectInput(session, "analysis", selected = input$top_analysis)
+    }
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$analysis, {
+    if (!is.null(input$top_analysis) && !identical(input$top_analysis, input$analysis)) {
+      updateSelectInput(session, "top_analysis", selected = input$analysis)
+    }
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$top_project_id, {
+    if (!is.null(input$top_project_id) && !identical(input$project_id, input$top_project_id)) {
+      updateSelectInput(session, "project_id", selected = input$top_project_id)
+    }
+  }, ignoreInit = TRUE)
 
   output$setup_table <- renderTable({
     p <- current_project()
@@ -3940,34 +3946,8 @@ server <- function(input, output, session) {
 
   output$active_jobs_table <- render_csl_table({
     progress_refresh()
-    all_jobs <- job_history_progress_display(current_project())
-    tool <- input$progress_job_tool_filter %||% progress_job_filter_state() %||% "All"
-    jobs <- filter_jobs_by_tool(all_jobs, tool)
-    prepare_job_table_for_display(empty_job_filter_message(jobs, all_jobs, tool))
+    prepare_job_table_for_display(job_history_progress_display(current_project()))
   }, page_length = 10, escape = FALSE)
-
-  output$progress_job_filter_ui <- renderUI({
-    progress_refresh()
-    jobs <- job_history_progress_display(current_project())
-    choices <- job_filter_choices_from_jobs(jobs)
-    selected <- isolate(input$progress_job_tool_filter %||% progress_job_filter_state())
-    if (!selected %in% choices) selected <- "All"
-    div(class = "button-row",
-        div(style = "min-width:260px; flex:1;", selectInput("progress_job_tool_filter", "Filter submitted jobs by tool", choices = choices, selected = selected, selectize = FALSE)),
-        div(style = "padding-top:25px;", actionButton("clear_progress_job_filter", "Clear", class = "btn-default"))
-    )
-  })
-
-  observeEvent(input$progress_job_tool_filter, {
-    progress_job_filter_state(input$progress_job_tool_filter %||% "All")
-    progress_refresh(Sys.time())
-  }, ignoreInit = TRUE)
-
-  observeEvent(input$clear_progress_job_filter, {
-    progress_job_filter_state("All")
-    updateSelectInput(session, "progress_job_tool_filter", selected = "All")
-    progress_refresh(Sys.time())
-  })
 
   output$run_pipeline_stepper <- renderUI({
     progress_refresh()
@@ -4187,49 +4167,19 @@ server <- function(input, output, session) {
   output$all_file_view <- renderUI({ req(input$all_file); image_or_file_ui(input$all_file) })
   output$jobs_table <- render_csl_table({
     progress_refresh()
-    all_jobs <- job_history_display(current_project())
-    tool <- input$job_tool_filter %||% job_filter_state() %||% "All"
-    jobs <- filter_jobs_by_tool(all_jobs, tool)
-    prepare_job_table_for_display(empty_job_filter_message(jobs, all_jobs, tool))
+    prepare_job_table_for_display(job_history_display(current_project()))
   }, page_length = 50, escape = FALSE)
-
-  output$job_filter_ui <- renderUI({
-    progress_refresh()
-    jobs <- job_history_display(current_project())
-    choices <- job_filter_choices_from_jobs(jobs)
-    selected <- isolate(input$job_tool_filter %||% job_filter_state())
-    if (!selected %in% choices) selected <- "All"
-    div(class = "button-row",
-        div(style = "min-width:260px; flex:1;", selectInput("job_tool_filter", "Filter jobs by tool", choices = choices, selected = selected, selectize = FALSE)),
-        div(style = "padding-top:25px;", actionButton("clear_job_filter", "Clear", class = "btn-default"))
-    )
-  })
-
-  observeEvent(input$job_tool_filter, {
-    job_filter_state(input$job_tool_filter %||% "All")
-    progress_refresh(Sys.time())
-  }, ignoreInit = TRUE)
-
-  observeEvent(input$clear_job_filter, {
-    job_filter_state("All")
-    updateSelectInput(session, "job_tool_filter", selected = "All")
-    progress_refresh(Sys.time())
-  })
 
   output$log_file_ui <- renderUI({
     progress_refresh()
     project <- current_project()
     all_choices <- log_file_choices(project)
-    tools <- log_tool_choices(project)
-    selected_tool <- input$log_tool_filter %||% "All"
-    if (!selected_tool %in% tools) selected_tool <- "All"
     selected_type <- input$log_type_filter %||% "All"
-    choices <- log_file_choices(project, selected_tool, selected_type)
+    choices <- log_file_choices(project, "All", selected_type)
     if (!length(all_choices)) return(div(class = "empty-box", paste("No stdout/stderr log files were found in", file.path(dirname(project$data_dir), "log"))))
     controls <- fluidRow(
-      column(4, selectInput("log_tool_filter", "Tool", choices = tools, selected = selected_tool, selectize = FALSE)),
-      column(4, selectInput("log_type_filter", "Log type", choices = c("All", "output", "error"), selected = selected_type, selectize = FALSE)),
-      column(4, if (length(choices)) selectInput("selected_log_file", "Log file", choices = choices, selectize = FALSE) else div(class = "empty-box", "No logs match this filter."))
+      column(3, selectInput("log_type_filter", "Log type", choices = c("All", "output", "error"), selected = selected_type, selectize = FALSE)),
+      column(9, if (length(choices)) selectInput("selected_log_file", "Log file", choices = choices, selectize = FALSE) else div(class = "empty-box", "No logs match this filter."))
     )
     tagList(
       controls,
