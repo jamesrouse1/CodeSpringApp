@@ -2160,6 +2160,21 @@ select.form-control {
   line-height: 1.35;
   margin: 8px 0;
 }
+.path-browser-actions {
+  display:flex;
+  gap:8px;
+  flex-wrap:wrap;
+  margin:8px 0 10px 0;
+}
+.path-browser-current {
+  background:#f8fafc;
+  border:1px solid #d8dde8;
+  border-radius:6px;
+  padding:8px;
+  font-size:12px;
+  overflow-wrap:anywhere;
+  margin-bottom:8px;
+}
 
 "
 
@@ -2240,6 +2255,84 @@ server <- function(input, output, session) {
   native_registered_id <- reactiveVal("")
   sample_size_cache <- reactiveVal(data.frame(path = character(), size = numeric(), checked = character(), stringsAsFactors = FALSE))
   sample_progress_state <- reactiveVal(data.frame())
+  path_browser <- reactiveValues(target = "", mode = "dir", path = path.expand("~"))
+
+  open_server_browser <- function(target, mode = "dir", current = "") {
+    path_browser$target <- target
+    path_browser$mode <- mode
+    path_browser$path <- normalizePath(browser_start_path(current, mode), winslash = "/", mustWork = FALSE)
+    title <- if (identical(mode, "file")) "Choose a server file" else "Choose a server folder"
+    showModal(modalDialog(
+      title = title,
+      div(class = "path-browser-current", textOutput("browser_current_path_text")),
+      textInput("browser_manual_path", "Jump to folder", value = path_browser$path),
+      div(class = "path-browser-actions",
+          actionButton("browser_go_path", "Go"),
+          actionButton("browser_up", "Up one folder"),
+          actionButton("browser_open_choice", "Open selected")
+      ),
+      uiOutput("browser_choices_ui"),
+      footer = tagList(
+        modalButton("Cancel"),
+        actionButton("browser_use_current", if (identical(mode, "file")) "Use selected/current" else "Use this folder", class = "btn-primary")
+      ),
+      easyClose = TRUE,
+      size = "l"
+    ))
+  }
+
+  output$browser_current_path_text <- renderText({
+    paste("Current folder:", normalizePath(path_browser$path, winslash = "/", mustWork = FALSE))
+  })
+
+  output$browser_choices_ui <- renderUI({
+    choices <- server_browser_choices(path_browser$path, path_browser$mode)
+    selectInput("browser_choice", "Folders/files", choices = choices, selected = choices[[1]], selectize = FALSE, size = min(max(length(choices), 4), 18))
+  })
+
+  observeEvent(input$browse_new_fastq_dir, {
+    open_server_browser("new_fastq_dir", "dir", input$new_fastq_dir %||% "")
+  })
+
+  observeEvent(input$browse_new_design_matrix_path, {
+    open_server_browser("new_design_matrix_path", "file", input$new_design_matrix_path %||% "")
+  })
+
+  observeEvent(input$browser_go_path, {
+    candidate <- browser_start_path(input$browser_manual_path %||% path_browser$path, "dir")
+    path_browser$path <- normalizePath(candidate, winslash = "/", mustWork = FALSE)
+    updateTextInput(session, "browser_manual_path", value = path_browser$path)
+  })
+
+  observeEvent(input$browser_up, {
+    path_browser$path <- normalizePath(dirname(path_browser$path), winslash = "/", mustWork = FALSE)
+    updateTextInput(session, "browser_manual_path", value = path_browser$path)
+  })
+
+  observeEvent(input$browser_open_choice, {
+    choice <- input$browser_choice %||% ""
+    if (!nzchar(choice)) return()
+    if (dir.exists(choice)) {
+      path_browser$path <- normalizePath(choice, winslash = "/", mustWork = FALSE)
+      updateTextInput(session, "browser_manual_path", value = path_browser$path)
+    } else if (identical(path_browser$mode, "file") && file.exists(choice)) {
+      updateTextInput(session, path_browser$target, value = normalizePath(choice, winslash = "/", mustWork = FALSE))
+      removeModal()
+    }
+  })
+
+  observeEvent(input$browser_use_current, {
+    choice <- input$browser_choice %||% ""
+    if (identical(path_browser$mode, "file") && nzchar(choice) && file.exists(choice) && !dir.exists(choice)) {
+      value <- normalizePath(choice, winslash = "/", mustWork = FALSE)
+    } else if (identical(path_browser$mode, "file")) {
+      value <- file.path(normalizePath(path_browser$path, winslash = "/", mustWork = FALSE), "design_matrix.txt")
+    } else {
+      value <- normalizePath(path_browser$path, winslash = "/", mustWork = FALSE)
+    }
+    updateTextInput(session, path_browser$target, value = value)
+    removeModal()
+  })
 
   filtered_projects <- reactive({
     p <- projects()
@@ -2266,13 +2359,15 @@ server <- function(input, output, session) {
     tagList(
       tags$hr(),
       h4("New Project"),
-      textInput("new_project_name", "Project name", value = "new_rnaseq_project"),
+      textInput("new_project_name", "Project name", value = "", placeholder = "e.g. my_project"),
       selectInput("new_project_analysis", "Analysis type", choices = c("RNA-seq", "ATAC-seq", "ChIP-seq"), selected = input$analysis, selectize = FALSE),
       selectInput("new_genome", "Genome", choices = c("mouse", "human"), selected = "mouse", selectize = FALSE),
       radioButtons("new_paired_end", "Reads", choices = c("Paired-end" = "paired", "Single-end" = "single"), selected = "paired"),
-      textInput("new_fastq_dir", "Raw FASTQ folder", value = ""),
+      textInput("new_fastq_dir", "Raw FASTQ folder", value = "", placeholder = "Choose with Browse or paste a server path"),
+      actionButton("browse_new_fastq_dir", "Browse server folders", class = "btn-default"),
       textInput("new_results_root", "Results root", value = "~/csl_results"),
-      textInput("new_design_matrix_path", "Design matrix path", value = ""),
+      textInput("new_design_matrix_path", "Design matrix path", value = "", placeholder = "Optional; defaults to <results>/<project>/data/manifest/design_matrix.txt"),
+      actionButton("browse_new_design_matrix_path", "Browse design matrix", class = "btn-default"),
       actionButton("create_project_config", "Create project", class = "btn-primary"),
       textOutput("create_project_status")
     )
@@ -2397,6 +2492,10 @@ server <- function(input, output, session) {
   })
 
   observeEvent(input$create_project_config, {
+    if (!nzchar(trimws(input$new_project_name %||% ""))) {
+      output$create_project_status <- renderText("ERROR: Enter a project name before creating the project.")
+      return()
+    }
     p <- new_project_from_inputs(input)
     msg <- tryCatch({
       cfg <- write_project_config(p)
@@ -2447,6 +2546,10 @@ server <- function(input, output, session) {
   output$design_save_status <- renderText("")
   observeEvent(input$save_design, {
     p <- current_project()
+    if (identical(input$project_id, "__new__") && !nzchar(trimws(input$new_project_name %||% ""))) {
+      output$design_save_status <- renderText("ERROR: Enter a project name before saving a new project design matrix.")
+      return()
+    }
     df <- collect_design_inputs(input, design_state())
     design_state(df)
     metadata <- setdiff(names(df), c("include", "sample", "filename", "status"))
