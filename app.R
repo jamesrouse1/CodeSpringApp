@@ -2866,19 +2866,23 @@ body { background:#eef3f8; color:#17202f; }
 .native-results-host { margin: 0 !important; width:100% !important; max-width:100% !important; overflow:auto !important; }
 .native-results-host > .container-fluid { max-width: none !important; width: 100% !important; margin: 0 !important; padding: 0 0 10px 0 !important; overflow-x:auto !important; }
 .native-results-host .app-shell { border-radius: 10px !important; box-shadow: none !important; margin:0 !important; overflow:visible !important; }
-.native-results-host .hero { padding: 12px 16px 10px 16px !important; }
+.native-results-host .hero { padding: 8px 12px 8px 12px !important; }
+.native-results-host .hero-title { font-size:24px !important; margin-bottom:4px !important; }
+.native-results-host .hero-subtitle, .native-results-host .hero-kicker { display:none !important; }
+.native-results-host .hero-logos { gap:10px !important; }
+.native-results-host .hero-logo { height:44px !important; max-height:44px !important; width:auto !important; }
 .native-results-host .main-tabs { padding: 6px 6px 10px 6px !important; overflow-x:auto !important; }
 .native-results-host .tab-content, .native-results-host .tab-pane, .native-results-host .main-panel { max-width:100% !important; overflow-x:auto !important; padding-left:0 !important; padding-right:0 !important; }
 .native-results-host img { max-width:100% !important; height:auto !important; object-fit:contain !important; }
 .native-results-host .shiny-plot-output, .native-results-host .plot-output { max-width:100% !important; }
-.web-tab-strip { display:flex; align-items:center; justify-content:flex-end; gap:8px; min-height:0; margin:0 0 8px 0; }
+.web-tab-strip { display:flex; align-items:center; justify-content:flex-start; gap:8px; min-height:0; margin:0 0 2px 0; }
 .web-context-chip { display:inline-flex; align-items:center; gap:6px; border:1px solid #d8dde8; border-radius:999px; background:#ffffff; color:#304a66; font-size:12px; font-weight:800; padding:6px 10px; box-shadow:0 6px 16px rgba(20,38,64,.05); max-width:100%; }
 .web-context-chip span { color:#657084; font-weight:700; }
 body.results-explorer-mode .csl-header { display:none !important; }
-body.results-explorer-mode .container-fluid { padding:6px 8px 14px 8px !important; }
+body.results-explorer-mode .container-fluid { padding:2px 4px 10px 4px !important; }
 body.results-explorer-mode .web-sidebar { display:none !important; }
 body.results-explorer-mode .web-main { width:100% !important; max-width:100% !important; padding-left:0 !important; padding-right:0 !important; }
-body.results-explorer-mode .web-tab-strip { margin:0 0 4px 0; }
+body.results-explorer-mode .web-tab-strip { margin:2px 0 0 4px; }
 body.results-explorer-mode .tabbable > .nav-tabs { margin-bottom:6px; }
 body.results-explorer-mode .tabbable > .tab-content { padding-top:0 !important; }
 .dataTables_wrapper { width:100%; max-width:100%; overflow-x:auto; }
@@ -2887,6 +2891,30 @@ body.results-explorer-mode .tabbable > .tab-content { padding-top:0 !important; 
 .native-results-host .dataTables_scrollBody { max-height:min(68vh, 650px) !important; overflow:auto !important; }
 .native-results-host .table, .native-results-host table { max-width:100%; }
 .native-results-host .shiny-html-output { max-width:100%; overflow-x:auto !important; }
+.native-results-host .row > .col-sm-3 {
+  width: 18% !important;
+  min-width: 180px !important;
+  padding-left: 2px !important;
+  padding-right: 6px !important;
+}
+.native-results-host .row > .col-sm-9 {
+  width: 82% !important;
+  max-width: calc(82% - 2px) !important;
+  padding-left: 6px !important;
+  padding-right: 2px !important;
+}
+.native-results-host .row > .col-sm-4 {
+  width: 22% !important;
+  min-width: 210px !important;
+  padding-left: 2px !important;
+  padding-right: 6px !important;
+}
+.native-results-host .row > .col-sm-8 {
+  width: 78% !important;
+  max-width: calc(78% - 2px) !important;
+  padding-left: 6px !important;
+  padding-right: 2px !important;
+}
 
 
 /* Executive polish layer */
@@ -2918,12 +2946,12 @@ body > .container-fluid > .row > .col-sm-10 {
   padding-right: 0;
 }
 .native-results-host .col-sm-2 {
-  width: 220px !important;
-  min-width: 220px !important;
+  width: 170px !important;
+  min-width: 170px !important;
 }
 .native-results-host .col-sm-10 {
-  width: calc(100% - 220px) !important;
-  max-width: calc(100% - 220px) !important;
+  width: calc(100% - 170px) !important;
+  max-width: calc(100% - 170px) !important;
 }
 @media (max-width: 900px) {
   body > .container-fluid > .row {
@@ -3088,7 +3116,11 @@ table.dataTable tbody td:first-child, table.dataTable thead th:first-child {
   max-width: 190px;
 }
 .native-results-host .qc-report-frame {
-  min-width: 1320px !important;
+  min-width: 0 !important;
+  width: 112% !important;
+  max-width: none !important;
+  transform: scale(.9);
+  transform-origin: top left;
 }
 
 /* Dropdown visibility hardening */
