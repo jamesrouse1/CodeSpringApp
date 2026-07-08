@@ -31,13 +31,15 @@ render_csl_table <- function(expr, page_length = 50, editable = FALSE, scroll_y 
       )
       numeric_cols <- names(df)[vapply(df, is.numeric, logical(1))]
       if (length(numeric_cols)) {
+        pvalue_cols <- numeric_cols[grepl("(^p$|pvalue|p\\.value|padj|fdr|qvalue|q\\.value)", numeric_cols, ignore.case = TRUE)]
         integer_cols <- numeric_cols[vapply(df[numeric_cols], function(x) {
           finite <- x[is.finite(x) & !is.na(x)]
           length(finite) == 0 || all(abs(finite - round(finite)) < 1e-8)
         }, logical(1))]
-        decimal_cols <- setdiff(numeric_cols, integer_cols)
+        decimal_cols <- setdiff(numeric_cols, c(integer_cols, pvalue_cols))
         if (length(integer_cols)) widget <- DT::formatRound(widget, columns = integer_cols, digits = 0)
         if (length(decimal_cols)) widget <- DT::formatRound(widget, columns = decimal_cols, digits = 2)
+        if (length(pvalue_cols)) widget <- DT::formatSignif(widget, columns = pvalue_cols, digits = 4)
       }
       widget
     }, server = FALSE)
@@ -84,6 +86,7 @@ SCRIPTS_DIR <- file.path(CSL_ROOT, "scripts_DoNotTouch")
 APP_HOME <- path.expand(Sys.getenv("CSL_WEB_HOME", unset = "~/.codespringweb"))
 dir.create(APP_HOME, recursive = TRUE, showWarnings = FALSE)
 JOBS_PATH <- file.path(APP_HOME, "jobs.tsv")
+LAST_PROJECT_PATH <- file.path(APP_HOME, "last_project_id.txt")
 LOGO_CSL_PATH <- file.path(SCRIPTS_DIR, "Logo_CSL.png")
 LOGO_PATH <- file.path(SCRIPTS_DIR, "Logo.png")
 FLOWCHART_PATH <- file.path(SCRIPTS_DIR, "flowchart.png")
@@ -252,6 +255,19 @@ with_slash <- function(path) {
   path <- trimws(as.character(path %||% ""))
   if (!nzchar(path)) return(path)
   paste0(sub("/+$", "", path), "/")
+}
+
+read_last_project_id <- function() {
+  if (!file.exists(LAST_PROJECT_PATH)) return("__new__")
+  value <- trimws(readLines(LAST_PROJECT_PATH, warn = FALSE, n = 1))
+  if (length(value) && nzchar(value[[1]])) value[[1]] else "__new__"
+}
+
+write_last_project_id <- function(project_id) {
+  project_id <- as.character(project_id %||% "__new__")
+  dir.create(dirname(LAST_PROJECT_PATH), recursive = TRUE, showWarnings = FALSE)
+  writeLines(project_id, LAST_PROJECT_PATH)
+  invisible(project_id)
 }
 
 design_path_from_dir <- function(path) {
@@ -500,7 +516,7 @@ infer_sample <- function(x) {
   clean_name(stem)
 }
 
-scan_fastqs <- function(folder, paired = TRUE, metadata_cols = "treatment") {
+scan_fastqs <- function(folder, paired = TRUE, metadata_cols = "treatment", infer_samples = FALSE) {
   files <- fastq_files(folder)
   rows <- list()
   used <- character(0)
@@ -509,15 +525,15 @@ scan_fastqs <- function(folder, paired = TRUE, metadata_cols = "treatment") {
       if (r1 %in% used) next
       r2 <- mate_name(r1, 2)
       if (!is.na(r2) && r2 %in% files) {
-        rows[[length(rows) + 1]] <- data.frame(include = TRUE, sample = infer_sample(r1), filename = paste(r1, r2, sep = ","), status = "paired")
+        rows[[length(rows) + 1]] <- data.frame(include = TRUE, sample = if (isTRUE(infer_samples)) infer_sample(r1) else "", filename = paste(r1, r2, sep = ","), status = "paired")
         used <- c(used, r1, r2)
       } else if (grepl("([._-]R)1|([._-])1", r1, ignore.case = TRUE)) {
-        rows[[length(rows) + 1]] <- data.frame(include = FALSE, sample = infer_sample(r1), filename = r1, status = "missing R2")
+        rows[[length(rows) + 1]] <- data.frame(include = FALSE, sample = if (isTRUE(infer_samples)) infer_sample(r1) else "", filename = r1, status = "missing R2")
         used <- c(used, r1)
       }
     }
   } else {
-    for (f in files) rows[[length(rows) + 1]] <- data.frame(include = TRUE, sample = infer_sample(f), filename = f, status = "single")
+    for (f in files) rows[[length(rows) + 1]] <- data.frame(include = TRUE, sample = if (isTRUE(infer_samples)) infer_sample(f) else "", filename = f, status = "single")
   }
   df <- if (length(rows)) do.call(rbind, rows) else data.frame(include = logical(), sample = character(), filename = character(), status = character())
   for (col in metadata_cols) if (!col %in% names(df)) df[[col]] <- ""
@@ -604,6 +620,13 @@ write_design_matrix <- function(project, df, metadata_cols) {
   if (!"include" %in% names(df)) df$include <- TRUE
   keep <- df[vapply(df$include, as_design_bool, logical(1)), , drop = FALSE]
   if (!NROW(keep)) stop("No samples are included.")
+  blank_sample <- !nzchar(trimws(as.character(keep$sample %||% "")))
+  if (any(blank_sample)) {
+    keep$sample[blank_sample] <- vapply(as.character(keep$filename[blank_sample]), function(x) {
+      first_file <- trimws(strsplit(x, ",", fixed = TRUE)[[1]][1])
+      infer_sample(first_file)
+    }, character(1))
+  }
   keep$sample <- clean_name(keep$sample)
   out <- project$design_matrix_path
   if (!nzchar(out) || basename(out) != "design_matrix.txt") {
@@ -679,30 +702,59 @@ job_history <- function(project) {
   if (!NROW(jobs)) return(data.frame())
   jobs$job_id <- vapply(as.character(jobs$output), extract_job_id, character(1))
   jobs$slurm_state <- ifelse(nzchar(jobs$job_id), "Submitted", "No job id")
+  jobs$elapsed <- ""
+  jobs$start_time <- ""
+  jobs$end_time <- ""
+  jobs$slurm_job_name <- ""
   ids <- unique(jobs$job_id[nzchar(jobs$job_id)])
   if (length(ids) && nzchar(Sys.which("squeue"))) {
-    sq <- tryCatch(system2("squeue", c("-h", "-j", paste(ids, collapse = ","), "-o", "%A|%T"), stdout = TRUE, stderr = FALSE), error = function(e) character(0))
+    sq <- tryCatch(system2("squeue", c("-h", "-j", paste(ids, collapse = ","), "-o", "%A|%T|%M|%j"), stdout = TRUE, stderr = FALSE), error = function(e) character(0))
     sq <- sq[nzchar(sq)]
     if (length(sq)) {
       parts <- strsplit(sq, "|", fixed = TRUE)
-      state_map <- setNames(vapply(parts, function(x) if (length(x) >= 2) x[2] else "Active", character(1)),
-                            vapply(parts, function(x) x[1], character(1)))
+      ids_seen <- vapply(parts, function(x) x[1], character(1))
+      state_map <- setNames(vapply(parts, function(x) if (length(x) >= 2) x[2] else "Active", character(1)), ids_seen)
+      elapsed_map <- setNames(vapply(parts, function(x) if (length(x) >= 3) x[3] else "", character(1)), ids_seen)
+      name_map <- setNames(vapply(parts, function(x) if (length(x) >= 4) x[4] else "", character(1)), ids_seen)
       matched <- jobs$job_id %in% names(state_map)
       jobs$slurm_state[matched] <- unname(state_map[jobs$job_id[matched]])
+      jobs$elapsed[matched] <- unname(elapsed_map[jobs$job_id[matched]])
+      jobs$slurm_job_name[matched] <- unname(name_map[jobs$job_id[matched]])
       jobs$slurm_state[!matched & nzchar(jobs$job_id)] <- "Finished or not in queue"
     } else {
       jobs$slurm_state[nzchar(jobs$job_id)] <- "Finished or not in queue"
     }
   }
-  extract_output_field <- function(x, key) {
-    pat <- paste0(".*", key, ":[[:space:]]*([^\\n]+).*")
-    val <- sub(pat, "\\1", x)
-    ifelse(identical(val, x), "", val)
+  if (length(ids) && nzchar(Sys.which("sacct"))) {
+    sac <- tryCatch(system2("sacct", c("-n", "-P", "-j", paste(ids, collapse = ","), "--format=JobIDRaw,State,Elapsed,Start,End,JobName"), stdout = TRUE, stderr = FALSE), error = function(e) character(0))
+    sac <- sac[nzchar(sac)]
+    if (length(sac)) {
+      parts <- strsplit(sac, "|", fixed = TRUE)
+      root_rows <- parts[vapply(parts, function(x) length(x) >= 6 && !grepl("\\.", x[1], fixed = TRUE), logical(1))]
+      if (length(root_rows)) {
+        sac_ids <- vapply(root_rows, function(x) x[1], character(1))
+        sac_state <- setNames(vapply(root_rows, function(x) x[2], character(1)), sac_ids)
+        sac_elapsed <- setNames(vapply(root_rows, function(x) x[3], character(1)), sac_ids)
+        sac_start <- setNames(vapply(root_rows, function(x) x[4], character(1)), sac_ids)
+        sac_end <- setNames(vapply(root_rows, function(x) x[5], character(1)), sac_ids)
+        sac_name <- setNames(vapply(root_rows, function(x) x[6], character(1)), sac_ids)
+        queued <- jobs$slurm_state %in% c("Submitted", "Finished or not in queue")
+        matched <- jobs$job_id %in% sac_ids
+        jobs$slurm_state[matched & queued] <- unname(sac_state[jobs$job_id[matched & queued]])
+        jobs$elapsed[matched] <- ifelse(nzchar(jobs$elapsed[matched]), jobs$elapsed[matched], unname(sac_elapsed[jobs$job_id[matched]]))
+        jobs$start_time[matched] <- unname(sac_start[jobs$job_id[matched]])
+        jobs$end_time[matched] <- unname(sac_end[jobs$job_id[matched]])
+        missing_name <- matched & !nzchar(jobs$slurm_job_name)
+        jobs$slurm_job_name[missing_name] <- unname(sac_name[jobs$job_id[missing_name]])
+      }
+    }
   }
   jobs$input_mode <- vapply(as.character(jobs$output), extract_output_field, character(1), key = "input_mode")
+  jobs$sample <- vapply(as.character(jobs$output), extract_output_field, character(1), key = "sample")
+  jobs$target <- vapply(as.character(jobs$output), extract_output_field, character(1), key = "target")
   jobs$stdout <- vapply(as.character(jobs$output), extract_output_field, character(1), key = "stdout")
   jobs$stderr <- vapply(as.character(jobs$output), extract_output_field, character(1), key = "stderr")
-  keep <- intersect(c("time", "step", "job_id", "slurm_state", "input_mode", "stdout", "stderr"), names(jobs))
+  keep <- intersect(c("time", "step", "sample", "job_id", "slurm_state", "elapsed", "start_time", "end_time", "input_mode", "target", "stdout", "stderr"), names(jobs))
   jobs[, keep, drop = FALSE]
 }
 
@@ -755,12 +807,13 @@ log_label_from_path <- function(path, fallback = "Log") {
   hit <- regmatches(base, m)[[1]]
   if (length(hit) == 3) {
     log_type <- if (identical(hit[2], "output")) "output" else "error"
-    return(paste(pretty_tool_name(hit[3]), log_type))
+    tool <- sub("_[0-9]{8}_[0-9]{6}$", "", hit[3])
+    return(paste(pretty_tool_name(tool), log_type, base))
   }
   paste(fallback, base)
 }
 
-log_file_choices <- function(project) {
+log_file_choices <- function(project, tool = "All", log_type = "All") {
   vals <- character(0)
   add_log_choice <- function(label, path) {
     path <- as.character(path %||% "")
@@ -793,7 +846,21 @@ log_file_choices <- function(project) {
 
   keep <- !is.na(vals) & nzchar(vals) & file.exists(vals)
   vals <- vals[keep]
-  vals[!duplicated(vals)]
+  vals <- vals[!duplicated(vals)]
+  if (length(vals) && !identical(tool %||% "All", "All")) {
+    vals <- vals[startsWith(names(vals), paste0(tool, " "))]
+  }
+  if (length(vals) && !identical(log_type %||% "All", "All")) {
+    vals <- vals[grepl(paste0("\\b", log_type, "\\b"), names(vals), ignore.case = TRUE)]
+  }
+  vals
+}
+
+log_tool_choices <- function(project) {
+  vals <- log_file_choices(project)
+  if (!length(vals)) return("All")
+  tools <- sub("\\s+(output|error).*$", "", names(vals), ignore.case = TRUE)
+  c("All", sort(unique(tools[nzchar(tools)])))
 }
 
 read_log_excerpt <- function(path, mode = "tail", n = 120) {
@@ -859,6 +926,22 @@ project_status <- function(project) {
   modes <- last_job_modes(project)
   raw$input <- unname(modes[raw$step])
   raw$input[is.na(raw$input)] <- ""
+  progress <- tryCatch(sample_progress(project, active_job_state_map(project), data.frame())$table, error = function(e) data.frame())
+  if (NROW(progress)) {
+    for (step in c("FastQC", "Cutadapt", "STAR", "RSEM optional", "Kallisto optional", "featureCounts")) {
+      hit <- progress[progress$step == step, , drop = FALSE]
+      if (!NROW(hit)) next
+      if (all(hit$status %in% c("Completed", "Optional, not run")) && any(hit$status == "Completed")) {
+        raw$status[raw$step == step] <- "Complete"
+      } else if (any(hit$status %in% c("Running", "Running, no growth yet", "Waiting"))) {
+        raw$status[raw$step == step] <- "Active"
+      } else if (any(hit$status == "Possibly incomplete")) {
+        raw$status[raw$step == step] <- "Active"
+      } else {
+        raw$status[raw$step == step] <- "Not started"
+      }
+    }
+  }
   active <- active_job_steps(project)
   raw$status[raw$step %in% active & raw$status != "Complete"] <- "Active"
   raw$status <- normalize_pipeline_status(raw$status)
@@ -902,30 +985,47 @@ status_cards <- function(df) {
 }
 
 sample_output_target <- function(project, sample, step) {
+  targets <- sample_step_targets(project, sample, step)
+  if (length(targets)) targets[[1]] else ""
+}
+
+sample_step_targets <- function(project, sample, step) {
   data_dir <- project$data_dir
   if (identical(step, "FastQC")) {
-    hits <- c(
-      list.files(file.path(data_dir, "fastqc"), pattern = paste0("^", sample, ".*\\.html$"), full.names = TRUE),
-      list.files(file.path(data_dir, "fastqc_cutadapt"), pattern = paste0("^", sample, ".*\\.html$"), full.names = TRUE)
-    )
-    return(hits[1] %||% file.path(data_dir, "fastqc", paste0(sample, "_fastqc.html")))
+    expected_for <- function(trimmed) {
+      pairs <- sample_fastq_pairs(project, trimmed)
+      hit <- pairs[pairs$sample == sample, , drop = FALSE]
+      if (!NROW(hit)) return(character(0))
+      reads <- unique(c(hit$r1[1], if (project$paired_end) hit$r2[1] else character(0)))
+      outdir <- file.path(data_dir, if (trimmed) "fastqc_cutadapt" else "fastqc")
+      file.path(outdir, sub(fastq_suffix_regex, "_fastqc.html", basename(reads), ignore.case = TRUE))
+    }
+    raw <- expected_for(FALSE)
+    trimmed <- expected_for(TRUE)
+    if (length(raw) && all(file.exists(raw))) return(raw)
+    if (length(trimmed) && all(file.exists(trimmed))) return(trimmed)
+    return(if (length(raw)) raw else trimmed)
   }
   switch(step,
     "Cutadapt" = {
       cutadapt_dir <- file.path(data_dir, "cutadapt")
+      pairs <- sample_fastq_pairs(project, FALSE)
+      hit <- pairs[pairs$sample == sample, , drop = FALSE]
+      if (NROW(hit)) {
+        reads <- unique(c(hit$r1[1], if (project$paired_end) hit$r2[1] else character(0)))
+        return(file.path(cutadapt_dir, basename(reads)))
+      }
       hits <- if (dir.exists(cutadapt_dir)) {
         list.files(cutadapt_dir, pattern = paste0("^", sample, ".*", fastq_suffix_regex), full.names = TRUE, ignore.case = TRUE)
       } else character(0)
-      if (length(hits)) return(hits[1])
-      pairs <- sample_fastq_pairs(project, FALSE)
-      hit <- pairs[pairs$sample == sample, , drop = FALSE]
-      if (NROW(hit)) file.path(cutadapt_dir, basename(hit$r1[1])) else file.path(cutadapt_dir, paste0(sample, ".fastq.gz"))
+      if (length(hits)) return(hits)
+      file.path(cutadapt_dir, paste0(sample, ".fastq.gz"))
     },
     "STAR" = file.path(data_dir, "star", sample, paste0(sample, "Aligned.sortedByCoord.out.bam")),
     "RSEM optional" = file.path(data_dir, "rsem", sample, paste0(sample, ".genes.results")),
     "Kallisto optional" = file.path(data_dir, "kallisto", sample, "abundance.tsv"),
     "featureCounts" = file.path(data_dir, "featurecounts", sample, paste0(sample, "_counts.txt")),
-    ""
+    character(0)
   )
 }
 
@@ -958,19 +1058,33 @@ sample_progress <- function(project, active_states = active_job_state_map(projec
   design <- safe_read_table(project$design_matrix_path)
   if (!NROW(design) || !"sample" %in% names(design)) return(list(table = data.frame(), cache = previous_cache))
   sample_steps <- c("FastQC", "Cutadapt", "STAR", "RSEM optional", "Kallisto optional", "featureCounts")
+  jobs <- job_history(project)
+  active_job_states <- c("PENDING", "CONFIGURING", "COMPLETING", "RUNNING", "SUSPENDED", "Submitted")
+  active_jobs <- if (NROW(jobs) && "slurm_state" %in% names(jobs)) jobs[jobs$slurm_state %in% active_job_states, , drop = FALSE] else data.frame()
   rows <- list()
   cache_rows <- list()
   for (sample in as.character(design$sample)) {
     for (step in sample_steps) {
-      target <- sample_output_target(project, sample, step)
-      size <- file_size_for(target)
-      previous_size <- previous_size_for(previous_cache, target)
-      active <- step %in% names(active_states)
-      slurm_state <- if (active) active_states[[step]] else ""
+      targets <- sample_step_targets(project, sample, step)
+      target <- paste(targets, collapse = "; ")
+      sizes <- vapply(targets, file_size_for, numeric(1))
+      size <- sum(sizes, na.rm = TRUE)
+      previous_sizes <- vapply(targets, function(path) previous_size_for(previous_cache, path), numeric(1))
+      previous_size <- sum(previous_sizes[is.finite(previous_sizes)], na.rm = TRUE)
+      has_previous <- any(is.finite(previous_sizes))
+      active_hit <- if (NROW(active_jobs)) {
+        step_hits <- active_jobs[active_jobs$step == step, , drop = FALSE]
+        if ("sample" %in% names(step_hits) && NROW(step_hits)) {
+          step_hits[nzchar(step_hits$sample) & step_hits$sample == sample, , drop = FALSE]
+        } else step_hits
+      } else data.frame()
+      active <- NROW(active_hit) > 0 || step %in% names(active_states)
+      slurm_state <- if (NROW(active_hit)) tail(active_hit$slurm_state, 1) else if (active && step %in% names(active_states)) active_states[[step]] else ""
       min_size <- minimum_expected_bytes(step)
-      growing <- active && is.finite(previous_size) && size > previous_size
+      complete_outputs <- length(sizes) > 0 && all(sizes >= min_size)
+      growing <- active && has_previous && size > previous_size
       optional <- step %in% c("RSEM optional", "Kallisto optional")
-      status <- if (size >= min_size && !growing) {
+      status <- if (complete_outputs && !growing) {
         "Completed"
       } else if (active && slurm_state %in% c("PENDING", "CONFIGURING")) {
         "Waiting"
@@ -1008,12 +1122,16 @@ sample_progress <- function(project, active_states = active_job_state_map(projec
         note = note,
         stringsAsFactors = FALSE
       )
-      cache_rows[[length(cache_rows) + 1]] <- data.frame(path = target, size = size, checked = as.character(Sys.time()), stringsAsFactors = FALSE)
+      if (length(targets)) {
+        for (j in seq_along(targets)) {
+          cache_rows[[length(cache_rows) + 1]] <- data.frame(path = targets[[j]], size = sizes[[j]], checked = as.character(Sys.time()), stringsAsFactors = FALSE)
+        }
+      }
     }
   }
   out <- do.call(rbind, rows)
   out <- out[order(out$sample, step_order(out$step)), , drop = FALSE]
-  cache <- do.call(rbind, cache_rows)
+  cache <- if (length(cache_rows)) do.call(rbind, cache_rows) else data.frame(path = character(), size = numeric(), checked = character(), stringsAsFactors = FALSE)
   list(table = out, cache = cache)
 }
 
@@ -1074,6 +1192,40 @@ save_job <- function(project, step, command, output = "") {
     stringsAsFactors = FALSE
   )
   utils::write.table(row, JOBS_PATH, sep = "\t", row.names = FALSE, quote = TRUE, append = file.exists(JOBS_PATH), col.names = !file.exists(JOBS_PATH))
+}
+
+append_run_manifest <- function(project, step, sample = "", command = character(0), output_target = "", input_mode = "", reference = "", job_id = "") {
+  log_dir <- file.path(dirname(project$data_dir), "log")
+  dir.create(log_dir, recursive = TRUE, showWarnings = FALSE)
+  manifest <- file.path(log_dir, "codespringweb_run_manifest.tsv")
+  row <- data.frame(
+    time = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+    project = project$name,
+    analysis = project$analysis,
+    step = step,
+    sample = sample %||% "",
+    job_id = job_id %||% "",
+    input_mode = input_mode %||% "",
+    genome = project$genome %||% "",
+    reference = reference %||% gencode_label(project),
+    output_target = output_target %||% "",
+    command = paste(command, collapse = " "),
+    stringsAsFactors = FALSE
+  )
+  utils::write.table(row, manifest, sep = "\t", row.names = FALSE, quote = TRUE, append = file.exists(manifest), col.names = !file.exists(manifest))
+  manifest
+}
+
+extract_output_field <- function(x, key) {
+  pat <- paste0(".*", key, ":[[:space:]]*([^\\n]+).*")
+  val <- sub(pat, "\\1", x)
+  ifelse(identical(val, x), "", val)
+}
+
+job_name_for <- function(project, step, sample = "") {
+  raw <- paste("csl", project$name, step, sample, sep = "_")
+  raw <- gsub("[^A-Za-z0-9_]+", "_", raw)
+  substr(gsub("_+", "_", raw), 1, 80)
 }
 
 rna_workdir <- function(project) {
@@ -1162,16 +1314,17 @@ parse_sbatch_job_id <- function(output) {
   sub(".*Submitted batch job[[:space:]]+", "", regmatches(output, m))
 }
 
-submit_sbatch <- function(project, step, script, args, log_name, input_mode = "") {
+submit_sbatch <- function(project, step, script, args, log_name, input_mode = "", sample = "", target = "", reference = "") {
   log_dir <- file.path(dirname(project$data_dir), "log")
   dir.create(log_dir, recursive = TRUE, showWarnings = FALSE)
   stamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
   stdout <- file.path(log_dir, paste0("output_", log_name, "_", stamp, ".txt"))
   stderr <- file.path(log_dir, paste0("error_", log_name, "_", stamp, ".txt"))
-  cmd <- c("sbatch", "-e", stderr, "-o", stdout, script, args)
+  job_name <- job_name_for(project, step, sample)
+  cmd <- c("sbatch", "-J", job_name, "-e", stderr, "-o", stdout, script, args)
   if (Sys.which("sbatch") == "") {
     msg <- "sbatch was not found. Run on the server to submit jobs."
-    save_job(project, step, cmd, msg)
+    save_job(project, step, cmd, paste(c(msg, if (nzchar(sample)) paste("sample:", sample), if (nzchar(target)) paste("target:", target)), collapse = "\n"))
     return(msg)
   }
   wd <- rna_workdir(project)
@@ -1182,8 +1335,136 @@ submit_sbatch <- function(project, step, script, args, log_name, input_mode = ""
   out <- tryCatch(system2(cmd[1], cmd[-1], stdout = TRUE, stderr = TRUE), error = function(e) conditionMessage(e))
   out_text <- paste(out, collapse = "\n")
   job_id <- parse_sbatch_job_id(out_text)
-  save_job(project, step, cmd, paste(c(out_text, if (nzchar(job_id)) paste("job_id:", job_id), if (nzchar(input_mode)) paste("input_mode:", input_mode), paste("stdout:", stdout), paste("stderr:", stderr)), collapse = "\n"))
-  paste(c(paste("Command:", paste(cmd, collapse = " ")), out_text, if (nzchar(job_id)) paste("Job ID:", job_id), if (nzchar(input_mode)) paste("Input mode:", input_mode), paste("stdout:", stdout), paste("stderr:", stderr)), collapse = "\n")
+  manifest <- append_run_manifest(project, step, sample, cmd, target, input_mode, reference, job_id)
+  save_job(project, step, cmd, paste(c(out_text, if (nzchar(job_id)) paste("job_id:", job_id), if (nzchar(sample)) paste("sample:", sample), if (nzchar(target)) paste("target:", target), if (nzchar(input_mode)) paste("input_mode:", input_mode), paste("stdout:", stdout), paste("stderr:", stderr), paste("manifest:", manifest)), collapse = "\n"))
+  paste(c(paste("Command:", paste(cmd, collapse = " ")), out_text, if (nzchar(job_id)) paste("Job ID:", job_id), if (nzchar(sample)) paste("Sample:", sample), if (nzchar(input_mode)) paste("Input mode:", input_mode), paste("stdout:", stdout), paste("stderr:", stderr), paste("manifest:", manifest)), collapse = "\n")
+}
+
+submit_sbatch_wrap <- function(project, step, shell_command, log_name, input_mode = "", sample = "", target = "", reference = "", dependency_ids = character(0)) {
+  log_dir <- file.path(dirname(project$data_dir), "log")
+  dir.create(log_dir, recursive = TRUE, showWarnings = FALSE)
+  stamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
+  stdout <- file.path(log_dir, paste0("output_", log_name, "_", stamp, ".txt"))
+  stderr <- file.path(log_dir, paste0("error_", log_name, "_", stamp, ".txt"))
+  job_name <- job_name_for(project, step, sample)
+  dep <- dependency_ids[nzchar(dependency_ids)]
+  cmd <- c("sbatch", "-J", job_name, "-e", stderr, "-o", stdout)
+  if (length(dep)) cmd <- c(cmd, paste0("--dependency=afterok:", paste(dep, collapse = ":")))
+  cmd <- c(cmd, "--wrap", shell_command)
+  if (Sys.which("sbatch") == "") {
+    msg <- "sbatch was not found. Run on the server to submit jobs."
+    save_job(project, step, cmd, paste(c(msg, if (nzchar(target)) paste("target:", target)), collapse = "\n"))
+    return(msg)
+  }
+  out <- tryCatch(system2(cmd[1], cmd[-1], stdout = TRUE, stderr = TRUE), error = function(e) conditionMessage(e))
+  out_text <- paste(out, collapse = "\n")
+  job_id <- parse_sbatch_job_id(out_text)
+  manifest <- append_run_manifest(project, step, sample, cmd, target, input_mode, reference, job_id)
+  save_job(project, step, cmd, paste(c(out_text, if (nzchar(job_id)) paste("job_id:", job_id), if (nzchar(sample)) paste("sample:", sample), if (nzchar(target)) paste("target:", target), if (nzchar(input_mode)) paste("input_mode:", input_mode), paste("stdout:", stdout), paste("stderr:", stderr), paste("manifest:", manifest)), collapse = "\n"))
+  paste(c(paste("Command:", paste(cmd, collapse = " ")), out_text, if (nzchar(job_id)) paste("Job ID:", job_id), if (length(dep)) paste("After:", paste(dep, collapse = ", ")), paste("stdout:", stdout), paste("stderr:", stderr), paste("manifest:", manifest)), collapse = "\n")
+}
+
+write_featurecounts_matrix_script <- function(project) {
+  log_dir <- file.path(dirname(project$data_dir), "log")
+  dir.create(log_dir, recursive = TRUE, showWarnings = FALSE)
+  script <- file.path(log_dir, "build_featurecounts_count_matrix.R")
+  lines <- c(
+    "args <- commandArgs(TRUE)",
+    "feature_dir <- args[[1]]",
+    "counts_dir <- args[[2]]",
+    "dir.create(counts_dir, recursive = TRUE, showWarnings = FALSE)",
+    "files <- list.files(feature_dir, pattern = '_counts\\\\.txt$', recursive = TRUE, full.names = TRUE)",
+    "if (!length(files)) stop('No featureCounts *_counts.txt files found in ', feature_dir)",
+    "read_one <- function(path) {",
+    "  x <- read.table(path, sep='\\t', header=TRUE, quote='\"', comment.char='#', check.names=FALSE)",
+    "  if (!nrow(x)) return(NULL)",
+    "  gene_col <- intersect(c('Geneid','gene_id','gene_name','GeneID'), names(x))[1]",
+    "  if (is.na(gene_col)) gene_col <- names(x)[1]",
+    "  count_col <- tail(names(x), 1)",
+    "  sample <- sub('_counts\\\\.txt$', '', basename(path))",
+    "  data.frame(gene=x[[gene_col]], value=suppressWarnings(as.numeric(x[[count_col]])), sample=sample, stringsAsFactors=FALSE)",
+    "}",
+    "parts <- Filter(Negate(is.null), lapply(files, read_one))",
+    "if (!length(parts)) stop('featureCounts files were empty or unreadable.')",
+    "samples <- vapply(parts, function(x) unique(x$sample)[1], character(1))",
+    "mat <- Reduce(function(a,b) merge(a,b, by='gene', all=TRUE), lapply(parts, function(x) { out <- x[, c('gene','value')]; names(out)[2] <- unique(x$sample)[1]; out }))",
+    "mat[is.na(mat)] <- 0",
+    "names(mat)[1] <- 'Geneid'",
+    "write.table(mat, file=file.path(counts_dir, 'count_matrix.txt'), sep='\\t', row.names=FALSE, quote=FALSE)",
+    "summary <- data.frame(sample=samples, total_counts=vapply(parts, function(x) sum(x$value, na.rm=TRUE), numeric(1)), stringsAsFactors=FALSE)",
+    "write.table(summary, file=file.path(counts_dir, 'featurecounts_summary.txt'), sep='\\t', row.names=FALSE, quote=FALSE)"
+  )
+  writeLines(lines, script)
+  script
+}
+
+write_quant_matrix_script <- function(project, tool = c("rsem", "kallisto")) {
+  tool <- match.arg(tool)
+  log_dir <- file.path(dirname(project$data_dir), "log")
+  dir.create(log_dir, recursive = TRUE, showWarnings = FALSE)
+  script <- file.path(log_dir, paste0("build_", tool, "_matrices.R"))
+  if (identical(tool, "rsem")) {
+    lines <- c(
+      "args <- commandArgs(TRUE)",
+      "quant_dir <- args[[1]]",
+      "counts_dir <- args[[2]]",
+      "dir.create(counts_dir, recursive = TRUE, showWarnings = FALSE)",
+      "files <- list.files(quant_dir, pattern = '\\\\.genes\\\\.results$', recursive = TRUE, full.names = TRUE)",
+      "if (!length(files)) stop('No RSEM *.genes.results files found in ', quant_dir)",
+      "read_metric <- function(path, metric) {",
+      "  x <- read.table(path, sep='\\t', header=TRUE, quote='\"', comment.char='', check.names=FALSE)",
+      "  sample <- sub('\\\\.genes\\\\.results$', '', basename(path))",
+      "  gene_col <- intersect(c('gene_id','gene_name'), names(x))[1]",
+      "  if (is.na(gene_col)) gene_col <- names(x)[1]",
+      "  if (!metric %in% names(x)) return(NULL)",
+      "  out <- data.frame(gene=x[[gene_col]], value=suppressWarnings(as.numeric(x[[metric]])), stringsAsFactors=FALSE)",
+      "  names(out)[2] <- sample",
+      "  out",
+      "}",
+      "write_metric <- function(metric, outfile) {",
+      "  parts <- Filter(Negate(is.null), lapply(files, read_metric, metric=metric))",
+      "  if (!length(parts)) return(invisible(FALSE))",
+      "  mat <- Reduce(function(a,b) merge(a,b, by='gene', all=TRUE), parts)",
+      "  mat[is.na(mat)] <- 0",
+      "  names(mat)[1] <- 'gene_id'",
+      "  write.table(mat, file=file.path(counts_dir, outfile), sep='\\t', row.names=FALSE, quote=FALSE)",
+      "}",
+      "write_metric('expected_count', 'rsem_expected_count_matrix.txt')",
+      "write_metric('TPM', 'rsem_tpm_matrix.txt')",
+      "write_metric('FPKM', 'rsem_fpkm_matrix.txt')"
+    )
+  } else {
+    lines <- c(
+      "args <- commandArgs(TRUE)",
+      "quant_dir <- args[[1]]",
+      "counts_dir <- args[[2]]",
+      "dir.create(counts_dir, recursive = TRUE, showWarnings = FALSE)",
+      "files <- list.files(quant_dir, pattern = 'abundance\\\\.tsv$', recursive = TRUE, full.names = TRUE)",
+      "if (!length(files)) stop('No Kallisto abundance.tsv files found in ', quant_dir)",
+      "read_metric <- function(path, metric) {",
+      "  x <- read.table(path, sep='\\t', header=TRUE, quote='\"', comment.char='', check.names=FALSE)",
+      "  sample <- basename(dirname(path))",
+      "  id_col <- intersect(c('target_id','transcript_id','gene_id'), names(x))[1]",
+      "  if (is.na(id_col)) id_col <- names(x)[1]",
+      "  if (!metric %in% names(x)) return(NULL)",
+      "  out <- data.frame(gene=x[[id_col]], value=suppressWarnings(as.numeric(x[[metric]])), stringsAsFactors=FALSE)",
+      "  names(out)[2] <- sample",
+      "  out",
+      "}",
+      "write_metric <- function(metric, outfile) {",
+      "  parts <- Filter(Negate(is.null), lapply(files, read_metric, metric=metric))",
+      "  if (!length(parts)) return(invisible(FALSE))",
+      "  mat <- Reduce(function(a,b) merge(a,b, by='gene', all=TRUE), parts)",
+      "  mat[is.na(mat)] <- 0",
+      "  names(mat)[1] <- 'target_id'",
+      "  write.table(mat, file=file.path(counts_dir, outfile), sep='\\t', row.names=FALSE, quote=FALSE)",
+      "}",
+      "write_metric('est_counts', 'kallisto_est_counts_matrix.txt')",
+      "write_metric('tpm', 'kallisto_tpm_matrix.txt')"
+    )
+  }
+  writeLines(lines, script)
+  script
 }
 
 missing_read_message <- function(project, pairs) {
@@ -1202,24 +1483,32 @@ submit_fastqc_jobs <- function(project, trimmed = FALSE) {
   pairs <- sample_fastq_pairs(project, trimmed)
   msg <- missing_read_message(project, pairs)
   if (nzchar(msg)) return(msg)
-  reads <- unique(c(pairs$r1, if (project$paired_end) pairs$r2 else character(0)))
   script <- file.path(SCRIPTS_DIR, "FastQC", "qsub_fastqc.sh")
   input_mode <- if (trimmed) "trimmed reads" else "raw reads"
-  paste(vapply(reads, function(read) submit_sbatch(project, "FastQC", script, c(read, outdir, project$name), "fastQC", input_mode), character(1)), collapse = "\n")
+  commands <- character(0)
+  for (i in seq_len(NROW(pairs))) {
+    reads <- unique(c(pairs$r1[i], if (project$paired_end) pairs$r2[i] else character(0)))
+    for (read in reads[nzchar(reads)]) {
+      target <- file.path(outdir, sub(fastq_suffix_regex, "_fastqc.html", basename(read), ignore.case = TRUE))
+      commands <- c(commands, submit_sbatch(project, "FastQC", script, c(read, outdir, project$name), "fastQC", input_mode, sample = pairs$sample[i], target = target))
+    }
+  }
+  paste(commands, collapse = "\n")
 }
 
-submit_cutadapt_jobs <- function(project, adapter1, adapter2, min_length) {
-  outdir <- file.path(project$data_dir, "cutadapt")
+submit_cutadapt_jobs <- function(project, adapter1, adapter2, min_length, input_trimmed = FALSE) {
+  outdir <- file.path(project$data_dir, if (isTRUE(input_trimmed)) "cutadapt_retrimmed" else "cutadapt")
   dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
-  pairs <- sample_fastq_pairs(project, FALSE)
+  pairs <- sample_fastq_pairs(project, isTRUE(input_trimmed))
   msg <- missing_read_message(project, pairs)
   if (nzchar(msg)) return(msg)
   script <- file.path(SCRIPTS_DIR, if (project$paired_end) "cutadapt_PE/qsub_cutadapt_PE.sh" else "cutadapt_SE/qsub_cutadapt_SE.sh")
+  input_mode <- if (isTRUE(input_trimmed)) "trimmed reads" else "raw reads"
   paste(apply(pairs, 1, function(row) {
     trimmed1 <- file.path(outdir, basename(row[["r1"]]))
     trimmed2 <- if (project$paired_end) file.path(outdir, basename(row[["r2"]])) else trimmed1
     read2 <- if (project$paired_end) row[["r2"]] else row[["r1"]]
-    submit_sbatch(project, "Cutadapt", script, c(min_length, adapter1, adapter2, trimmed1, trimmed2, row[["r1"]], read2, project$name), "cutadapt", "raw reads")
+    submit_sbatch(project, "Cutadapt", script, c(min_length, adapter1, adapter2, trimmed1, trimmed2, row[["r1"]], read2, project$name), "cutadapt", input_mode, sample = row[["sample"]], target = trimmed1)
   }), collapse = "\n")
 }
 
@@ -1236,24 +1525,33 @@ submit_star_jobs <- function(project, trimmed = FALSE) {
     dir.create(sample_dir, recursive = TRUE, showWarnings = FALSE)
     out_prefix <- file.path(sample_dir, row[["sample"]])
     input_mode <- if (trimmed) "trimmed reads" else "raw reads"
-    submit_sbatch(project, "STAR", script, c(out_prefix, res$star_index, row[["r1"]], row[["r2"]], project$name), "star", input_mode)
+    target <- file.path(sample_dir, paste0(row[["sample"]], "Aligned.sortedByCoord.out.bam"))
+    submit_sbatch(project, "STAR", script, c(out_prefix, res$star_index, row[["r1"]], row[["r2"]], project$name), "star", input_mode, sample = row[["sample"]], target = target, reference = res$label)
   }), collapse = "\n")
 }
 
 submit_kallisto_jobs <- function(project, trimmed = FALSE) {
   res <- genome_resources(project)
   outdir <- file.path(project$data_dir, "kallisto")
+  counts_dir <- file.path(project$data_dir, "counts")
   dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+  dir.create(counts_dir, recursive = TRUE, showWarnings = FALSE)
   pairs <- sample_fastq_pairs(project, trimmed)
   msg <- missing_read_message(project, pairs)
   if (nzchar(msg)) return(msg)
   script <- file.path(SCRIPTS_DIR, "Kallisto", if (project$paired_end) "qsub_kallisto_PE.sh" else "qsub_kallisto_SE.sh")
-  paste(apply(pairs, 1, function(row) {
+  messages <- apply(pairs, 1, function(row) {
     sample_dir <- file.path(outdir, row[["sample"]])
     dir.create(sample_dir, recursive = TRUE, showWarnings = FALSE)
     input_mode <- if (trimmed) "trimmed reads" else "raw reads"
-    submit_sbatch(project, "Kallisto optional", script, c(sample_dir, res$kallisto_index, row[["r1"]], row[["r2"]], project$name), "kallisto", input_mode)
-  }), collapse = "\n")
+    target <- file.path(sample_dir, "abundance.tsv")
+    submit_sbatch(project, "Kallisto optional", script, c(sample_dir, res$kallisto_index, row[["r1"]], row[["r2"]], project$name), "kallisto", input_mode, sample = row[["sample"]], target = target, reference = res$kallisto_index)
+  })
+  ids <- vapply(messages, parse_sbatch_job_id, character(1))
+  matrix_script <- write_quant_matrix_script(project, "kallisto")
+  matrix_cmd <- paste(shQuote(Sys.which("Rscript") %||% "Rscript"), shQuote(matrix_script), shQuote(outdir), shQuote(counts_dir))
+  matrix_msg <- submit_sbatch_wrap(project, "Kallisto optional", matrix_cmd, "kallisto_matrices", "Kallisto matrix build", target = file.path(counts_dir, "kallisto_tpm_matrix.txt"), reference = res$kallisto_index, dependency_ids = ids)
+  paste(c(messages, matrix_msg), collapse = "\n")
 }
 
 submit_rsem_jobs <- function(project, feature = "gene_id") {
@@ -1261,16 +1559,24 @@ submit_rsem_jobs <- function(project, feature = "gene_id") {
   design <- safe_read_table(project$design_matrix_path)
   if (!NROW(design) || !"sample" %in% names(design)) return("No samples found in design matrix.")
   outdir <- file.path(project$data_dir, "rsem")
+  counts_dir <- file.path(project$data_dir, "counts")
   dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+  dir.create(counts_dir, recursive = TRUE, showWarnings = FALSE)
   script <- file.path(SCRIPTS_DIR, "RSEM", if (project$paired_end) "qsub_RSEM_PE.sh" else "qsub_RSEM_SE.sh")
-  paste(vapply(as.character(design$sample), function(sample) {
+  messages <- vapply(as.character(design$sample), function(sample) {
     sample_dir <- file.path(outdir, sample)
     dir.create(sample_dir, recursive = TRUE, showWarnings = FALSE)
     bam <- file.path(project$data_dir, "star", sample, paste0(sample, "Aligned.sortedByCoord.out.bam"))
     bam_transcript <- file.path(project$data_dir, "star", sample, paste0(sample, "Aligned.toTranscriptome.out.bam"))
     count_prefix <- file.path(sample_dir, sample)
-    submit_sbatch(project, "RSEM optional", script, c(bam, res$rsem_index, feature, count_prefix, res$strand_bed, bam_transcript, project$name), "rsem", paste("STAR BAM; feature", feature))
-  }, character(1)), collapse = "\n")
+    target <- paste0(count_prefix, ".genes.results")
+    submit_sbatch(project, "RSEM optional", script, c(bam, res$rsem_index, feature, count_prefix, res$strand_bed, bam_transcript, project$name), "rsem", paste("STAR BAM; feature", feature), sample = sample, target = target, reference = res$rsem_index)
+  }, character(1))
+  ids <- vapply(messages, parse_sbatch_job_id, character(1))
+  matrix_script <- write_quant_matrix_script(project, "rsem")
+  matrix_cmd <- paste(shQuote(Sys.which("Rscript") %||% "Rscript"), shQuote(matrix_script), shQuote(outdir), shQuote(counts_dir))
+  matrix_msg <- submit_sbatch_wrap(project, "RSEM optional", matrix_cmd, "rsem_matrices", paste("RSEM matrix build; feature", feature), target = file.path(counts_dir, "rsem_tpm_matrix.txt"), reference = res$rsem_index, dependency_ids = ids)
+  paste(c(messages, matrix_msg), collapse = "\n")
 }
 
 submit_featurecounts_jobs <- function(project, feature = "gene_id") {
@@ -1278,15 +1584,23 @@ submit_featurecounts_jobs <- function(project, feature = "gene_id") {
   design <- safe_read_table(project$design_matrix_path)
   if (!NROW(design) || !"sample" %in% names(design)) return("No samples found in design matrix.")
   outdir <- file.path(project$data_dir, "featurecounts")
+  counts_dir <- file.path(project$data_dir, "counts")
   dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+  dir.create(counts_dir, recursive = TRUE, showWarnings = FALSE)
   script <- file.path(SCRIPTS_DIR, "featureCounts", if (project$paired_end) "qsub_featurecounts_PE.sh" else "qsub_featurecounts_SE.sh")
-  paste(vapply(as.character(design$sample), function(sample) {
+  messages <- vapply(as.character(design$sample), function(sample) {
     sample_dir <- file.path(outdir, sample)
     dir.create(sample_dir, recursive = TRUE, showWarnings = FALSE)
     bam <- file.path(project$data_dir, "star", sample, paste0(sample, "Aligned.sortedByCoord.out.bam"))
     count_prefix <- file.path(sample_dir, sample)
-    submit_sbatch(project, "featureCounts", script, c(bam, res$gtf, feature, count_prefix, res$strand_bed, project$name), "featurecounts", paste("STAR BAM; feature", feature))
-  }, character(1)), collapse = "\n")
+    target <- paste0(count_prefix, "_counts.txt")
+    submit_sbatch(project, "featureCounts", script, c(bam, res$gtf, feature, count_prefix, res$strand_bed, project$name), "featurecounts", paste("STAR BAM; feature", feature), sample = sample, target = target, reference = res$gtf)
+  }, character(1))
+  ids <- vapply(messages, parse_sbatch_job_id, character(1))
+  matrix_script <- write_featurecounts_matrix_script(project)
+  matrix_cmd <- paste(shQuote(Sys.which("Rscript") %||% "Rscript"), shQuote(matrix_script), shQuote(outdir), shQuote(counts_dir))
+  matrix_msg <- submit_sbatch_wrap(project, "Count matrix", matrix_cmd, "featurecounts_count_matrix", paste("featureCounts matrix; feature", feature), target = file.path(counts_dir, "count_matrix.txt"), reference = res$gtf, dependency_ids = ids)
+  paste(c(messages, matrix_msg), collapse = "\n")
 }
 
 submit_deseq2_job <- function(project, compare_col, reference, comparison, redundant = "NoRedundant") {
@@ -1884,7 +2198,7 @@ ui <- fluidPage(
                  br(),
                  verbatimTextOutput("run_output")),
         tabPanel("Results Explorer", uiOutput("native_results_ui")),
-        tabPanel("Logs", br(), h3("Submitted Jobs"), table_output("jobs_table"), br(), uiOutput("log_file_ui"), tags$pre(class = "log-viewer", textOutput("selected_log_text")))
+        tabPanel("Logs", br(), h3("Submitted Jobs"), uiOutput("job_filter_ui"), table_output("jobs_table"), br(), uiOutput("log_file_ui"), tags$pre(class = "log-viewer", textOutput("selected_log_text")))
       )
     )
   )
@@ -1909,10 +2223,12 @@ server <- function(input, output, session) {
   output$project_ui <- renderUI({
     p <- filtered_projects()
     labels <- if (length(p)) vapply(p, function(x) x$label, character(1)) else character(0)
-    choices <- c("Start a new project" = "__new__", stats::setNames(labels, labels))
+    ids <- if (length(p)) names(p) else character(0)
+    choices <- c("Start a new project" = "__new__", stats::setNames(ids, labels))
     selected <- isolate(input$project_id)
     if (is.null(selected) || !selected %in% unname(choices)) {
-      selected <- if (length(labels)) labels[[1]] else "__new__"
+      last <- read_last_project_id()
+      selected <- if (last %in% unname(choices)) last else "__new__"
     }
     selectInput("project_id", "Project Name", choices = choices, selected = selected, selectize = FALSE)
   })
@@ -1955,16 +2271,19 @@ server <- function(input, output, session) {
     if (identical(input$project_id, "__new__")) return(new_project_from_inputs(input))
     p <- filtered_projects()
     req(length(p) > 0)
-    labels <- vapply(p, function(x) x$label, character(1))
     selected <- input$project_id
     if (!length(selected) || is.null(selected) || !nzchar(selected)) {
       idx <- 1
     } else {
-      idx <- match(selected, labels)
+      idx <- match(selected, names(p))
       if (!length(idx) || is.na(idx)) idx <- 1
     }
     p[[idx]]
   })
+
+  observeEvent(input$project_id, {
+    write_last_project_id(input$project_id %||% "__new__")
+  }, ignoreInit = FALSE)
 
   output$project_card <- renderUI({
     p <- current_project()
@@ -2086,6 +2405,8 @@ server <- function(input, output, session) {
         df <- df[, c("include", setdiff(names(df), c("include", "status")), "status"), drop = FALSE]
         design_state(df)
       }
+    } else {
+      design_state(data.frame())
     }
   }, ignoreInit = FALSE)
 
@@ -2185,6 +2506,7 @@ server <- function(input, output, session) {
           conditionalPanel("input.cutadapt_adapter1 == '__custom__'", textInput("cutadapt_adapter1_custom", "Custom R1/read1 adapter sequence", value = "", width = "100%")),
           selectInput("cutadapt_adapter2", "R2/read2 adapter", choices = adapter_choices_r2(), selected = adapter_choices_r2()[[1]], width = "100%", selectize = FALSE),
           conditionalPanel("input.cutadapt_adapter2 == '__custom__'", textInput("cutadapt_adapter2_custom", "Custom R2/read2 adapter sequence", value = "", width = "100%")),
+          checkboxInput("cutadapt_use_trimmed_input", "Use existing trimmed reads as cutadapt input", value = FALSE),
           textInput("cutadapt_min_length", "Minimum read length", value = "20")
         ),
         "run_cutadapt", "Submit cutadapt"),
@@ -2232,7 +2554,7 @@ server <- function(input, output, session) {
     if (!nzchar(adapter1) || !nzchar(adapter2)) {
       run_message("Custom adapter sequences cannot be blank.")
     } else {
-      run_message(submit_cutadapt_jobs(current_project(), adapter1, adapter2, input$cutadapt_min_length))
+      run_message(submit_cutadapt_jobs(current_project(), adapter1, adapter2, input$cutadapt_min_length, isTRUE(input$cutadapt_use_trimmed_input)))
     }
     progress_refresh(Sys.time())
   })
@@ -2282,6 +2604,7 @@ server <- function(input, output, session) {
   output$results_overview <- render_csl_table(project_status(current_project()), page_length = 20)
   output$design_table <- render_csl_table(safe_read_table(current_project()$design_matrix_path), page_length = 50)
   output$fastqc_select_ui <- renderUI({
+    progress_refresh()
     p <- current_project()
     files <- c(list.files(file.path(p$data_dir, "fastqc"), pattern = "\\.html$", full.names = TRUE),
                list.files(file.path(p$data_dir, "fastqc_cutadapt"), pattern = "\\.html$", full.names = TRUE))
@@ -2296,13 +2619,13 @@ server <- function(input, output, session) {
     files <- if (dir.exists(dir)) list.files(dir, pattern = pattern, recursive = TRUE, full.names = TRUE) else character(0)
     selectInput(id, label, choices = files, selected = files[1] %||% character(0), selectize = FALSE)
   }
-  output$rsem_file_ui <- renderUI({ file_select("rsem_file", "RSEM table", file.path(current_project()$data_dir, "rsem"), "\\.(txt|csv|results)$") })
+  output$rsem_file_ui <- renderUI({ progress_refresh(); file_select("rsem_file", "RSEM table", file.path(current_project()$data_dir, "rsem"), "\\.(txt|csv|results)$") })
   output$rsem_table <- render_csl_table({ req(input$rsem_file); safe_read_table(input$rsem_file, 5000) }, page_length = 50)
-  output$kallisto_file_ui <- renderUI({ file_select("kallisto_file", "Kallisto table", file.path(current_project()$data_dir, "kallisto"), "\\.(tsv|txt|csv)$") })
+  output$kallisto_file_ui <- renderUI({ progress_refresh(); file_select("kallisto_file", "Kallisto table", file.path(current_project()$data_dir, "kallisto"), "\\.(tsv|txt|csv)$") })
   output$kallisto_table <- render_csl_table({ req(input$kallisto_file); safe_read_table(input$kallisto_file, 5000) }, page_length = 50)
-  output$norm_file_ui <- renderUI({ file_select("norm_file", "DESeq2 normalized counts", file.path(current_project()$data_dir, "deseq2"), "normalized.*\\.(txt|csv)$") })
+  output$norm_file_ui <- renderUI({ progress_refresh(); file_select("norm_file", "DESeq2 normalized counts", file.path(current_project()$data_dir, "deseq2"), "normalized.*\\.(txt|csv)$") })
   output$norm_table <- render_csl_table({ req(input$norm_file); safe_read_table(input$norm_file, 5000) }, page_length = 50)
-  output$deseq_file_ui <- renderUI({ file_select("deseq_file", "DESeq2 file", file.path(current_project()$data_dir, "deseq2"), "\\.(txt|csv|png|pdf)$") })
+  output$deseq_file_ui <- renderUI({ progress_refresh(); file_select("deseq_file", "DESeq2 file", file.path(current_project()$data_dir, "deseq2"), "\\.(txt|csv|png|pdf)$") })
   output$deseq_file_view <- renderUI({
     req(input$deseq_file)
     if (tolower(tools::file_ext(input$deseq_file)) %in% c("txt", "csv", "tsv")) {
@@ -2310,7 +2633,7 @@ server <- function(input, output, session) {
     } else image_or_file_ui(input$deseq_file)
   })
   output$deseq_selected_table <- render_csl_table({ req(input$deseq_file); safe_read_table(input$deseq_file, 5000) }, page_length = 50)
-  output$gsea_file_ui <- renderUI({ file_select("gsea_file", "GSEA file", file.path(current_project()$data_dir, "gseapy"), "\\.(txt|csv|png|pdf)$") })
+  output$gsea_file_ui <- renderUI({ progress_refresh(); file_select("gsea_file", "GSEA file", file.path(current_project()$data_dir, "gseapy"), "\\.(txt|csv|png|pdf)$") })
   output$gsea_file_view <- renderUI({
     req(input$gsea_file)
     if (tolower(tools::file_ext(input$gsea_file)) %in% c("txt", "csv", "tsv")) {
@@ -2318,18 +2641,39 @@ server <- function(input, output, session) {
     } else image_or_file_ui(input$gsea_file, "950px")
   })
   output$gsea_selected_table <- render_csl_table({ req(input$gsea_file); safe_read_table(input$gsea_file, 5000) }, page_length = 50)
-  output$all_file_ui <- renderUI({ file_select("all_file", "Result file", current_project()$data_dir, "\\.(txt|csv|tsv|html|png|pdf)$") })
+  output$all_file_ui <- renderUI({ progress_refresh(); file_select("all_file", "Result file", current_project()$data_dir, "\\.(txt|csv|tsv|html|png|pdf)$") })
   output$all_file_view <- renderUI({ req(input$all_file); image_or_file_ui(input$all_file) })
   output$jobs_table <- render_csl_table({
     progress_refresh()
-    job_history_display(current_project())
+    jobs <- job_history_display(current_project())
+    tool <- input$job_tool_filter %||% "All"
+    if (NROW(jobs) && !identical(tool, "All") && "step" %in% names(jobs)) jobs <- jobs[jobs$step == tool, , drop = FALSE]
+    jobs
   }, page_length = 50)
 
+  output$job_filter_ui <- renderUI({
+    jobs <- job_history_display(current_project())
+    steps <- if (NROW(jobs) && "step" %in% names(jobs)) sort(unique(jobs$step)) else pipeline_order()
+    selectInput("job_tool_filter", "Filter jobs by tool", choices = c("All", steps), selected = input$job_tool_filter %||% "All", selectize = FALSE)
+  })
+
   output$log_file_ui <- renderUI({
-    choices <- log_file_choices(current_project())
-    if (!length(choices)) return(div(class = "empty-box", paste("No stdout/stderr log files were found in", file.path(dirname(current_project()$data_dir), "log"))))
+    progress_refresh()
+    project <- current_project()
+    all_choices <- log_file_choices(project)
+    tools <- log_tool_choices(project)
+    selected_tool <- input$log_tool_filter %||% "All"
+    if (!selected_tool %in% tools) selected_tool <- "All"
+    selected_type <- input$log_type_filter %||% "All"
+    choices <- log_file_choices(project, selected_tool, selected_type)
+    if (!length(all_choices)) return(div(class = "empty-box", paste("No stdout/stderr log files were found in", file.path(dirname(project$data_dir), "log"))))
+    controls <- fluidRow(
+      column(4, selectInput("log_tool_filter", "Tool", choices = tools, selected = selected_tool, selectize = FALSE)),
+      column(4, selectInput("log_type_filter", "Log type", choices = c("All", "output", "error"), selected = selected_type, selectize = FALSE)),
+      column(4, if (length(choices)) selectInput("selected_log_file", "Log file", choices = choices, selectize = FALSE) else div(class = "empty-box", "No logs match this filter."))
+    )
     tagList(
-      selectInput("selected_log_file", "Open job log", choices = choices, selectize = FALSE),
+      controls,
       radioButtons("log_view_mode", "View", choices = c("Tail" = "tail", "Head" = "head", "Full" = "full"), selected = "tail", inline = TRUE)
     )
   })
