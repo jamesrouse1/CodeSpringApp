@@ -1027,7 +1027,7 @@ tool_reference_summary <- function(project) {
     c("Tool", "STAR", command_version("STAR", "--version"), "Spliced alignment", gencode_label(project)),
     c("Tool", "featureCounts / Subread", command_version("featureCounts", "-v"), "Gene-level counting", gencode_label(project)),
     c("Tool", "DESeq2", r_package_version("DESeq2"), "Differential expression", "featureCounts count_matrix.txt"),
-    c("Tool", "R-native GSEA / fgsea", paste0("R ", getRversion(), "; fgsea ", r_package_version("fgsea"), "; ggplot2 ", r_package_version("ggplot2")), "Pathway analysis", "Selected Enrichr/MSigDB-style gene set database"),
+    c("Tool", "GSEApy", "BSR Python/3.7.4-GCCcore-8.3.0 with gseapy", "Pathway analysis", "Selected Enrichr/MSigDB-style gene set database"),
     c("Tool", "RSEM", command_version("rsem-calculate-expression", "--version"), "Optional gene/transcript quantification", gencode_label(project)),
     c("Tool", "Kallisto", command_version("kallisto", "version"), "Optional transcript abundance quantification", gencode_label(project)),
     c("Tool", "RSeQC", "not required for core run; strand BED generated with reference", "Optional strand/QC support", gencode_label(project))
@@ -1049,7 +1049,7 @@ methods_sentence_for_step <- function(step, manifest_rows, project) {
     "STAR" = paste0("Reads were aligned with STAR using ", gencode_label(project), ".", ref_text, mode_text),
     "featureCounts" = paste0("Gene-level counts were quantified with featureCounts using the selected GTF annotation.", ref_text, mode_text),
     "DESeq2" = paste0("Differential expression analysis was performed with DESeq2.", mode_text),
-    "GSEA" = paste0("Gene set enrichment analysis was performed with the CodeSpringLab R-native GSEA runner using signal-to-noise ranking and gene-set permutations.", ref_text, mode_text),
+    "GSEA" = paste0("Gene set enrichment analysis was performed with CodeSpringLab GSEApy using signal-to-noise ranking and gene-set permutations.", ref_text, mode_text),
     "RSEM (optional)" = paste0("Optional transcript/gene quantification was performed with RSEM.", ref_text, mode_text),
     "Kallisto (optional)" = paste0("Optional transcript abundance quantification was performed with Kallisto.", ref_text, mode_text),
     paste0(step, " was run.", ref_text, mode_text)
@@ -2374,7 +2374,9 @@ write_gseapy_shell_script <- function(project, python_script, script_dir, projec
   lines <- c(
     "#!/usr/bin/env bash",
     "set -euo pipefail",
+    "source /etc/profile >/dev/null 2>&1 || true",
     "module load EBModules >/dev/null 2>&1 || true",
+    "module load BSR >/dev/null 2>&1 || true",
     "module load Python/3.7.4-GCCcore-8.3.0 >/dev/null 2>&1 || true",
     "choose_python() {",
     "  local candidates=(\"${CSL_PYTHON_BIN:-}\" \"${PYTHON_BIN:-}\" \"/grid/it/modules/bsr/software/Python/3.7.4-GCCcore-8.3.0/bin/python\" \"python3\" \"python\")",
@@ -2491,29 +2493,22 @@ submit_gseapy_job <- function(project, compare_col, reference, comparison, genes
   dir.create(outpath_pathway, recursive = TRUE, showWarnings = FALSE)
   design_matrix <- deseq_design_for_column(project, compare_col)
   design_dir <- dirname(design_matrix)
-  runner_script <- gsea_native_runner_path()
-  if (!file.exists(runner_script)) {
-    stop("The R-native GSEA runner was not found: ", runner_script)
-  }
   results_root <- project$results_root %||% dirname(dirname(project$data_dir))
-  res <- genome_resources(project)
-  ortholog_path <- file.path(SCRIPTS_DIR, "reference", "mouse_human_orthologs_MGI.tsv")
-  shell_script <- write_gsea_r_shell_script(
+  python_script <- write_gseapy_script(project)
+  shell_script <- write_gseapy_shell_script(
     project = project,
-    runner_script = runner_script,
+    python_script = python_script,
     script_dir = SCRIPTS_DIR,
     project_name = project$name,
     results_root = results_root,
     geneset = geneset,
     genome = genome_species(project),
-    compare_col = compare_col,
     design_dir = design_dir,
     deseq_dir = deseq_dir,
     outpath_pathway = outpath_pathway,
     reference = reference,
     comparison = comparison,
-    gtf_path = res$gtf %||% "",
-    ortholog_path = ortholog_path
+    feature = "auto"
   )
   cmd <- paste("bash", shQuote(shell_script))
   target <- file.path(outpath_pathway, "gseapy.gene_set.gsea.report.csv")

@@ -61,18 +61,24 @@ Required:
 
 ```r
 install.packages(c("shiny", "DT", "base64enc", "ggplot2"))
-install.packages("BiocManager")
-BiocManager::install("fgsea")
 ```
 
 The launcher handles these automatically:
 
 - `DT`: editable/searchable/scrollable tables
 - `base64enc`: embedded logos/images
-- `ggplot2`: publication-style GSEA plots
-- `fgsea`: R-native GSEA engine used by CodeSpringWeb pathway analysis
+- `ggplot2`: publication-style plot support
 
-On bamdev1, some R source package installs can fail if the system compiler points at a missing `gcc-annobin` plugin. The launcher avoids this by using a CodeSpringWeb-specific temporary Makevars file at:
+GSEA runs through the CodeSpringLab Python/GSEApy implementation. On bamdev1 the launcher-submitted GSEA job loads:
+
+```bash
+module load BSR
+module load Python/3.7.4-GCCcore-8.3.0
+```
+
+That module currently provides `gseapy`.
+
+On bamdev1, some R source package installs can fail if the system compiler points at a missing `gcc-annobin` plugin. The launcher avoids this for regular R package installs by using a CodeSpringWeb-specific temporary Makevars file at:
 
 ```text
 ~/.codespringweb/Makevars.codespringweb
@@ -92,7 +98,7 @@ CodeSpringWeb records submitted job metadata under `~/.codespringweb/` and proje
 
 ## GSEA
 
-GSEA jobs are submitted as R jobs using `fgsea`.
+GSEA jobs are submitted as Python jobs using the BSR `Python/3.7.4-GCCcore-8.3.0` module and CodeSpringLab's existing `bulkRNAseq.gseapy_RunPathway()` function.
 
 The app uses:
 
@@ -110,7 +116,7 @@ Outputs are written under:
 <project>/data/gseapy/<comparison>_vs_<reference>/
 ```
 
-The folder name remains `gseapy` for compatibility with the existing CodeSpringLab Results Explorer, but newly submitted jobs use the R/fgsea implementation.
+The folder name remains `gseapy` for compatibility with the existing CodeSpringLab Results Explorer.
 
 ### Troubleshoot A Failed GSEA Job
 
@@ -124,7 +130,7 @@ tail -120 "$(ls -t error_gseapy_*.txt | head -1)"
 tail -120 "$(ls -t output_gseapy_*.txt | head -1)"
 ```
 
-The submit log is written before and after `sbatch`, so it exists even if SLURM rejects the job before creating stdout/stderr files. The output log prints the R version, R library paths, whether `fgsea` is available to the SLURM job, the gene-label mapping mode, the number of ranked genes, and which gene-set database/cache was used.
+The submit log is written before and after `sbatch`, so it exists even if SLURM rejects the job before creating stdout/stderr files. The output log prints the Python executable, Python version, `gseapy` version, gene-label mapping mode, ranked gene count, and which gene-set database/cache was used.
 
 ## Port Cleanup
 
@@ -139,5 +145,4 @@ CSL_WEB_AUTOKILL_SHINY=0 CSL_CODESPRINGLAB_ROOT=~/CodeSpringLab Rscript -e 'shin
 - `CSL_CODESPRINGLAB_ROOT`: path to the CodeSpringLab repo. Default: `~/CodeSpringLab`
 - `CSL_WEB_HOST`: Shiny host binding. Default: `0.0.0.0`
 - `CSL_WEB_LOG_DIR`: launcher log/pid folder. Default: `~/.codespringweb`
-- `CSL_GSEA_PERMUTATIONS`: number of GSEA permutations. Default: `1000`
-- `CSL_GSEA_ALLOW_BASE_R_FALLBACK=1`: allow the slower base-R fallback if `fgsea` is missing. Production runs should use `fgsea`.
+- `CSL_PYTHON_BIN` or `PYTHON_BIN`: optional Python executable override for GSEApy jobs. By default, the GSEA script loads BSR Python and auto-detects a Python with `gseapy`, `pandas`, and `matplotlib`.

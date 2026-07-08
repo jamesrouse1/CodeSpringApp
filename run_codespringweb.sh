@@ -54,7 +54,6 @@ install_bioc_package_if_missing() {
 install_r_package_if_missing "DT"
 install_r_package_if_missing "base64enc"
 install_r_package_if_missing "ggplot2"
-install_bioc_package_if_missing "fgsea"
 
 if command -v lsof >/dev/null 2>&1; then
   OLD_PIDS="$(lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || true)"
