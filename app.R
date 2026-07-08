@@ -431,7 +431,7 @@ delete_projects <- function(projects_to_delete, delete_data = FALSE) {
 
 project_result_dir <- function(project) {
   data_dir <- normalizePath(project$data_dir %||% "", winslash = "/", mustWork = FALSE)
-  if (nzchar(data_dir) && basename(data_dir) == "data") return(dirname(data_dir))
+  if (nzchar(data_dir) && basename(data_dir) %in% c("data", "log", "shiny")) return(dirname(data_dir))
   file.path(normalizePath(project$results_root %||% "~/csl_results", winslash = "/", mustWork = FALSE), project$name %||% project$label)
 }
 
@@ -475,7 +475,7 @@ delete_project_results <- function(project) {
   removed_jobs <- prune_project_job_history(project)
   list(
     ok = ok,
-    message = paste(if (ok) "Deleted project results:" else "Could not delete project results:", result_dir, sprintf("(removed %s old job record%s)", removed_jobs, ifelse(removed_jobs == 1, "", "s")))
+    message = paste(if (ok) "Deleted entire project folder:" else "Could not delete project folder:", result_dir, sprintf("(removed %s old job record%s)", removed_jobs, ifelse(removed_jobs == 1, "", "s")))
   )
 }
 
@@ -499,6 +499,38 @@ write_project_config <- function(project) {
   )
   writeLines(lines, cfg_path)
   cfg_path
+}
+
+project_select_choices <- function(projects, analysis = "RNA-seq") {
+  p <- projects
+  if (length(p)) {
+    p <- p[vapply(p, function(x) identical(x$analysis, analysis), logical(1))]
+  }
+  labels <- if (length(p)) vapply(p, function(x) x$label, character(1)) else character(0)
+  ids <- if (length(p)) names(p) else character(0)
+  c("Start a new project" = "__new__", stats::setNames(ids, labels))
+}
+
+record_preflight_failure <- function(project, step, message, log_name = clean_name(step, "preflight")) {
+  log_dir <- file.path(dirname(project$data_dir), "log")
+  dir.create(log_dir, recursive = TRUE, showWarnings = FALSE)
+  stamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
+  stderr <- file.path(log_dir, paste0("error_", log_name, "_preflight_", stamp, ".txt"))
+  submit_log <- file.path(log_dir, paste0("submit_", log_name, "_preflight_", stamp, ".txt"))
+  lines <- c(
+    paste("time:", format(Sys.time(), "%Y-%m-%d %H:%M:%S")),
+    paste("project:", project$name),
+    paste("step:", step),
+    "status: pre-submit validation failed",
+    paste("data_dir:", project$data_dir),
+    paste("fastq_dir:", project$fastq_dir),
+    paste("design_matrix:", project$design_matrix_path),
+    "",
+    message
+  )
+  writeLines(lines, stderr)
+  writeLines(c(lines, paste("stderr:", stderr)), submit_log)
+  paste("ERROR:", message, "\nPre-submit error log:", stderr)
 }
 
 safe_read_table <- function(path, n = Inf) {
@@ -2166,8 +2198,25 @@ write_quant_matrix_script <- function(project, tool = c("rsem", "kallisto")) {
   script
 }
 
-missing_read_message <- function(project, pairs) {
-  if (!NROW(pairs)) return("No samples/read files found in design matrix.")
+missing_read_message <- function(project, pairs, trimmed = FALSE) {
+  if (!file.exists(project$design_matrix_path)) {
+    return(paste(
+      "No design_matrix.txt was found for this project.",
+      paste("Expected:", project$design_matrix_path),
+      "Create or save the design matrix in the Design Matrix tab before running this step.",
+      sep = "\n"
+    ))
+  }
+  read_base <- if (isTRUE(trimmed)) file.path(project$data_dir, "cutadapt") else project$fastq_dir
+  if (!nzchar(read_base %||% "") || !dir.exists(read_base)) {
+    return(paste(
+      if (isTRUE(trimmed)) "The trimmed FASTQ folder is missing or does not exist." else "The raw FASTQ folder is missing or does not exist.",
+      paste("FASTQ folder:", read_base),
+      "Choose the correct raw FASTQ folder in project setup, then save/create the project again.",
+      sep = "\n"
+    ))
+  }
+  if (!NROW(pairs)) return("No samples/read files found in design_matrix.txt.")
   reads <- unique(c(pairs$r1, if (isTRUE(project$paired_end)) pairs$r2 else character(0)))
   missing <- reads[nzchar(reads) & !file.exists(reads)]
   if (length(missing)) {
@@ -2180,8 +2229,8 @@ submit_fastqc_jobs <- function(project, trimmed = FALSE) {
   outdir <- file.path(project$data_dir, if (trimmed) "fastqc_cutadapt" else "fastqc")
   dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
   pairs <- sample_fastq_pairs(project, trimmed)
-  msg <- missing_read_message(project, pairs)
-  if (nzchar(msg)) return(msg)
+  msg <- missing_read_message(project, pairs, trimmed)
+  if (nzchar(msg)) return(record_preflight_failure(project, "FastQC", msg, "fastQC"))
   script <- file.path(SCRIPTS_DIR, "FastQC", "qsub_fastqc.sh")
   input_mode <- if (trimmed) "trimmed reads" else "raw reads"
   commands <- character(0)
@@ -2199,8 +2248,8 @@ submit_cutadapt_jobs <- function(project, adapter1, adapter2, min_length) {
   outdir <- file.path(project$data_dir, "cutadapt")
   dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
   pairs <- sample_fastq_pairs(project, FALSE)
-  msg <- missing_read_message(project, pairs)
-  if (nzchar(msg)) return(msg)
+  msg <- missing_read_message(project, pairs, FALSE)
+  if (nzchar(msg)) return(record_preflight_failure(project, "Cutadapt", msg, "cutadapt"))
   script <- file.path(SCRIPTS_DIR, if (project$paired_end) "cutadapt_PE/qsub_cutadapt_PE.sh" else "cutadapt_SE/qsub_cutadapt_SE.sh")
   input_mode <- "raw reads"
   paste(apply(pairs, 1, function(row) {
@@ -2216,8 +2265,8 @@ submit_star_jobs <- function(project, trimmed = FALSE) {
   outdir <- file.path(project$data_dir, "star")
   dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
   pairs <- sample_fastq_pairs(project, trimmed)
-  msg <- missing_read_message(project, pairs)
-  if (nzchar(msg)) return(msg)
+  msg <- missing_read_message(project, pairs, trimmed)
+  if (nzchar(msg)) return(record_preflight_failure(project, "STAR", msg, "star"))
   script <- file.path(SCRIPTS_DIR, "STAR", if (project$paired_end) "qsub_star_PE.sh" else "qsub_star_SE.sh")
   paste(apply(pairs, 1, function(row) {
     sample_dir <- file.path(outdir, row[["sample"]])
@@ -2236,8 +2285,8 @@ submit_kallisto_jobs <- function(project, trimmed = FALSE) {
   dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
   dir.create(counts_dir, recursive = TRUE, showWarnings = FALSE)
   pairs <- sample_fastq_pairs(project, trimmed)
-  msg <- missing_read_message(project, pairs)
-  if (nzchar(msg)) return(msg)
+  msg <- missing_read_message(project, pairs, trimmed)
+  if (nzchar(msg)) return(record_preflight_failure(project, "Kallisto (optional)", msg, "kallisto"))
   script <- file.path(SCRIPTS_DIR, "Kallisto", if (project$paired_end) "qsub_kallisto_PE.sh" else "qsub_kallisto_SE.sh")
   messages <- apply(pairs, 1, function(row) {
     sample_dir <- file.path(outdir, row[["sample"]])
@@ -3344,7 +3393,7 @@ ui <- fluidPage(
                  uiOutput("sample_progress_matrix_ui"),
                 div(class = "job-table-wrap", h4("Submitted Jobs"), table_output("active_jobs_table"))),
         tabPanel("Run Pipeline", br(), h3("Run Pipeline"),
-                 tags$p(class = "muted", "Each tool has its own settings. Jobs are submitted with SLURM sbatch and keep running after this app or browser is closed."),
+                 tags$p(class = "muted", "Each tool has its own settings. Jobs are submitted with SLURM sbatch and keep running after this app or browser is closed. If a path or design matrix check fails before sbatch, the app writes a pre-submit error log instead of submitting an empty job."),
                  uiOutput("run_resource_strip"),
                  uiOutput("run_pipeline_stepper"),
                  uiOutput("run_step_cards"),
@@ -3570,9 +3619,7 @@ server <- function(input, output, session) {
 
   output$project_ui <- renderUI({
     p <- filtered_projects()
-    labels <- if (length(p)) vapply(p, function(x) x$label, character(1)) else character(0)
-    ids <- if (length(p)) names(p) else character(0)
-    choices <- c("Start a new project" = "__new__", stats::setNames(ids, labels))
+    choices <- project_select_choices(p, input$analysis %||% "RNA-seq")
     selected <- isolate(input$project_id)
     if (is.null(selected) || !selected %in% unname(choices)) {
       last <- read_last_project_id()
@@ -3593,7 +3640,8 @@ server <- function(input, output, session) {
       radioButtons("new_paired_end", "Reads", choices = c("Paired-end" = "paired", "Single-end" = "single"), selected = "paired"),
       div(class = "new-project-path-control",
           textInput("new_fastq_dir", "Raw FASTQ folder", value = "", placeholder = "Choose with Browse or paste a server path"),
-          actionButton("browse_new_fastq_dir", "Browse server", class = "btn-default")
+          actionButton("browse_new_fastq_dir", "Browse server", class = "btn-default"),
+          tags$p(class = "muted", "This folder must contain the FASTQ files named in design_matrix.txt. If this path is wrong, jobs are not submitted and a pre-submit error is written in the Logs tab.")
       ),
       div(class = "new-project-path-control",
           textInput("new_results_root", "Results root", value = "~/csl_results", placeholder = "Where CodeSpringWeb should write project results"),
@@ -3626,9 +3674,9 @@ server <- function(input, output, session) {
       tags$hr(),
       tags$details(class = "project-manage",
         tags$summary("Manage projects"),
-        div(class = "muted small-note", "Delete saved project files from project_configs. Data deletion is optional and asks for confirmation."),
+        div(class = "muted small-note", "Delete saved project files from project_configs. Project folder deletion is optional and asks for confirmation."),
         checkboxGroupInput("delete_project_ids", "Projects to delete", choices = choices),
-        checkboxInput("delete_project_data", "Also delete associated data folders", value = FALSE),
+        checkboxInput("delete_project_data", "Also delete entire csl_results project folder (data, log, shiny)", value = FALSE),
         actionButton("delete_selected_projects", "Delete selected", class = "btn-danger"),
         textOutput("delete_project_status")
       )
@@ -3713,13 +3761,13 @@ server <- function(input, output, session) {
       labels <- vapply(to_delete, `[[`, character(1), "label")
       result_dirs <- vapply(to_delete, project_result_dir, character(1))
       showModal(modalDialog(
-        title = "Delete project results?",
-        tags$p("This will delete the selected project config file(s), old job records, logs, Shiny output, and data under these project result folders:"),
+        title = "Delete entire project folder?",
+        tags$p("This will delete the selected project config file(s), old job records, and the entire csl_results project folder for each selected project, including data, log, and shiny folders:"),
         tags$ul(lapply(seq_along(labels), function(i) tags$li(tags$strong(labels[[i]]), tags$br(), code(result_dirs[[i]])))),
         tags$p(tags$strong("This cannot be undone.")),
         footer = tagList(
           modalButton("Cancel"),
-          actionButton("confirm_delete_projects", "Yes, delete configs and data", class = "btn-danger")
+          actionButton("confirm_delete_projects", "Yes, delete configs and project folders", class = "btn-danger")
         ),
         easyClose = TRUE
       ))
@@ -3760,9 +3808,10 @@ server <- function(input, output, session) {
         prune_project_job_history(p)
       }
       cfg <- write_project_config(p)
-      projects(discover_projects())
+      refreshed <- discover_projects()
+      projects(refreshed)
       write_last_project_id(p$id)
-      updateSelectInput(session, "project_id", selected = p$id)
+      updateSelectInput(session, "project_id", choices = project_select_choices(refreshed, p$analysis), selected = p$id)
       paste("Created project:", p$name, "\nSaved project file:", cfg)
     }, error = function(e) paste("ERROR:", conditionMessage(e)))
     output$create_project_status <- renderText(msg)
@@ -3821,9 +3870,10 @@ server <- function(input, output, session) {
       design_path <- write_design_matrix(p, df, metadata)
       p$design_matrix_path <- design_path
       cfg <- write_project_config(p)
-      projects(discover_projects())
+      refreshed <- discover_projects()
+      projects(refreshed)
       write_last_project_id(p$id)
-      updateSelectInput(session, "project_id", selected = p$id)
+      updateSelectInput(session, "project_id", choices = project_select_choices(refreshed, p$analysis), selected = p$id)
       note <- if (nzchar(original_design_path) && normalizePath(original_design_path, winslash = "/", mustWork = FALSE) != normalizePath(design_path, winslash = "/", mustWork = FALSE)) {
         paste0("\nOriginal design matrix was not modified: ", original_design_path)
       } else {
