@@ -687,6 +687,10 @@ design_matrix_ui <- function(df) {
   )
 }
 
+results_design_matrix_path <- function(project) {
+  file.path(project$data_dir, "manifest", "design_matrix.txt")
+}
+
 write_design_matrix <- function(project, df, metadata_cols) {
   if (!"include" %in% names(df)) df$include <- TRUE
   keep <- df[vapply(df$include, as_design_bool, logical(1)), , drop = FALSE]
@@ -699,10 +703,7 @@ write_design_matrix <- function(project, df, metadata_cols) {
     }, character(1))
   }
   keep$sample <- clean_name(keep$sample)
-  out <- project$design_matrix_path
-  if (!nzchar(out) || basename(out) != "design_matrix.txt") {
-    out <- file.path(project$data_dir, "manifest", "design_matrix.txt")
-  }
+  out <- results_design_matrix_path(project)
   dir.create(dirname(out), recursive = TRUE, showWarnings = FALSE)
   keep <- keep[, c("sample", metadata_cols, "filename"), drop = FALSE]
   utils::write.table(keep, out, sep = "\t", row.names = FALSE, quote = FALSE)
@@ -1284,7 +1285,7 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
   raw$input[is.na(raw$input)] <- ""
   raw$detail <- ""
   for (step in c("DESeq2", "GSEA")) {
-    complete <- completed_project_level_runs(project, step)
+    complete <- completed_project_level_runs(project, step, jobs)
     running <- running_project_level_runs(jobs, step)
     pieces <- character(0)
     if (length(running)) pieces <- c(pieces, paste("Running:", paste(running, collapse = "; ")))
@@ -2264,7 +2265,7 @@ submit_deseq2_job <- function(project, compare_col, reference, comparison, redun
   rscript <- file.path(SCRIPTS_DIR, "DESeq2", "DESeq2.R")
   count_matrix <- file.path(project$data_dir, "counts", "count_matrix.txt")
   design_matrix <- deseq_design_for_column(project, compare_col)
-  submit_sbatch(project, "DESeq2", script, c(rscript, count_matrix, design_matrix, outdir, reference, comparison, redundant, project$name), "deseq2", paste(compare_col, reference, "vs", comparison))
+  submit_sbatch(project, "DESeq2", script, c(rscript, count_matrix, design_matrix, outdir, reference, comparison, redundant, project$name), "deseq2", format_comparison_label(compare_col, comparison, reference))
 }
 
 write_gseapy_script <- function(project) {
@@ -2517,15 +2518,60 @@ clean_run_label <- function(x, fallback = "") {
   ifelse(nzchar(x), x, fallback)
 }
 
-completed_project_level_runs <- function(project, step) {
+format_comparison_label <- function(compare_col = "", comparison = "", reference = "", suffix = "") {
+  compare_col <- trimws(as.character(compare_col %||% ""))
+  comparison <- trimws(as.character(comparison %||% ""))
+  reference <- trimws(as.character(reference %||% ""))
+  suffix <- trimws(as.character(suffix %||% ""))
+  main <- if (nzchar(comparison) && nzchar(reference)) paste(comparison, "vs", reference) else trimws(paste(comparison, reference))
+  if (nzchar(compare_col) && nzchar(main)) main <- paste0(compare_col, ": ", main)
+  if (nzchar(suffix) && nzchar(main)) main <- paste(main, "-", suffix)
+  clean_run_label(main, fallback = paste(compare_col, comparison, reference))
+}
+
+parse_comparison_label <- function(x) {
+  x <- clean_run_label(x)
+  if (!nzchar(x)) return("")
+  suffix <- ""
+  db_split <- strsplit(x, " - ", fixed = TRUE)[[1]]
+  if (length(db_split) > 1) {
+    suffix <- paste(db_split[-1], collapse = " - ")
+    x <- db_split[1]
+  }
+  parts <- strsplit(x, " ", fixed = TRUE)[[1]]
+  parts <- parts[nzchar(parts)]
+  if (length(parts) >= 4 && identical(parts[3], "vs")) {
+    return(format_comparison_label(parts[1], parts[2], parts[4], suffix))
+  }
+  if (length(parts) >= 3 && identical(parts[2], "vs")) {
+    return(format_comparison_label("", parts[1], parts[3], suffix))
+  }
+  x
+}
+
+comparison_label_from_file <- function(file, jobs = data.frame(), step = "DESeq2") {
+  m <- regexec("^normalized_counts_(.*)_vs_(.*)\\(ref\\)\\.txt$", file)
+  hit <- regmatches(file, m)[[1]]
+  if (length(hit) != 3) return(file)
+  comparison <- hit[[2]]
+  reference <- hit[[3]]
+  compare_col <- ""
+  if (NROW(jobs) && all(c("step", "input_mode") %in% names(jobs))) {
+    job_hit <- jobs[jobs$step == step & grepl(paste0("(^| )", comparison, " vs ", reference, "($| )"), jobs$input_mode), , drop = FALSE]
+    if (NROW(job_hit)) {
+      parsed <- parse_comparison_label(tail(job_hit$input_mode, 1))
+      if (nzchar(parsed)) return(parsed)
+    }
+  }
+  format_comparison_label(compare_col, comparison, reference)
+}
+
+completed_project_level_runs <- function(project, step, jobs = NULL) {
   data_dir <- project$data_dir
+  if (is.null(jobs)) jobs <- job_history(project)
   if (identical(step, "DESeq2")) {
     files <- list.files(file.path(data_dir, "deseq2"), pattern = "^normalized_counts_.*\\(ref\\)\\.txt$", full.names = FALSE)
-    labels <- vapply(files, function(file) {
-      m <- regexec("^normalized_counts_(.*)_vs_(.*)\\(ref\\)\\.txt$", file)
-      hit <- regmatches(file, m)[[1]]
-      if (length(hit) == 3) paste(hit[[2]], "vs", hit[[3]]) else file
-    }, character(1))
+    labels <- vapply(files, comparison_label_from_file, character(1), jobs = jobs, step = step)
     return(sort(unique(labels[nzchar(labels)])))
   }
   if (identical(step, "GSEA")) {
@@ -2539,9 +2585,9 @@ completed_project_level_runs <- function(project, step) {
       if (grepl("^report\\.gseapy\\..*\\.csv$", basename(file))) {
         db <- sub("^report\\.gseapy\\.", "", basename(file))
         db <- sub("\\.csv$", "", db)
-        paste(rel_dir, "-", db)
+        parse_comparison_label(paste(rel_dir, "-", db))
       } else {
-        rel_dir
+        parse_comparison_label(rel_dir)
       }
     }, character(1))
     return(sort(unique(labels[nzchar(labels)])))
@@ -2556,11 +2602,12 @@ running_project_level_runs <- function(jobs, step) {
   labels <- if ("input_mode" %in% names(hit)) as.character(hit$input_mode) else rep("", NROW(hit))
   fallback <- if ("job_id" %in% names(hit)) paste("Job", hit$job_id) else paste(step, seq_len(NROW(hit)))
   labels <- mapply(clean_run_label, labels, fallback, USE.NAMES = FALSE)
+  labels <- vapply(labels, parse_comparison_label, character(1))
   sort(unique(labels[nzchar(labels)]))
 }
 
 project_level_step_summary_ui <- function(project, jobs, step) {
-  complete <- completed_project_level_runs(project, step)
+  complete <- completed_project_level_runs(project, step, jobs)
   running <- running_project_level_runs(jobs, step)
   if (!length(complete) && !length(running)) return(NULL)
   row_ui <- function(label, values, cls) {
@@ -3659,13 +3706,22 @@ server <- function(input, output, session) {
     design_state(df)
     metadata <- setdiff(names(df), c("include", "sample", "filename", "status"))
     msg <- tryCatch({
+      original_design_path <- p$design_matrix_path %||% ""
       design_path <- write_design_matrix(p, df, metadata)
-      if (identical(input$project_id, "__new__")) {
-        cfg <- write_project_config(p)
-        projects(discover_projects())
-        paste("Saved design matrix:", design_path, "\nCreated project:", p$name, "\nSaved project file:", cfg)
+      p$design_matrix_path <- design_path
+      cfg <- write_project_config(p)
+      projects(discover_projects())
+      write_last_project_id(p$id)
+      updateSelectInput(session, "project_id", selected = p$id)
+      note <- if (nzchar(original_design_path) && normalizePath(original_design_path, winslash = "/", mustWork = FALSE) != normalizePath(design_path, winslash = "/", mustWork = FALSE)) {
+        paste0("\nOriginal design matrix was not modified: ", original_design_path)
       } else {
-        paste("Saved design matrix:", design_path)
+        ""
+      }
+      if (identical(input$project_id, "__new__")) {
+        paste("Saved edited design matrix copy:", design_path, "\nCreated project:", p$name, "\nSaved project file:", cfg, note)
+      } else {
+        paste("Saved edited design matrix copy:", design_path, "\nUpdated project file:", cfg, note)
       }
     }, error = function(e) paste("ERROR:", conditionMessage(e)))
     output$design_save_status <- renderText(msg)
