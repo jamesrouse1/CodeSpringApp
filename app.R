@@ -2169,6 +2169,76 @@ tool_panel <- function(step, status, description, controls, button_id, button_la
   )
 }
 
+active_slurm_states <- function() {
+  c("PENDING", "CONFIGURING", "COMPLETING", "RUNNING", "SUSPENDED", "Submitted")
+}
+
+clean_run_label <- function(x, fallback = "") {
+  x <- trimws(as.character(x %||% fallback))
+  x <- gsub("[[:space:]]+", " ", x)
+  ifelse(nzchar(x), x, fallback)
+}
+
+completed_project_level_runs <- function(project, step) {
+  data_dir <- project$data_dir
+  if (identical(step, "DESeq2")) {
+    files <- list.files(file.path(data_dir, "deseq2"), pattern = "^normalized_counts_.*\\(ref\\)\\.txt$", full.names = FALSE)
+    labels <- vapply(files, function(file) {
+      m <- regexec("^normalized_counts_(.*)_vs_(.*)\\(ref\\)\\.txt$", file)
+      hit <- regmatches(file, m)[[1]]
+      if (length(hit) == 3) paste(hit[[2]], "vs", hit[[3]]) else file
+    }, character(1))
+    return(sort(unique(labels[nzchar(labels)])))
+  }
+  if (identical(step, "GSEA")) {
+    gsea_dir <- file.path(data_dir, "gseapy")
+    files <- if (dir.exists(gsea_dir)) {
+      list.files(gsea_dir, pattern = "gseapy\\.gene_set\\.gsea\\.report\\.csv$|^report\\.gseapy\\..*\\.csv$", recursive = TRUE, full.names = TRUE)
+    } else character(0)
+    labels <- vapply(files, function(file) {
+      rel_dir <- dirname(sub(paste0("^", gsub("([\\.^$|()\\[\\]{}*+?\\\\])", "\\\\\\1", gsea_dir), "/?"), "", file))
+      if (!nzchar(rel_dir) || identical(rel_dir, ".")) rel_dir <- basename(dirname(file))
+      if (grepl("^report\\.gseapy\\..*\\.csv$", basename(file))) {
+        db <- sub("^report\\.gseapy\\.", "", basename(file))
+        db <- sub("\\.csv$", "", db)
+        paste(rel_dir, "-", db)
+      } else {
+        rel_dir
+      }
+    }, character(1))
+    return(sort(unique(labels[nzchar(labels)])))
+  }
+  character(0)
+}
+
+running_project_level_runs <- function(jobs, step) {
+  if (!NROW(jobs) || !"step" %in% names(jobs) || !"slurm_state" %in% names(jobs)) return(character(0))
+  hit <- jobs[jobs$step == step & jobs$slurm_state %in% active_slurm_states(), , drop = FALSE]
+  if (!NROW(hit)) return(character(0))
+  labels <- if ("input_mode" %in% names(hit)) as.character(hit$input_mode) else rep("", NROW(hit))
+  fallback <- if ("job_id" %in% names(hit)) paste("Job", hit$job_id) else paste(step, seq_len(NROW(hit)))
+  labels <- mapply(clean_run_label, labels, fallback, USE.NAMES = FALSE)
+  sort(unique(labels[nzchar(labels)]))
+}
+
+project_level_step_summary_ui <- function(project, jobs, step) {
+  complete <- completed_project_level_runs(project, step)
+  running <- running_project_level_runs(jobs, step)
+  if (!length(complete) && !length(running)) return(NULL)
+  row_ui <- function(label, values, cls) {
+    if (!length(values)) return(NULL)
+    div(class = "project-step-summary-row",
+        div(class = "project-step-summary-label", label),
+        div(class = "project-step-chip-wrap", lapply(values, function(value) span(class = paste("project-step-chip", cls), value)))
+    )
+  }
+  div(class = "project-step-summary",
+      div(class = "project-step-summary-title", "Comparison status"),
+      row_ui("Running", running, "running"),
+      row_ui("Complete", complete, "complete")
+  )
+}
+
 list_result_files <- function(project, pattern = "\\.(txt|csv|tsv|html|png|pdf)$") {
   if (!dir.exists(project$data_dir)) return(character(0))
   list.files(project$data_dir, pattern = pattern, recursive = TRUE, full.names = TRUE)
@@ -2236,6 +2306,14 @@ body { background:#eef3f8; color:#17202f; }
 .tool-progress-table tr:last-child td { border-bottom:0; }
 .tool-progress-table .sample-status { min-width:118px; width:auto; max-width:100%; padding:6px 11px; font-size:12px; }
 .tool-progress-table .sample-name { font-weight:800; color:#17202f; }
+.project-step-summary { margin:12px 0; border:1px solid #d8dde8; border-radius:8px; background:#f8fafc; padding:12px; }
+.project-step-summary-title { font-size:12px; font-weight:800; color:#304a66; text-transform:uppercase; letter-spacing:.04em; margin-bottom:8px; }
+.project-step-summary-row { display:flex; align-items:flex-start; gap:10px; margin-top:8px; }
+.project-step-summary-label { min-width:78px; font-size:12px; font-weight:800; color:#657084; padding-top:4px; }
+.project-step-chip-wrap { display:flex; flex-wrap:wrap; gap:7px; flex:1; }
+.project-step-chip { border-radius:999px; border:1px solid #cfd7e3; background:white; padding:5px 9px; font-size:12px; font-weight:800; color:#304a66; max-width:100%; overflow-wrap:anywhere; }
+.project-step-chip.running { background:#fff4d6; color:#7c3d00; border-color:#f0c36d; }
+.project-step-chip.complete { background:#def7e8; color:#0b6b3a; border-color:#8fd8ad; }
 .adaptive-table-note { color:#657084; font-size:13px; font-weight:700; margin:0 0 10px 0; }
 .resource-strip { display:grid; grid-template-columns:minmax(280px,.85fr) minmax(460px,1.45fr); gap:16px; align-items:stretch; margin:12px 0 18px 0; }
 .resource-card { background:white; border:1px solid #d8dde8; border-radius:8px; padding:16px; }
@@ -3263,8 +3341,14 @@ server <- function(input, output, session) {
     )
   })
 
+  observeEvent(input$progress_job_tool_filter, {
+    progress_job_filter_state(input$progress_job_tool_filter %||% "All")
+    progress_refresh(Sys.time())
+  }, ignoreInit = TRUE)
+
   observeEvent(input$apply_progress_job_filter, {
     progress_job_filter_state(input$progress_job_tool_filter %||% "All")
+    safe_refresh_progress_now("job filter")
     progress_refresh(Sys.time())
   })
 
@@ -3318,10 +3402,10 @@ server <- function(input, output, session) {
         tagList(selectInput("feature_attr", "featureCounts attribute", choices = c("gene_id", "gene_name"), selected = "gene_id", selectize = FALSE)),
         "run_featurecounts", "Submit featureCounts", progress_df),
       tool_panel("DESeq2", status, "Run differential expression from count_matrix.txt.",
-        uiOutput("deseq_controls_ui"),
+        tagList(uiOutput("deseq_controls_ui"), uiOutput("deseq_project_summary_ui")),
         "run_deseq2", "Submit DESeq2", data.frame()),
       tool_panel("GSEA", status, "Run pathway analysis from DESeq2 normalized counts.",
-        uiOutput("gsea_run_controls_ui"),
+        tagList(uiOutput("gsea_run_controls_ui"), uiOutput("gsea_project_summary_ui")),
         "run_gsea", "Submit GSEA", data.frame()),
       tool_panel("RSEM (optional)", status, "Optional quantification from STAR BAM/transcriptome outputs.",
         tagList(selectInput("rsem_feature_attr", "RSEM feature attribute", choices = c("gene_id", "gene_name"), selected = "gene_id", selectize = FALSE)),
@@ -3357,6 +3441,11 @@ server <- function(input, output, session) {
     )
   })
 
+  output$deseq_project_summary_ui <- renderUI({
+    progress_refresh()
+    project_level_step_summary_ui(current_project(), job_history_state(), "DESeq2")
+  })
+
   output$gsea_run_controls_ui <- renderUI({
     p <- current_project()
     cols <- design_compare_columns(p)
@@ -3372,6 +3461,11 @@ server <- function(input, output, session) {
       selectInput("gsea_comparison", "Comparison", choices = vals, selected = comp, selectize = FALSE),
       selectInput("gsea_geneset", "Gene-set database", choices = GSEAPY_GENESET_OPTIONS, selected = "MSigDB_Hallmark_2020", selectize = FALSE)
     )
+  })
+
+  output$gsea_project_summary_ui <- renderUI({
+    progress_refresh()
+    project_level_step_summary_ui(current_project(), job_history_state(), "GSEA")
   })
 
   observeEvent(input$run_fastqc, {
