@@ -1295,8 +1295,6 @@ sample_progress_step_table <- function(progress_df, step) {
   if (!NROW(progress_df) || !"step" %in% names(progress_df)) return(NULL)
   hit <- progress_df[progress_df$step == step, , drop = FALSE]
   if (!NROW(hit)) return(NULL)
-  active_statuses <- c("Waiting", "Running", "Running, no growth yet", "Possibly incomplete")
-  if (!any(hit$status %in% active_statuses)) return(NULL)
   hit <- hit[order(hit$sample), , drop = FALSE]
   time_running <- if ("time_running" %in% names(hit)) as.character(hit$time_running) else rep("", NROW(hit))
   data.frame(
@@ -1313,8 +1311,6 @@ sample_progress_step_ui <- function(progress_df, step) {
   if (!NROW(table)) return(NULL)
   if (NROW(table) <= SAMPLE_PROGRESS_NICE_LIMIT) {
     hit <- progress_df[progress_df$step == step, , drop = FALSE]
-    active_statuses <- c("Waiting", "Running", "Running, no growth yet", "Possibly incomplete")
-    hit <- hit[hit$status %in% active_statuses, , drop = FALSE]
     hit <- hit[order(hit$sample), , drop = FALSE]
     return(div(
       class = "tool-progress-wrap",
