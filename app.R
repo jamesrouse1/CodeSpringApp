@@ -2413,7 +2413,7 @@ ui <- fluidPage(
                  br(),
                  h4("Sample Progress"),
                  uiOutput("sample_progress_matrix_ui"),
-                 div(class = "job-table-wrap", h4("Submitted Jobs"), table_output("active_jobs_table"))),
+                 div(class = "job-table-wrap", h4("Submitted Jobs"), uiOutput("progress_job_filter_ui"), table_output("active_jobs_table"))),
         tabPanel("Run Pipeline", br(), h3("Run Pipeline"),
                  tags$p(class = "muted", "Each tool has its own settings. Jobs are submitted with SLURM sbatch and keep running after this app or browser is closed."),
                  uiOutput("run_resource_strip"),
@@ -2791,8 +2791,20 @@ server <- function(input, output, session) {
 
   output$active_jobs_table <- render_csl_table({
     progress_refresh()
-    job_history_progress_display(current_project())
+    jobs <- job_history_progress_display(current_project())
+    tool <- input$progress_job_tool_filter %||% "All"
+    if (NROW(jobs) && !identical(tool, "All") && "step" %in% names(jobs)) jobs <- jobs[jobs$step == tool, , drop = FALSE]
+    jobs
   }, page_length = 10)
+
+  output$progress_job_filter_ui <- renderUI({
+    progress_refresh()
+    jobs <- job_history_progress_display(current_project())
+    steps <- if (NROW(jobs) && "step" %in% names(jobs)) sort(unique(jobs$step)) else pipeline_order()
+    selected <- input$progress_job_tool_filter %||% "All"
+    if (!selected %in% c("All", steps)) selected <- "All"
+    selectInput("progress_job_tool_filter", "Filter submitted jobs by tool", choices = c("All", steps), selected = selected, selectize = FALSE)
+  })
 
   output$run_pipeline_stepper <- renderUI({
     progress_refresh()
