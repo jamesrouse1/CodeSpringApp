@@ -877,11 +877,13 @@ server_browser_choices <- function(path, mode = "dir") {
   path <- normalizePath(path, winslash = "/", mustWork = FALSE)
   dirs <- list.dirs(path, recursive = FALSE, full.names = TRUE)
   dirs <- dirs[dir.exists(dirs)]
+  dirs <- dirs[!grepl("^\\.", basename(dirs))]
   labels <- paste0("[folder] ", basename(dirs))
   values <- dirs
   if (identical(mode, "file")) {
     files <- list.files(path, recursive = FALSE, full.names = TRUE)
     files <- files[file.exists(files) & !dir.exists(files)]
+    files <- files[!grepl("^\\.", basename(files))]
     file_labels <- paste0("[file] ", basename(files))
     labels <- c(labels, file_labels)
     values <- c(values, files)
@@ -2179,7 +2181,14 @@ select.form-control {
 "
 
 ui <- fluidPage(
-  tags$head(tags$style(HTML(app_css))),
+  tags$head(
+    tags$style(HTML(app_css)),
+    tags$script(HTML("
+      $(document).on('dblclick', '#browser_choice', function() {
+        $('#browser_open_choice').trigger('click');
+      });
+    "))
+  ),
   div(class = "csl-header",
       div(class = "brand-lockup",
           if (file.exists(LOGO_PATH)) tags$img(src = file.path("codespring_logo", basename(LOGO_PATH))),
