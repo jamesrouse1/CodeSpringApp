@@ -2844,50 +2844,14 @@ body { background:#eef3f8; color:#17202f; }
 .native-results-host img { max-width:100% !important; height:auto !important; object-fit:contain !important; }
 .native-results-host .shiny-plot-output, .native-results-host .plot-output { max-width:100% !important; max-height:620px !important; }
 .native-results-host img[src*='pca'], .native-results-host img[src*='volcano'] { max-height:620px !important; width:auto !important; }
-.web-tab-strip { display:none; align-items:center; justify-content:flex-start; gap:10px; min-height:0; margin:0 0 2px 0; }
-.web-tab-select { display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap; }
-.web-tab-select .form-group { margin-bottom:0; min-width:190px; }
-.web-tab-select label { margin-bottom:2px; font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:#657084; }
-.web-tab-select select { height:32px; border-radius:8px; border:1px solid #d8dde8; box-shadow:none; font-weight:700; color:#25364d; }
 .web-context-chip { display:inline-flex; align-items:center; gap:6px; border:1px solid #d8dde8; border-radius:999px; background:#ffffff; color:#304a66; font-size:12px; font-weight:800; padding:6px 10px; box-shadow:0 6px 16px rgba(20,38,64,.05); max-width:100%; }
 .web-context-chip span { color:#657084; font-weight:700; }
-body.results-explorer-mode .csl-header { display:none !important; }
-body.results-explorer-mode .container-fluid { padding:2px 4px 10px 4px !important; }
-body.results-explorer-mode .web-sidebar { display:none !important; }
-body.results-explorer-mode .web-main { width:100% !important; max-width:100% !important; padding-left:0 !important; padding-right:0 !important; }
-body.results-explorer-mode .web-tab-strip { display:flex; margin:2px 0 2px 4px; }
-body.results-explorer-mode .tabbable > .nav-tabs { margin-bottom:6px; }
-body.results-explorer-mode .tabbable > .tab-content { padding-top:0 !important; }
 .dataTables_wrapper { width:100%; max-width:100%; overflow-x:auto; }
 .dataTables_scroll { width:100%; max-width:100%; overflow-x:auto; }
 .dataTables_scrollBody { max-height:min(62vh, 560px) !important; overflow:auto !important; }
 .native-results-host .dataTables_scrollBody { max-height:min(68vh, 650px) !important; overflow:auto !important; }
 .native-results-host .table, .native-results-host table { max-width:100%; }
 .native-results-host .shiny-html-output { max-width:100%; overflow-x:auto !important; }
-.native-results-host .row > .col-sm-3 {
-  width: 14% !important;
-  min-width: 145px !important;
-  padding-left: 2px !important;
-  padding-right: 4px !important;
-}
-.native-results-host .row > .col-sm-9 {
-  width: 86% !important;
-  max-width: calc(86% - 2px) !important;
-  padding-left: 4px !important;
-  padding-right: 2px !important;
-}
-.native-results-host .row > .col-sm-4 {
-  width: 18% !important;
-  min-width: 175px !important;
-  padding-left: 2px !important;
-  padding-right: 4px !important;
-}
-.native-results-host .row > .col-sm-8 {
-  width: 82% !important;
-  max-width: calc(82% - 2px) !important;
-  padding-left: 4px !important;
-  padding-right: 2px !important;
-}
 .native-results-host .well {
   padding: 8px !important;
   margin-bottom: 8px !important;
@@ -2922,22 +2886,12 @@ body > .container-fluid > .row > .col-sm-10 {
   padding-left: 4px;
   padding-right: 0;
 }
-.native-results-host .col-sm-2 {
-  width: 140px !important;
-  min-width: 140px !important;
-}
-.native-results-host .col-sm-10 {
-  width: calc(100% - 140px) !important;
-  max-width: calc(100% - 140px) !important;
-}
 @media (max-width: 900px) {
   body > .container-fluid > .row {
     display: block;
   }
   body > .container-fluid > .row > .col-sm-2,
-  body > .container-fluid > .row > .col-sm-10,
-  .native-results-host .col-sm-2,
-  .native-results-host .col-sm-10 {
+  body > .container-fluid > .row > .col-sm-10 {
     width: 100% !important;
     max-width: 100% !important;
     min-width: 0 !important;
@@ -3314,13 +3268,6 @@ ui <- fluidPage(
       $(document).on('dblclick', '#browser_choice', function() {
         $('#browser_open_choice').trigger('click');
       });
-      function cslUpdateResultsMode() {
-        var active = $('.tabbable > .nav-tabs li.active a').first().text().trim();
-        $('body').toggleClass('results-explorer-mode', active === 'Results Explorer');
-      }
-      $(document).on('shown.bs.tab', '.tabbable > .nav-tabs a', cslUpdateResultsMode);
-      $(document).on('shiny:connected shiny:value', function() { setTimeout(cslUpdateResultsMode, 25); });
-      $(function() { setTimeout(cslUpdateResultsMode, 50); });
     "))
   ),
   div(class = "csl-header",
@@ -3344,7 +3291,6 @@ ui <- fluidPage(
     mainPanel(
       class = "web-main",
       width = 10,
-      div(class = "web-tab-strip", uiOutput("tab_context_ui")),
       tabsetPanel(
         id = "web_main_tabs",
         tabPanel("Setup", br(), h3("Project Setup"),
@@ -3604,12 +3550,6 @@ server <- function(input, output, session) {
     p[vapply(p, function(x) identical(x$analysis, analysis), logical(1))]
   })
 
-  projects_for_analysis <- function(analysis) {
-    p <- projects()
-    if (!length(analysis) || is.null(analysis) || !nzchar(analysis)) return(p)
-    p[vapply(p, function(x) identical(x$analysis, analysis), logical(1))]
-  }
-
   output$project_ui <- renderUI({
     p <- filtered_projects()
     labels <- if (length(p)) vapply(p, function(x) x$label, character(1)) else character(0)
@@ -3717,43 +3657,6 @@ server <- function(input, output, session) {
         )
     )
   })
-
-  output$tab_context_ui <- renderUI({
-    if (!identical(input$web_main_tabs, "Results Explorer")) return(NULL)
-    div(class = "web-tab-select",
-      selectInput("top_analysis", "Analysis", choices = c("RNA-seq", "ATAC-seq", "ChIP-seq"), selected = input$analysis %||% "RNA-seq", selectize = FALSE),
-      uiOutput("top_project_ui")
-    )
-  })
-
-  output$top_project_ui <- renderUI({
-    analysis <- input$top_analysis %||% input$analysis %||% "RNA-seq"
-    p <- projects_for_analysis(analysis)
-    labels <- if (length(p)) vapply(p, function(x) x$label, character(1)) else character(0)
-    ids <- if (length(p)) names(p) else character(0)
-    choices <- c("Start a new project" = "__new__", stats::setNames(ids, labels))
-    selected <- input$project_id %||% "__new__"
-    if (!selected %in% unname(choices)) selected <- "__new__"
-    selectInput("top_project_id", "Project", choices = choices, selected = selected, selectize = FALSE)
-  })
-
-  observeEvent(input$top_analysis, {
-    if (!identical(input$analysis, input$top_analysis)) {
-      updateSelectInput(session, "analysis", selected = input$top_analysis)
-    }
-  }, ignoreInit = TRUE)
-
-  observeEvent(input$analysis, {
-    if (!is.null(input$top_analysis) && !identical(input$top_analysis, input$analysis)) {
-      updateSelectInput(session, "top_analysis", selected = input$analysis)
-    }
-  }, ignoreInit = TRUE)
-
-  observeEvent(input$top_project_id, {
-    if (!is.null(input$top_project_id) && !identical(input$project_id, input$top_project_id)) {
-      updateSelectInput(session, "project_id", selected = input$top_project_id)
-    }
-  }, ignoreInit = TRUE)
 
   output$setup_table <- renderTable({
     p <- current_project()
