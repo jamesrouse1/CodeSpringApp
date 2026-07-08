@@ -2856,11 +2856,23 @@ body { background:#eef3f8; color:#17202f; }
 .config-card { margin-top:14px; background:white; border:1px solid #d8dde8; border-radius:8px; padding:14px; box-shadow:0 8px 20px rgba(15,23,36,.05); }
 .config-card code { display:block; white-space:normal; overflow-wrap:anywhere; margin-top:6px; background:#f8fafc; border:1px solid #edf1f6; border-radius:6px; padding:9px; color:#17202f; }
 .native-results-host { margin: 0 !important; width:100% !important; max-width:100% !important; overflow:auto !important; }
-.native-results-host > .container-fluid { max-width: none !important; width: 100% !important; margin: 0 !important; padding: 6px 0 18px 0 !important; overflow-x:auto !important; }
+.native-results-host > .container-fluid { max-width: none !important; width: 100% !important; margin: 0 !important; padding: 0 0 10px 0 !important; overflow-x:auto !important; }
 .native-results-host .app-shell { border-radius: 10px !important; box-shadow: none !important; margin:0 !important; overflow:visible !important; }
-.native-results-host .hero { padding: 18px 22px 16px 22px !important; }
-.native-results-host .main-tabs { padding: 14px 14px 20px 14px !important; overflow-x:auto !important; }
-.native-results-host .tab-content, .native-results-host .tab-pane, .native-results-host .main-panel { max-width:100% !important; overflow-x:auto !important; }
+.native-results-host .hero { padding: 12px 16px 10px 16px !important; }
+.native-results-host .main-tabs { padding: 6px 6px 10px 6px !important; overflow-x:auto !important; }
+.native-results-host .tab-content, .native-results-host .tab-pane, .native-results-host .main-panel { max-width:100% !important; overflow-x:auto !important; padding-left:0 !important; padding-right:0 !important; }
+.native-results-host img { max-width:100% !important; height:auto !important; object-fit:contain !important; }
+.native-results-host .shiny-plot-output, .native-results-host .plot-output { max-width:100% !important; }
+.web-tab-strip { display:flex; align-items:center; justify-content:flex-end; gap:8px; min-height:0; margin:0 0 8px 0; }
+.web-context-chip { display:inline-flex; align-items:center; gap:6px; border:1px solid #d8dde8; border-radius:999px; background:#ffffff; color:#304a66; font-size:12px; font-weight:800; padding:6px 10px; box-shadow:0 6px 16px rgba(20,38,64,.05); max-width:100%; }
+.web-context-chip span { color:#657084; font-weight:700; }
+body.results-explorer-mode .csl-header { display:none !important; }
+body.results-explorer-mode .container-fluid { padding:6px 8px 14px 8px !important; }
+body.results-explorer-mode .web-sidebar { display:none !important; }
+body.results-explorer-mode .web-main { width:100% !important; max-width:100% !important; padding-left:0 !important; padding-right:0 !important; }
+body.results-explorer-mode .web-tab-strip { margin:0 0 4px 0; }
+body.results-explorer-mode .tabbable > .nav-tabs { margin-bottom:6px; }
+body.results-explorer-mode .tabbable > .tab-content { padding-top:0 !important; }
 .dataTables_wrapper { width:100%; max-width:100%; overflow-x:auto; }
 .dataTables_scroll { width:100%; max-width:100%; overflow-x:auto; }
 .dataTables_scrollBody { max-height:min(62vh, 560px) !important; overflow:auto !important; }
@@ -3285,6 +3297,13 @@ ui <- fluidPage(
       $(document).on('dblclick', '#browser_choice', function() {
         $('#browser_open_choice').trigger('click');
       });
+      function cslUpdateResultsMode() {
+        var active = $('.tabbable > .nav-tabs li.active a').first().text().trim();
+        $('body').toggleClass('results-explorer-mode', active === 'Results Explorer');
+      }
+      $(document).on('shown.bs.tab', '.tabbable > .nav-tabs a', cslUpdateResultsMode);
+      $(document).on('shiny:connected shiny:value', function() { setTimeout(cslUpdateResultsMode, 25); });
+      $(function() { setTimeout(cslUpdateResultsMode, 50); });
     "))
   ),
   div(class = "csl-header",
@@ -3296,6 +3315,7 @@ ui <- fluidPage(
   ),
   sidebarLayout(
     sidebarPanel(
+      class = "web-sidebar",
       width = 2,
       selectInput("analysis", "Analysis", choices = c("RNA-seq", "ATAC-seq", "ChIP-seq"), selected = "RNA-seq", selectize = FALSE),
       uiOutput("project_ui"),
@@ -3305,7 +3325,9 @@ ui <- fluidPage(
       uiOutput("project_card")
     ),
     mainPanel(
+      class = "web-main",
       width = 10,
+      div(class = "web-tab-strip", uiOutput("tab_context_ui")),
       tabsetPanel(
         id = "web_main_tabs",
         tabPanel("Setup", br(), h3("Project Setup"),
@@ -3672,6 +3694,14 @@ server <- function(input, output, session) {
         div(class = "path-list compact-path-list",
             div(class = "path-item", span("Data"), code(p$data_dir))
         )
+    )
+  })
+
+  output$tab_context_ui <- renderUI({
+    p <- current_project()
+    tagList(
+      span(class = "web-context-chip", span("Analysis"), p$analysis),
+      span(class = "web-context-chip", span("Project"), p$label)
     )
   })
 
