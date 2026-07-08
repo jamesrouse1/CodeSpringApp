@@ -1795,10 +1795,36 @@ submit_featurecounts_jobs <- function(project, feature = "gene_id") {
     submit_sbatch(project, "featureCounts", script, c(bam, res$gtf, feature, count_prefix, res$strand_bed, project$name), "featurecounts", paste("STAR BAM; feature", feature), sample = sample, target = target, reference = res$gtf)
   }, character(1))
   ids <- vapply(messages, parse_sbatch_job_id, character(1))
+  matrix_msg <- submit_featurecounts_matrix_job(project, feature, dependency_ids = ids)
+  paste(c(messages, matrix_msg), collapse = "\n")
+}
+
+submit_featurecounts_matrix_job <- function(project, feature = "gene_id", dependency_ids = character(0)) {
+  res <- genome_resources(project)
+  outdir <- file.path(project$data_dir, "featurecounts")
+  counts_dir <- file.path(project$data_dir, "counts")
+  dir.create(counts_dir, recursive = TRUE, showWarnings = FALSE)
   matrix_script <- write_featurecounts_matrix_script(project)
   matrix_cmd <- paste(shQuote(Sys.which("Rscript") %||% "Rscript"), shQuote(matrix_script), shQuote(outdir), shQuote(counts_dir))
-  matrix_msg <- submit_sbatch_wrap(project, "featureCounts", matrix_cmd, "featurecounts_count_matrix", paste("matrix build; feature", feature), target = file.path(counts_dir, "count_matrix.txt"), reference = res$gtf, dependency_ids = ids)
-  paste(c(messages, matrix_msg), collapse = "\n")
+  submit_sbatch_wrap(project, "featureCounts", matrix_cmd, "featurecounts_count_matrix", paste("matrix build; feature", feature), target = file.path(counts_dir, "count_matrix.txt"), reference = res$gtf, dependency_ids = dependency_ids)
+}
+
+expected_featurecounts_files <- function(project) {
+  design <- safe_read_table(project$design_matrix_path)
+  if (!NROW(design) || !"sample" %in% names(design)) return(character(0))
+  file.path(project$data_dir, "featurecounts", as.character(design$sample), paste0(as.character(design$sample), "_counts.txt"))
+}
+
+featurecounts_outputs_ready <- function(project) {
+  files <- expected_featurecounts_files(project)
+  length(files) > 0 && all(file.exists(files)) && all(vapply(files, file_size_for, numeric(1)) >= minimum_expected_bytes("featureCounts"))
+}
+
+featurecounts_matrix_job_active <- function(jobs, matrix_path) {
+  if (!NROW(jobs) || !"target" %in% names(jobs) || !"slurm_state" %in% names(jobs)) return(FALSE)
+  active_states <- c("PENDING", "CONFIGURING", "COMPLETING", "RUNNING", "SUSPENDED", "Submitted")
+  hit <- jobs[jobs$step == "featureCounts" & jobs$target == matrix_path, , drop = FALSE]
+  NROW(hit) > 0 && any(hit$slurm_state %in% active_states)
 }
 
 submit_deseq2_job <- function(project, compare_col, reference, comparison, redundant = "NoRedundant") {
@@ -2512,6 +2538,7 @@ server <- function(input, output, session) {
   job_history_state <- reactiveVal(data.frame())
   project_status_state <- reactiveVal(data.frame())
   progress_job_filter_state <- reactiveVal("All")
+  featurecounts_matrix_autosubmitted <- reactiveVal(character(0))
   sample_size_cache <- reactiveVal(data.frame(path = character(), size = numeric(), checked = character(), stringsAsFactors = FALSE))
   sample_progress_state <- reactiveVal(data.frame())
   path_browser <- reactiveValues(target = "", mode = "dir", path = path.expand("~"))
@@ -2519,6 +2546,19 @@ server <- function(input, output, session) {
   refresh_progress_now <- function() {
     p <- current_project()
     jobs <- job_history(p)
+    matrix_path <- file.path(p$data_dir, "counts", "count_matrix.txt")
+    autosubmitted <- featurecounts_matrix_autosubmitted()
+    if (
+      identical(p$analysis_key, "rna") &&
+      !file.exists(matrix_path) &&
+      featurecounts_outputs_ready(p) &&
+      !featurecounts_matrix_job_active(jobs, matrix_path) &&
+      !p$id %in% autosubmitted
+    ) {
+      submit_featurecounts_matrix_job(p, "gene_id")
+      featurecounts_matrix_autosubmitted(unique(c(autosubmitted, p$id)))
+      jobs <- job_history(p)
+    }
     active_states <- active_job_state_map_from_jobs(jobs)
     res <- sample_progress(p, active_states, isolate(sample_size_cache()), jobs = jobs)
     status <- project_status(p, jobs = jobs, progress = res$table, active_states = active_states)
@@ -3022,6 +3062,7 @@ server <- function(input, output, session) {
     refresh_progress_now()
   })
   observeEvent(input$run_featurecounts, {
+    featurecounts_matrix_autosubmitted(setdiff(featurecounts_matrix_autosubmitted(), current_project()$id))
     run_message(submit_featurecounts_jobs(current_project(), input$feature_attr))
     refresh_progress_now()
   })
