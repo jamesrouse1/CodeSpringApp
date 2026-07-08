@@ -315,8 +315,6 @@ discover_projects <- function() {
   for (root in roots) {
     if (dir.exists(root)) files <- c(files, list.files(root, pattern = "\\.py$", recursive = TRUE, full.names = TRUE))
   }
-  active <- file.path(SCRIPTS_DIR, "config.py")
-  if (file.exists(active)) files <- c(files, active)
   files <- unique(normalizePath(files, winslash = "/", mustWork = FALSE))
   projects <- Filter(Negate(is.null), lapply(files, legacy_project_from_config))
   if (!length(projects)) {
@@ -871,6 +869,36 @@ read_log_excerpt <- function(path, mode = "tail", n = 120) {
   else if (identical(mode, "full")) lines <- lines
   else lines <- utils::tail(lines, n)
   paste(lines, collapse = "\n")
+}
+
+server_browser_choices <- function(path, mode = "dir") {
+  path <- path.expand(trimws(as.character(path %||% "")))
+  if (!nzchar(path) || !dir.exists(path)) path <- path.expand("~")
+  path <- normalizePath(path, winslash = "/", mustWork = FALSE)
+  dirs <- list.dirs(path, recursive = FALSE, full.names = TRUE)
+  dirs <- dirs[dir.exists(dirs)]
+  labels <- paste0("[folder] ", basename(dirs))
+  values <- dirs
+  if (identical(mode, "file")) {
+    files <- list.files(path, recursive = FALSE, full.names = TRUE)
+    files <- files[file.exists(files) & !dir.exists(files)]
+    file_labels <- paste0("[file] ", basename(files))
+    labels <- c(labels, file_labels)
+    values <- c(values, files)
+  }
+  if (!length(values)) {
+    values <- path
+    labels <- "(empty folder)"
+  }
+  stats::setNames(values, labels)
+}
+
+browser_start_path <- function(value, mode = "dir") {
+  value <- path.expand(trimws(as.character(value %||% "")))
+  if (nzchar(value) && identical(mode, "file") && file.exists(value)) return(dirname(value))
+  if (nzchar(value) && dir.exists(value)) return(value)
+  if (nzchar(value) && dir.exists(dirname(value))) return(dirname(value))
+  path.expand("~")
 }
 
 active_job_steps <- function(project) {
