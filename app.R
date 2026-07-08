@@ -301,6 +301,7 @@ legacy_project_from_config <- function(path) {
     analysis = analysis_label(key),
     analysis_key = key,
     genome = tolower(vals$genome %||% "mouse"),
+    genome_version = vals$genome_version %||% vals$reference_genome %||% "",
     paired_end = !(pairing %in% c("n", "no", "false", "single", "se")),
     results_root = results_root,
     data_dir = data_dir,
@@ -327,6 +328,7 @@ discover_projects <- function() {
       analysis = "RNA-seq",
       analysis_key = "rna",
       genome = "mouse",
+      genome_version = "mouse_gencodeM29",
       paired_end = TRUE,
       results_root = normalizePath(path.expand("~/csl_results"), winslash = "/", mustWork = FALSE),
       data_dir = normalizePath(path.expand("~/csl_results/example_dataset/data"), winslash = "/", mustWork = FALSE),
@@ -362,7 +364,8 @@ new_project_from_inputs <- function(input) {
     label = label,
     analysis = analysis_label(key),
     analysis_key = key,
-    genome = tolower(input$new_genome %||% "mouse"),
+    genome = tolower(input$new_species %||% "mouse"),
+    genome_version = input$new_genome_version %||% "",
     paired_end = paired,
     results_root = results_root,
     data_dir = data_dir,
@@ -429,6 +432,7 @@ write_project_config <- function(project) {
     sprintf("read_path_original = %s", deparse(project$fastq_dir)),
     sprintf("read_path_destination = %s", deparse(project$fastq_dir)),
     sprintf("genome = %s", deparse(project$genome)),
+    sprintf("genome_version = %s", deparse(genome_reference_key(project))),
     sprintf("pairing = %s", deparse(if (isTRUE(project$paired_end)) "y" else "n"))
   )
   writeLines(lines, cfg_path)
@@ -1423,27 +1427,79 @@ rna_workdir <- function(project) {
   normalizePath(file.path(CSL_ROOT, analysis_notebook_dir(project$analysis_key)), winslash = "/", mustWork = FALSE)
 }
 
-genome_resources <- function(project) {
+genome_reference_catalog <- function() {
+  list(
+    human = list(
+      human_gencode50 = list(
+        label = "Human GRCh38 / GENCODE v50",
+        star_index = "/grid/bsr/data/data/utama/genome/human_gencode50/STAR_index",
+        kallisto_index = "/grid/bsr/data/data/utama/genome/human_gencode50/gencode.v50.transcripts.idx",
+        rsem_index = "/grid/bsr/data/data/utama/genome/human_gencode50/rsem_index/rsem",
+        gtf = "/grid/bsr/data/data/utama/genome/human_gencode50/gencode.v50.primary_assembly.annotation.gtf",
+        strand_bed = "/grid/bsr/data/data/utama/genome/human_gencode50/gencode.v50.annotation_forStrandDetect_geneID.bed"
+      ),
+      human_gencode42 = list(
+        label = "Human hg38 / GENCODE v42 legacy",
+        star_index = "/grid/bsr/data/data/utama/genome/hg38_p13_gencode/hg38_p13_gencode_rel42_all_starindex",
+        kallisto_index = "/grid/bsr/data/data/utama/genome/hg38_p13_gencode/gencode.v45.transcripts.idx",
+        rsem_index = "/grid/bsr/data/data/utama/genome/human_rsem_index_star_gencode_hg38_p13_rel42_v2.7.2b/human_gencode",
+        gtf = "/grid/bsr/data/data/utama/genome/hg38_p13_gencode/gencode.v42.chr_patch_hapl_scaff.annotation.gtf",
+        strand_bed = "/grid/bsr/data/data/utama/genome/hg38_p13_gencode/gencode.v42.chr_patch_hapl_scaff.annotation_forStrandDetect_geneID.bed"
+      )
+    ),
+    mouse = list(
+      mouse_gencodeM39 = list(
+        label = "Mouse GRCm39 / GENCODE M39",
+        star_index = "/grid/bsr/data/data/utama/genome/mouse_gencodeM39/STAR_index",
+        kallisto_index = "/grid/bsr/data/data/utama/genome/mouse_gencodeM39/gencode.vM39.transcripts.idx",
+        rsem_index = "/grid/bsr/data/data/utama/genome/mouse_gencodeM39/rsem_index/rsem",
+        gtf = "/grid/bsr/data/data/utama/genome/mouse_gencodeM39/gencode.vM39.primary_assembly.annotation.gtf",
+        strand_bed = "/grid/bsr/data/data/utama/genome/mouse_gencodeM39/gencode.vM39.annotation_forStrandDetect_geneID.bed"
+      ),
+      mouse_gencodeM29 = list(
+        label = "Mouse GRCm39 / GENCODE M29 legacy",
+        star_index = "/grid/bsr/data/data/utama/genome/GRCm39_M29_gencode/GRCm39_M29_gencode_starindex",
+        kallisto_index = "/grid/bsr/data/data/utama/genome/GRCm39_M29_gencode/gencode.vM29.transcripts.idx",
+        rsem_index = "/grid/bsr/data/data/utama/genome/mouse_rsem_index_star_gencode_GRCm39_M29_v2.7.10a/mouse_gencode",
+        gtf = "/grid/bsr/data/data/utama/genome/GRCm39_M29_gencode/gencode.vM29.annotation.gtf",
+        strand_bed = "/grid/bsr/data/data/utama/genome/GRCm39_M29_gencode/gencode.vM29.annotation_forStrandDetect_geneID.bed"
+      )
+    )
+  )
+}
+
+genome_species <- function(project) {
   genome <- tolower(project$genome %||% "mouse")
-  if (genome == "human") {
-    list(
-      label = "human hg38 / GENCODE v42 annotation; kallisto transcript index v45",
-      star_index = "/grid/bsr/data/data/utama/genome/hg38_p13_gencode/hg38_p13_gencode_rel42_all_starindex",
-      kallisto_index = "/grid/bsr/data/data/utama/genome/hg38_p13_gencode/gencode.v45.transcripts.idx",
-      rsem_index = "/grid/bsr/data/data/utama/genome/human_rsem_index_star_gencode_hg38_p13_rel42_v2.7.2b/human_gencode",
-      gtf = "/grid/bsr/data/data/utama/genome/hg38_p13_gencode/gencode.v42.chr_patch_hapl_scaff.annotation.gtf",
-      strand_bed = "/grid/bsr/data/data/utama/genome/hg38_p13_gencode/gencode.v42.chr_patch_hapl_scaff.annotation_forStrandDetect_geneID.bed"
-    )
-  } else {
-    list(
-      label = "mouse GRCm39 / GENCODE M29",
-      star_index = "/grid/bsr/data/data/utama/genome/GRCm39_M29_gencode/GRCm39_M29_gencode_starindex",
-      kallisto_index = "/grid/bsr/data/data/utama/genome/GRCm39_M29_gencode/gencode.vM29.transcripts.idx",
-      rsem_index = "/grid/bsr/data/data/utama/genome/mouse_rsem_index_star_gencode_GRCm39_M29_v2.7.10a/mouse_gencode",
-      gtf = "/grid/bsr/data/data/utama/genome/GRCm39_M29_gencode/gencode.vM29.annotation.gtf",
-      strand_bed = "/grid/bsr/data/data/utama/genome/GRCm39_M29_gencode/gencode.vM29.annotation_forStrandDetect_geneID.bed"
-    )
-  }
+  if (genome %in% c("human", "mouse")) return(genome)
+  if (grepl("^human", genome)) return("human")
+  if (grepl("^mouse", genome)) return("mouse")
+  "mouse"
+}
+
+genome_reference_key <- function(project) {
+  catalog <- genome_reference_catalog()
+  species <- genome_species(project)
+  genome <- tolower(project$genome %||% "")
+  ref <- project$genome_version %||% project$reference_genome %||% ""
+  ref <- trimws(as.character(ref))
+  if (nzchar(ref) && ref %in% names(catalog[[species]])) return(ref)
+  if (nzchar(genome) && genome %in% names(catalog[[species]])) return(genome)
+  if (identical(species, "human")) return("human_gencode42")
+  "mouse_gencodeM29"
+}
+
+genome_reference_choices <- function(species) {
+  catalog <- genome_reference_catalog()
+  species <- tolower(species %||% "mouse")
+  if (!species %in% names(catalog)) species <- "mouse"
+  refs <- catalog[[species]]
+  stats::setNames(names(refs), vapply(refs, `[[`, character(1), "label"))
+}
+
+genome_resources <- function(project) {
+  species <- genome_species(project)
+  ref <- genome_reference_key(project)
+  genome_reference_catalog()[[species]][[ref]]
 }
 
 adapter_choices_r1 <- function() {
@@ -2746,7 +2802,8 @@ server <- function(input, output, session) {
       h4("New Project"),
       textInput("new_project_name", "Project name", value = "", placeholder = "e.g. my_project"),
       selectInput("new_project_analysis", "Analysis type", choices = c("RNA-seq", "ATAC-seq", "ChIP-seq"), selected = input$analysis, selectize = FALSE),
-      selectInput("new_genome", "Genome", choices = c("mouse", "human"), selected = "mouse", selectize = FALSE),
+      selectInput("new_species", "Species", choices = c("Mouse" = "mouse", "Human" = "human"), selected = "mouse", selectize = FALSE),
+      uiOutput("new_genome_version_ui"),
       radioButtons("new_paired_end", "Reads", choices = c("Paired-end" = "paired", "Single-end" = "single"), selected = "paired"),
       div(class = "new-project-path-control",
           textInput("new_fastq_dir", "Raw FASTQ folder", value = "", placeholder = "Choose with Browse or paste a server path"),
@@ -2763,6 +2820,14 @@ server <- function(input, output, session) {
       actionButton("create_project_config", "Create project", class = "btn-primary"),
       textOutput("create_project_status")
     )
+  })
+
+  output$new_genome_version_ui <- renderUI({
+    species <- tolower(input$new_species %||% "mouse")
+    choices <- genome_reference_choices(species)
+    selected <- isolate(input$new_genome_version)
+    if (is.null(selected) || !selected %in% unname(choices)) selected <- unname(choices)[[1]]
+    selectInput("new_genome_version", "Genome/reference version", choices = choices, selected = selected, selectize = FALSE)
   })
 
   output$project_manage_ui <- renderUI({
@@ -2813,7 +2878,8 @@ server <- function(input, output, session) {
             span(class = badge_class, p$analysis)
         ),
         div(class = "project-meta-row",
-            span(class = "meta-chip", paste("Genome", p$genome)),
+            span(class = "meta-chip", paste("Species", genome_species(p))),
+            span(class = "meta-chip", gencode_label(p)),
             span(class = "meta-chip", if (isTRUE(p$paired_end)) "Paired-end" else "Single-end")
         ),
         div(class = "path-list compact-path-list",
@@ -2825,8 +2891,8 @@ server <- function(input, output, session) {
   output$setup_table <- renderTable({
     p <- current_project()
     data.frame(
-      field = c("Project", "Analysis", "Genome", "GENCODE/index", "Paired-end", "Results root", "Data folder", "FASTQ folder", "Design matrix"),
-      value = c(p$label, p$analysis, p$genome, gencode_label(p), as.character(p$paired_end), p$results_root, p$data_dir, p$fastq_dir, p$design_matrix_path),
+      field = c("Project", "Analysis", "Species", "Genome/reference", "Reference key", "Paired-end", "Results root", "Data folder", "FASTQ folder", "Design matrix"),
+      value = c(p$label, p$analysis, genome_species(p), gencode_label(p), genome_reference_key(p), as.character(p$paired_end), p$results_root, p$data_dir, p$fastq_dir, p$design_matrix_path),
       stringsAsFactors = FALSE
     )
   })
