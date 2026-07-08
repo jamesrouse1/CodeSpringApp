@@ -878,6 +878,7 @@ server_browser_choices <- function(path, mode = "dir") {
   dirs <- list.dirs(path, recursive = FALSE, full.names = TRUE)
   dirs <- dirs[dir.exists(dirs)]
   dirs <- dirs[!grepl("^\\.", basename(dirs))]
+  dirs <- dirs[basename(dirs) != "__pycache__"]
   dirs <- sort(dirs)
   labels <- paste0(basename(dirs), "/")
   values <- dirs
@@ -885,6 +886,7 @@ server_browser_choices <- function(path, mode = "dir") {
     files <- list.files(path, recursive = FALSE, full.names = TRUE)
     files <- files[file.exists(files) & !dir.exists(files)]
     files <- files[!grepl("^\\.", basename(files))]
+    files <- files[basename(files) != "__pycache__"]
     files <- sort(files)
     file_labels <- basename(files)
     labels <- c(labels, file_labels)
@@ -1043,15 +1045,18 @@ sample_step_targets <- function(project, sample, step) {
       cutadapt_dir <- file.path(data_dir, "cutadapt")
       pairs <- sample_fastq_pairs(project, FALSE)
       hit <- pairs[pairs$sample == sample, , drop = FALSE]
+      expected <- character(0)
       if (NROW(hit)) {
         reads <- unique(c(hit$r1[1], if (project$paired_end) hit$r2[1] else character(0)))
-        return(file.path(cutadapt_dir, basename(reads)))
+        expected <- file.path(cutadapt_dir, basename(reads))
+        if (length(expected) && all(file.exists(expected))) return(expected)
       }
       hits <- if (dir.exists(cutadapt_dir)) {
         list.files(cutadapt_dir, pattern = paste0("^", sample, ".*", fastq_suffix_regex), full.names = TRUE, ignore.case = TRUE)
       } else character(0)
-      if (length(hits)) return(hits)
-      file.path(cutadapt_dir, paste0(sample, ".fastq.gz"))
+      needed <- if (isTRUE(project$paired_end)) 2 else 1
+      if (length(hits) >= needed) return(sort(hits))
+      if (length(expected)) expected else file.path(cutadapt_dir, paste0(sample, ".fastq.gz"))
     },
     "STAR" = file.path(data_dir, "star", sample, paste0(sample, "Aligned.sortedByCoord.out.bam")),
     "RSEM optional" = file.path(data_dir, "rsem", sample, paste0(sample, ".genes.results")),
@@ -1880,15 +1885,15 @@ body > .container-fluid > .row {
 }
 body > .container-fluid > .row > .col-sm-2 {
   float: none;
-  width: 220px;
-  min-width: 220px;
+  width: 280px;
+  min-width: 280px;
   padding-left: 4px;
   padding-right: 4px;
 }
 body > .container-fluid > .row > .col-sm-10 {
   float: none;
-  width: calc(100% - 232px);
-  max-width: calc(100% - 232px);
+  width: calc(100% - 292px);
+  max-width: calc(100% - 292px);
   padding-left: 4px;
   padding-right: 0;
 }
@@ -1912,6 +1917,28 @@ body > .container-fluid > .row > .col-sm-10 {
     max-width: 100% !important;
     min-width: 0 !important;
   }
+  .csl-header {
+    flex-direction: column;
+    align-items: flex-start;
+    padding: 24px;
+    gap: 18px;
+    min-height: 0;
+  }
+  .brand-lockup {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 16px;
+    width: 100%;
+  }
+  .csl-header h2 {
+    font-size: 34px;
+    line-height: 1.05;
+  }
+  .brand-lockup img,
+  .csl-header > img {
+    max-width: 100%;
+    max-height: 96px;
+  }
 }
 .container-fluid { padding: 22px 28px 34px 28px; }
 .csl-header {
@@ -1921,10 +1948,19 @@ body > .container-fluid > .row > .col-sm-10 {
   box-shadow: 0 18px 42px rgba(7,17,31,.18);
   min-height: 190px;
 }
-.csl-header h2 { font-size: 44px; letter-spacing: 0; }
+.csl-header h2 { font-size: 44px; letter-spacing: 0; overflow-wrap: anywhere; word-break: break-word; }
 .brand-lockup img, .csl-header > img {
   border: 1px solid rgba(255,255,255,.34);
   box-shadow: 0 12px 28px rgba(0,0,0,.16);
+}
+.brand-lockup { min-width: 0; }
+.brand-lockup > div { min-width: 0; }
+.csl-header .muted { overflow-wrap: anywhere; }
+@media (max-width: 900px) {
+  .csl-header h2 {
+    font-size: 25px;
+    line-height: 1.05;
+  }
 }
 .well {
   background: rgba(255,255,255,.92);
@@ -2125,6 +2161,8 @@ select.form-control {
 }
 .project-title-wrap h3 {
   width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 .project-card-top .analysis-badge {
   display: inline-block;
@@ -2210,8 +2248,11 @@ select.form-control {
 }
 .new-project-path-control .btn {
   width:100%;
-  text-align:left;
+  text-align:center;
   border-radius:6px;
+  white-space:normal;
+  min-height:34px;
+  line-height:1.2;
 }
 
 "
@@ -2334,7 +2375,8 @@ server <- function(input, output, session) {
 
   output$browser_choices_ui <- renderUI({
     choices <- server_browser_choices(path_browser$path, path_browser$mode)
-    selectInput("browser_choice", "Folders/files", choices = choices, selected = choices[[1]], selectize = FALSE, size = min(max(length(choices), 4), 18))
+    label <- if (identical(path_browser$mode, "file")) "Folders and files" else "Folders"
+    selectInput("browser_choice", label, choices = choices, selected = choices[[1]], selectize = FALSE, size = min(max(length(choices), 4), 18))
   })
 
   observeEvent(input$browse_new_fastq_dir, {
@@ -2416,15 +2458,15 @@ server <- function(input, output, session) {
       radioButtons("new_paired_end", "Reads", choices = c("Paired-end" = "paired", "Single-end" = "single"), selected = "paired"),
       div(class = "new-project-path-control",
           textInput("new_fastq_dir", "Raw FASTQ folder", value = "", placeholder = "Choose with Browse or paste a server path"),
-          actionButton("browse_new_fastq_dir", "Browse raw FASTQ folder", class = "btn-default")
+          actionButton("browse_new_fastq_dir", "Browse server", class = "btn-default")
       ),
       div(class = "new-project-path-control",
           textInput("new_results_root", "Results root", value = "~/csl_results", placeholder = "Where CodeSpringWeb should write project results"),
-          actionButton("browse_new_results_root", "Browse results root", class = "btn-default")
+          actionButton("browse_new_results_root", "Browse server", class = "btn-default")
       ),
       div(class = "new-project-path-control",
           textInput("new_design_matrix_path", "Design matrix path", value = "", placeholder = "Optional; defaults to <results>/<project>/data/manifest/design_matrix.txt"),
-          actionButton("browse_new_design_matrix_path", "Browse design matrix", class = "btn-default")
+          actionButton("browse_new_design_matrix_path", "Browse server", class = "btn-default")
       ),
       actionButton("create_project_config", "Create project", class = "btn-primary"),
       textOutput("create_project_status")
