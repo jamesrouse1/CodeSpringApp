@@ -1119,6 +1119,12 @@ pretty_tool_name <- function(tool) {
 
 log_label_from_path <- function(path, fallback = "Log") {
   base <- basename(path %||% "")
+  m_submit <- regexec("^submit_([^.]*)\\.txt$", base)
+  submit_hit <- regmatches(base, m_submit)[[1]]
+  if (length(submit_hit) == 2) {
+    tool <- sub("_[0-9]{8}_[0-9]{6}$", "", submit_hit[2])
+    return(paste(pretty_tool_name(tool), "submit", base))
+  }
   m <- regexec("^(output|error)_([^.]*)\\.txt$", base)
   hit <- regmatches(base, m)[[1]]
   if (length(hit) == 3) {
@@ -1150,7 +1156,7 @@ log_file_choices <- function(project, tool = "All", log_type = "All") {
 
   project_log_dir <- file.path(dirname(project$data_dir), "log")
   if (dir.exists(project_log_dir)) {
-    files <- list.files(project_log_dir, pattern = "^(output|error)_.*\\.txt$", full.names = TRUE)
+    files <- list.files(project_log_dir, pattern = "^(output|error|submit)_.*\\.txt$", full.names = TRUE)
     for (one_path in files) add_log_choice(log_label_from_path(one_path), one_path)
   }
 
@@ -1169,7 +1175,7 @@ log_file_choices <- function(project, tool = "All", log_type = "All") {
   vals <- vals[keep]
   vals <- vals[!duplicated(vals)]
   if (length(vals) && !identical(tool %||% "All", "All")) {
-    label_tools <- sub("\\s+(output|error).*$", "", names(vals), ignore.case = TRUE)
+    label_tools <- sub("\\s+(output|error|submit).*$", "", names(vals), ignore.case = TRUE)
     vals <- vals[normalize_log_tool(label_tools) == normalize_log_tool(tool)]
   }
   if (length(vals) && !identical(log_type %||% "All", "All")) {
@@ -1181,7 +1187,7 @@ log_file_choices <- function(project, tool = "All", log_type = "All") {
 log_tool_choices <- function(project) {
   vals <- log_file_choices(project)
   if (!length(vals)) return("All")
-  tools <- sub("\\s+(output|error).*$", "", names(vals), ignore.case = TRUE)
+  tools <- sub("\\s+(output|error|submit).*$", "", names(vals), ignore.case = TRUE)
   c("All", sort(unique(tools[nzchar(tools)])))
 }
 
@@ -1918,11 +1924,23 @@ submit_sbatch <- function(project, step, script, args, log_name, input_mode = ""
   stamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
   stdout <- file.path(log_dir, paste0("output_", log_name, "_", stamp, ".txt"))
   stderr <- file.path(log_dir, paste0("error_", log_name, "_", stamp, ".txt"))
+  submit_log <- file.path(log_dir, paste0("submit_", log_name, "_", stamp, ".txt"))
   job_name <- job_name_for(project, step, sample)
   cmd <- c("sbatch", "-J", job_name, "-e", stderr, "-o", stdout, script, args)
+  writeLines(c(
+    paste("time:", format(Sys.time(), "%Y-%m-%d %H:%M:%S")),
+    paste("project:", project$name),
+    paste("step:", step),
+    paste("sample:", sample %||% ""),
+    paste("target:", target %||% ""),
+    paste("stdout:", stdout),
+    paste("stderr:", stderr),
+    paste("command:", paste(shQuote(cmd), collapse = " "))
+  ), submit_log)
   if (Sys.which("sbatch") == "") {
-    msg <- "sbatch was not found. Run on the server to submit jobs."
-    save_job(project, step, cmd, paste(c(msg, if (nzchar(sample)) paste("sample:", sample), if (nzchar(target)) paste("target:", target)), collapse = "\n"))
+    msg <- "ERROR: sbatch was not found. Run on the server to submit jobs."
+    write(msg, submit_log, append = TRUE)
+    save_job(project, step, cmd, paste(c(msg, if (nzchar(sample)) paste("sample:", sample), if (nzchar(target)) paste("target:", target), paste("submit_log:", submit_log)), collapse = "\n"))
     return(msg)
   }
   wd <- rna_workdir(project)
@@ -1933,8 +1951,12 @@ submit_sbatch <- function(project, step, script, args, log_name, input_mode = ""
   out <- tryCatch(system2(cmd[1], cmd[-1], stdout = TRUE, stderr = TRUE), error = function(e) conditionMessage(e))
   out_text <- paste(out, collapse = "\n")
   job_id <- parse_sbatch_job_id(out_text)
+  writeLines(c("", "sbatch response:", out_text, paste("job_id:", job_id %||% "")), submit_log, sep = "\n", useBytes = TRUE)
   manifest <- append_run_manifest(project, step, sample, cmd, target, input_mode, reference, job_id)
-  save_job(project, step, cmd, paste(c(out_text, if (nzchar(job_id)) paste("job_id:", job_id), if (nzchar(sample)) paste("sample:", sample), if (nzchar(target)) paste("target:", target), if (nzchar(input_mode)) paste("input_mode:", input_mode), paste("stdout:", stdout), paste("stderr:", stderr), paste("manifest:", manifest)), collapse = "\n"))
+  save_job(project, step, cmd, paste(c(out_text, if (nzchar(job_id)) paste("job_id:", job_id), if (nzchar(sample)) paste("sample:", sample), if (nzchar(target)) paste("target:", target), if (nzchar(input_mode)) paste("input_mode:", input_mode), paste("stdout:", stdout), paste("stderr:", stderr), paste("submit_log:", submit_log), paste("manifest:", manifest)), collapse = "\n"))
+  if (!nzchar(job_id)) {
+    return(paste("ERROR: sbatch did not return a job ID for", step, "\nSubmit log:", submit_log, "\nsbatch response:\n", out_text))
+  }
   submit_screen_message(step, sample, job_id, input_mode)
 }
 
@@ -1944,21 +1966,39 @@ submit_sbatch_wrap <- function(project, step, shell_command, log_name, input_mod
   stamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
   stdout <- file.path(log_dir, paste0("output_", log_name, "_", stamp, ".txt"))
   stderr <- file.path(log_dir, paste0("error_", log_name, "_", stamp, ".txt"))
+  submit_log <- file.path(log_dir, paste0("submit_", log_name, "_", stamp, ".txt"))
   job_name <- job_name_for(project, step, sample)
   dep <- dependency_ids[nzchar(dependency_ids)]
   cmd <- c("sbatch", "-J", job_name, "-e", stderr, "-o", stdout)
   if (length(dep)) cmd <- c(cmd, paste0("--dependency=afterok:", paste(dep, collapse = ":")))
   cmd <- c(cmd, "--wrap", shell_command)
+  writeLines(c(
+    paste("time:", format(Sys.time(), "%Y-%m-%d %H:%M:%S")),
+    paste("project:", project$name),
+    paste("step:", step),
+    paste("sample:", sample %||% ""),
+    paste("target:", target %||% ""),
+    paste("dependencies:", paste(dep, collapse = ",")),
+    paste("stdout:", stdout),
+    paste("stderr:", stderr),
+    paste("wrapped_command:", shell_command),
+    paste("command:", paste(shQuote(cmd), collapse = " "))
+  ), submit_log)
   if (Sys.which("sbatch") == "") {
-    msg <- "sbatch was not found. Run on the server to submit jobs."
-    save_job(project, step, cmd, paste(c(msg, if (nzchar(target)) paste("target:", target)), collapse = "\n"))
+    msg <- "ERROR: sbatch was not found. Run on the server to submit jobs."
+    write(msg, submit_log, append = TRUE)
+    save_job(project, step, cmd, paste(c(msg, if (nzchar(target)) paste("target:", target), paste("submit_log:", submit_log)), collapse = "\n"))
     return(msg)
   }
   out <- tryCatch(system2(cmd[1], cmd[-1], stdout = TRUE, stderr = TRUE), error = function(e) conditionMessage(e))
   out_text <- paste(out, collapse = "\n")
   job_id <- parse_sbatch_job_id(out_text)
+  writeLines(c("", "sbatch response:", out_text, paste("job_id:", job_id %||% "")), submit_log, sep = "\n", useBytes = TRUE)
   manifest <- append_run_manifest(project, step, sample, cmd, target, input_mode, reference, job_id)
-  save_job(project, step, cmd, paste(c(out_text, if (nzchar(job_id)) paste("job_id:", job_id), if (nzchar(sample)) paste("sample:", sample), if (nzchar(target)) paste("target:", target), if (nzchar(input_mode)) paste("input_mode:", input_mode), paste("stdout:", stdout), paste("stderr:", stderr), paste("manifest:", manifest)), collapse = "\n"))
+  save_job(project, step, cmd, paste(c(out_text, if (nzchar(job_id)) paste("job_id:", job_id), if (nzchar(sample)) paste("sample:", sample), if (nzchar(target)) paste("target:", target), if (nzchar(input_mode)) paste("input_mode:", input_mode), paste("stdout:", stdout), paste("stderr:", stderr), paste("submit_log:", submit_log), paste("manifest:", manifest)), collapse = "\n"))
+  if (!nzchar(job_id)) {
+    return(paste("ERROR: sbatch did not return a job ID for", step, "\nSubmit log:", submit_log, "\nsbatch response:\n", out_text))
+  }
   submit_screen_message(step, sample, job_id, input_mode, dep)
 }
 

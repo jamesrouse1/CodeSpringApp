@@ -119,11 +119,12 @@ Check the newest GSEA logs for the selected project:
 ```bash
 cd ~/csl_results/<project_name>/log
 ls -lhtr *gseapy*.txt
+tail -120 "$(ls -t submit_gseapy_*.txt | head -1)"
 tail -120 "$(ls -t error_gseapy_*.txt | head -1)"
 tail -120 "$(ls -t output_gseapy_*.txt | head -1)"
 ```
 
-The output log prints the R version, R library paths, whether `fgsea` is available to the SLURM job, the gene-label mapping mode, the number of ranked genes, and which gene-set database/cache was used.
+The submit log is written before and after `sbatch`, so it exists even if SLURM rejects the job before creating stdout/stderr files. The output log prints the R version, R library paths, whether `fgsea` is available to the SLURM job, the gene-label mapping mode, the number of ranked genes, and which gene-set database/cache was used.
 
 ## Port Cleanup
 
