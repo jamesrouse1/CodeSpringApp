@@ -696,9 +696,16 @@ extract_job_id <- function(x) {
 
 job_history <- function(project) {
   if (!file.exists(JOBS_PATH)) return(data.frame())
-  jobs <- tryCatch(utils::read.delim(JOBS_PATH, check.names = FALSE, stringsAsFactors = FALSE), error = function(e) data.frame())
+  jobs <- tryCatch(utils::read.delim(JOBS_PATH, check.names = FALSE, stringsAsFactors = FALSE, fill = TRUE), error = function(e) data.frame())
   if (!NROW(jobs) || !"project" %in% names(jobs) || !"step" %in% names(jobs) || !"output" %in% names(jobs)) return(data.frame())
-  jobs <- jobs[jobs$project == project$name, , drop = FALSE]
+  if ("project_id" %in% names(jobs) && any(nzchar(jobs$project_id %||% ""))) {
+    jobs <- jobs[jobs$project_id == (project$id %||% ""), , drop = FALSE]
+  } else {
+    jobs <- jobs[jobs$project == project$name, , drop = FALSE]
+  }
+  if ("data_dir" %in% names(jobs) && any(nzchar(jobs$data_dir %||% ""))) {
+    jobs <- jobs[!nzchar(jobs$data_dir %||% "") | jobs$data_dir == (project$data_dir %||% ""), , drop = FALSE]
+  }
   if ("analysis" %in% names(jobs) && nzchar(project$analysis %||% "")) {
     jobs <- jobs[jobs$analysis == project$analysis, , drop = FALSE]
   }
@@ -772,6 +779,13 @@ job_history_display <- function(project) {
   })
   drop <- intersect(c("stdout", "stderr"), names(jobs))
   jobs[, setdiff(names(jobs), drop), drop = FALSE]
+}
+
+job_history_progress_display <- function(project) {
+  jobs <- job_history(project)
+  if (!NROW(jobs)) return(jobs)
+  keep <- intersect(c("time", "step", "sample", "job_id", "slurm_state", "elapsed", "start_time", "end_time"), names(jobs))
+  jobs[, keep, drop = FALSE]
 }
 
 last_job_modes <- function(project) {
@@ -1225,14 +1239,23 @@ sample_progress_matrix_ui <- function(progress_df) {
 save_job <- function(project, step, command, output = "") {
   row <- data.frame(
     time = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+    project_id = project$id %||% paste(project$analysis_key %||% "analysis", project$name, sep = "/"),
     project = project$name,
     analysis = project$analysis,
+    data_dir = project$data_dir %||% "",
     step = step,
-    command = paste(command, collapse = " "),
-    output = output,
+    command = gsub("[\t\r\n]+", " ", paste(command, collapse = " ")),
+    output = gsub("\n", "\\n", as.character(output %||% ""), fixed = TRUE),
     stringsAsFactors = FALSE
   )
-  utils::write.table(row, JOBS_PATH, sep = "\t", row.names = FALSE, quote = TRUE, append = file.exists(JOBS_PATH), col.names = !file.exists(JOBS_PATH))
+  existing <- if (file.exists(JOBS_PATH)) {
+    tryCatch(utils::read.delim(JOBS_PATH, check.names = FALSE, stringsAsFactors = FALSE, fill = TRUE), error = function(e) data.frame())
+  } else data.frame()
+  all_cols <- unique(c(names(existing), names(row)))
+  for (col in setdiff(all_cols, names(existing))) existing[[col]] <- character(NROW(existing))
+  for (col in setdiff(all_cols, names(row))) row[[col]] <- ""
+  out <- rbind(existing[, all_cols, drop = FALSE], row[, all_cols, drop = FALSE])
+  utils::write.table(out, JOBS_PATH, sep = "\t", row.names = FALSE, quote = TRUE, append = FALSE, col.names = TRUE)
 }
 
 append_run_manifest <- function(project, step, sample = "", command = character(0), output_target = "", input_mode = "", reference = "", job_id = "") {
@@ -1258,9 +1281,17 @@ append_run_manifest <- function(project, step, sample = "", command = character(
 }
 
 extract_output_field <- function(x, key) {
-  pat <- paste0(".*", key, ":[[:space:]]*([^\\n]+).*")
-  val <- sub(pat, "\\1", x)
-  ifelse(identical(val, x), "", val)
+  text <- gsub("\\\\n", "\n", as.character(x %||% ""), fixed = TRUE)
+  lines <- trimws(unlist(strsplit(text, "\n", fixed = TRUE)))
+  prefix <- paste0(key, ":")
+  hit <- lines[startsWith(lines, prefix)]
+  if (length(hit)) return(trimws(sub(paste0("^", key, ":[[:space:]]*"), "", hit[[1]])))
+  pat <- paste0(key, ":[[:space:]]*")
+  m <- regexpr(pat, text)
+  if (m < 0) return("")
+  rest <- substr(text, m + attr(m, "match.length"), nchar(text))
+  rest <- sub("[[:space:]]+(job_id|sample|target|input_mode|stdout|stderr|manifest):.*$", "", rest)
+  trimws(rest)
 }
 
 job_name_for <- function(project, step, sample = "") {
@@ -2700,7 +2731,7 @@ server <- function(input, output, session) {
 
   output$active_jobs_table <- render_csl_table({
     progress_refresh()
-    job_history_display(current_project())
+    job_history_progress_display(current_project())
   }, page_length = 10)
 
   output$run_pipeline_stepper <- renderUI({
