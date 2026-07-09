@@ -2,12 +2,12 @@
 set -euo pipefail
 
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PORT="${1:-8501}"
+START_PORT="${1:-8601}"
+MAX_PORT="${CSL_WEB_MAX_PORT:-8699}"
 HOST="${CSL_WEB_HOST:-0.0.0.0}"
 CSL_ROOT="${CSL_CODESPRINGLAB_ROOT:-$HOME/CodeSpringLab}"
 LOG_DIR="${CSL_WEB_LOG_DIR:-$HOME/.codespringweb}"
 mkdir -p "$LOG_DIR"
-LOG_FILE="$LOG_DIR/codespringweb_${PORT}.log"
 R_MAKEVARS_FILE="$LOG_DIR/Makevars.codespringweb"
 
 write_codespring_r_makevars() {
@@ -45,13 +45,43 @@ install_r_package_if_missing "DT"
 install_r_package_if_missing "base64enc"
 install_r_package_if_missing "ggplot2"
 
-if command -v lsof >/dev/null 2>&1; then
-  OLD_PIDS="$(lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || true)"
-  if [[ -n "$OLD_PIDS" ]]; then
-    kill $OLD_PIDS 2>/dev/null || true
-    sleep 1
+port_is_busy() {
+  local port="$1"
+
+  if command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP:"$port" -sTCP:LISTEN -t >/dev/null 2>&1; then
+    return 0
   fi
+
+  if command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(^|:)$port$"; then
+    return 0
+  fi
+
+  if command -v netstat >/dev/null 2>&1 && netstat -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(^|:)$port$"; then
+    return 0
+  fi
+
+  return 1
+}
+
+PORT=""
+for candidate in $(seq "$START_PORT" "$MAX_PORT"); do
+  if ! port_is_busy "$candidate"; then
+    PORT="$candidate"
+    break
+  fi
+done
+
+if [[ -z "$PORT" ]]; then
+  printf '\033[31mNo open CodeSpringApp port found from %s to %s.\033[0m\n' "$START_PORT" "$MAX_PORT"
+  printf 'Try a different starting port, for example: \033[1m%s 8700\033[0m\n' "$0"
+  exit 1
 fi
+
+if [[ "$PORT" != "$START_PORT" ]]; then
+  printf '\033[33mPort %s was busy, so CodeSpringApp will use port %s instead.\033[0m\n' "$START_PORT" "$PORT"
+fi
+
+LOG_FILE="$LOG_DIR/codespringweb_${PORT}.log"
 
 nohup env CSL_CODESPRINGLAB_ROOT="$CSL_ROOT" Rscript -e "shiny::runApp('$APP_DIR', host='$HOST', port=$PORT)" > "$LOG_FILE" 2>&1 &
 APP_PID="$!"
@@ -65,7 +95,7 @@ if ! kill -0 "$APP_PID" 2>/dev/null; then
 fi
 
 USER_NAME="${USER:-rouse}"
-printf '\n\033[32mCodeSpringWeb is running on bamdev1 port %s.\033[0m\n' "$PORT"
+printf '\n\033[32mCodeSpringApp is running on bamdev1 port %s.\033[0m\n' "$PORT"
 printf '\033[1;36mCopy/paste this command into your laptop terminal:\033[0m\n'
 printf '\033[1mssh -N -L %s:localhost:%s %s@bamdev1\033[0m\n' "$PORT" "$PORT" "$USER_NAME"
 printf '\033[1;36mThen open:\033[0m \033[1mhttp://localhost:%s\033[0m\n' "$PORT"

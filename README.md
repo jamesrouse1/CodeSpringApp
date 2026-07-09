@@ -6,27 +6,27 @@ It is designed for shared HPC environments where analyses should continue runnin
 
 ## Run On The Server
 
-Use the launcher script. It checks required packages, clears stale listeners on the chosen port, starts Shiny, and prints the exact SSH tunnel command to run from your laptop.
+Use the launcher script. It checks required packages, finds an open server port, starts Shiny, and prints the exact SSH tunnel command to run from your laptop.
 
-Each person should use their own port. If two people try to use `8601` on the same server at the same time, only one app can bind to that port. Pick another open port such as `8602`, `8603`, or `8610`.
+The default starting port is `8601`. If that port is already taken, the launcher automatically tries `8602`, `8603`, and so on until it finds an open port.
 
 On the server:
 
 ```bash
 cd ~/CodeSpringApp
-./run_codespringweb.sh 8601
+./run_codespringweb.sh
 ```
 
-From your laptop:
+From your laptop, copy the SSH command printed by the launcher. It will use the port that was actually started:
 
 ```bash
-ssh -N -L 8601:localhost:8601 $USER@bamdev1
+ssh -N -L <PORT>:localhost:<PORT> $USER@bamdev1
 ```
 
 Then open:
 
 ```text
-http://localhost:8601
+http://localhost:<PORT>
 ```
 
 If your server folder is still named `CodeSpringWeb`, either rename it or run from that folder:
@@ -34,7 +34,7 @@ If your server folder is still named `CodeSpringWeb`, either rename it or run fr
 ```bash
 mv ~/CodeSpringWeb ~/CodeSpringApp
 cd ~/CodeSpringApp
-./run_codespringweb.sh 8601
+./run_codespringweb.sh
 ```
 
 ## What It Does
