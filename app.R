@@ -1360,6 +1360,7 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
   for (step in c("DESeq2", "GSEA")) {
     complete <- completed_project_level_runs(project, step, jobs)
     running <- running_project_level_runs(jobs, step)
+    if (length(complete) && length(running)) running <- setdiff(running, complete)
     pieces <- character(0)
     if (length(running)) pieces <- c(pieces, paste("Running:", paste(running, collapse = "; ")))
     if (length(complete)) pieces <- c(pieces, paste("Complete:", paste(complete, collapse = "; ")))
@@ -2762,7 +2763,8 @@ completed_project_level_runs <- function(project, step, jobs = NULL) {
 
 running_project_level_runs <- function(jobs, step) {
   if (!NROW(jobs) || !"step" %in% names(jobs) || !"slurm_state" %in% names(jobs)) return(character(0))
-  hit <- jobs[jobs$step == step & jobs$slurm_state %in% active_slurm_states(), , drop = FALSE]
+  active_states <- setdiff(active_slurm_states(), c("Submitted"))
+  hit <- jobs[jobs$step == step & jobs$slurm_state %in% active_states, , drop = FALSE]
   if (!NROW(hit)) return(character(0))
   labels <- if ("input_mode" %in% names(hit)) as.character(hit$input_mode) else rep("", NROW(hit))
   fallback <- if ("job_id" %in% names(hit)) paste("Job", hit$job_id) else paste(step, seq_len(NROW(hit)))
@@ -2774,6 +2776,9 @@ running_project_level_runs <- function(jobs, step) {
 project_level_step_summary_ui <- function(project, jobs, step) {
   complete <- completed_project_level_runs(project, step, jobs)
   running <- running_project_level_runs(jobs, step)
+  if (length(complete) && length(running)) {
+    running <- setdiff(running, complete)
+  }
   if (!length(complete) && !length(running)) return(NULL)
   row_ui <- function(label, values, cls) {
     if (!length(values)) return(NULL)
