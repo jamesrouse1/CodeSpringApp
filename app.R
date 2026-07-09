@@ -1320,6 +1320,12 @@ normalize_pipeline_status <- function(status) {
   ifelse(status %in% c("Complete"), "Complete", ifelse(status %in% c("Active"), "Active", "Not started"))
 }
 
+status_signature <- function(status) {
+  if (!NROW(status)) return("")
+  cols <- intersect(c("step", "status", "input", "detail"), names(status))
+  paste(apply(status[, cols, drop = FALSE], 1, paste, collapse = "::"), collapse = "||")
+}
+
 project_status <- function(project, jobs = NULL, progress = NULL, active_states = NULL) {
   data_dir <- project$data_dir
   design <- project$design_matrix_path
@@ -3501,6 +3507,7 @@ server <- function(input, output, session) {
   design_state <- reactiveVal(data.frame())
   run_message <- reactiveVal("")
   progress_refresh <- reactiveVal(Sys.time())
+  run_cards_refresh <- reactiveVal(Sys.time())
   native_registered_id <- reactiveVal("")
   job_history_state <- reactiveVal(data.frame())
   project_status_state <- reactiveVal(data.frame())
@@ -3548,10 +3555,14 @@ server <- function(input, output, session) {
     active_states <- active_job_state_map_from_jobs(jobs)
     res <- sample_progress(p, active_states, isolate(sample_size_cache()), jobs = jobs)
     status <- project_status(p, jobs = jobs, progress = res$table, active_states = active_states)
+    old_status <- isolate(project_status_state())
     job_history_state(jobs)
     sample_size_cache(res$cache)
     sample_progress_state(res$table)
     project_status_state(status)
+    if (!identical(status_signature(old_status), status_signature(status))) {
+      run_cards_refresh(Sys.time())
+    }
     progress_refresh(Sys.time())
   }
 
@@ -3589,6 +3600,7 @@ server <- function(input, output, session) {
       }
     }
     project_status_state(optimistic_status(isolate(project_status_state()), step, input_mode))
+    run_cards_refresh(Sys.time())
     progress_refresh(Sys.time())
   }
 
@@ -4023,8 +4035,11 @@ server <- function(input, output, session) {
   })
 
   output$run_step_cards <- renderUI({
+    run_cards_refresh()
     p <- current_project()
-    status <- isolate(progress_status())
+    status <- isolate(project_status_state())
+    if (!NROW(status)) status <- project_status(p)
+    status <- status[order(step_order(status$step)), , drop = FALSE]
     r1_choices <- adapter_choices_r1()
     r2_choices <- adapter_choices_r2()
     div(class = "run-grid",
