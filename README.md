@@ -4,7 +4,7 @@ CodeSpringApp is a Shiny-based control center for running, monitoring, and revie
 
 It is designed for shared HPC environments where analyses should continue running after the browser or app is closed.
 
-![CodeSpringApp Results Explorer](docs/assets/results_explorer_heatmap.png)
+![CodeSpringApp project setup](docs/assets/setup_folder_selection.png)
 
 ## What It Does
 
@@ -22,7 +22,9 @@ It is designed for shared HPC environments where analyses should continue runnin
 
 Create new projects, select species/reference builds, browse server folders, and manage project configs/results.
 
-![Project setup](docs/assets/setup_folder_selection.png)
+| Project selection | Server folder browser |
+| --- | --- |
+| ![Project setup](docs/assets/setup.png) | ![Server folder browser](docs/assets/setup_folder_selection.png) |
 
 ### Design Matrix
 
@@ -210,4 +212,3 @@ scontrol show job JOBID
 - `CSL_WEB_LOG_DIR`: launcher log/pid folder. Default: `~/.codespringweb`
 - `CSL_WEB_AUTOKILL_SHINY`: set to `0` to disable startup cleanup of stale Shiny sessions.
 - `CSL_PYTHON_BIN` or `PYTHON_BIN`: optional Python executable override for GSEApy jobs.
-
