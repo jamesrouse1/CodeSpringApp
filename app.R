@@ -4153,6 +4153,20 @@ ui <- fluidPage(
       $(document).on('dblclick', '#browser_choice', function() {
         $('#browser_open_choice').trigger('click');
       });
+      $(document).on('shown.bs.tab', 'a[data-toggle=\"tab\"]', function(e) {
+        var label = $(e.target).text().trim();
+        if (label === 'Results Explorer') {
+          window.setTimeout(function() {
+            var host = $('.native-results-host');
+            if (window.Shiny && host.length) {
+              try { Shiny.unbindAll(host); } catch(err) {}
+              try { Shiny.bindAll(host); } catch(err) {}
+              $(window).trigger('resize');
+              Shiny.setInputValue('native_results_tab_visible', Date.now(), {priority: 'event'});
+            }
+          }, 100);
+        }
+      });
     "))
   ),
   div(class = "csl-header",
@@ -4968,11 +4982,26 @@ server <- function(input, output, session) {
   output$run_output <- renderText(run_message())
 
 
+  native_results_refresh <- reactiveVal(0L)
+
   native_results_app <- reactive({
+    native_results_refresh()
     load_native_rnaseq_viewer(current_project())
   })
 
   native_results_error <- reactiveVal("")
+
+  observeEvent(input$web_main_tabs, {
+    if (identical(input$web_main_tabs %||% "", "Results Explorer")) {
+      native_registered_id("")
+      native_results_refresh(isolate(native_results_refresh()) + 1L)
+    }
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$native_results_tab_visible, {
+    native_registered_id("")
+    native_results_refresh(isolate(native_results_refresh()) + 1L)
+  }, ignoreInit = TRUE)
 
   output$native_results_ui <- renderUI({
     err <- native_results_error()
