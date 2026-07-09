@@ -4,8 +4,6 @@ CodeSpringApp is a Shiny-based control center for running, monitoring, and revie
 
 It is designed for shared HPC environments where analyses should continue running after the browser or app is closed.
 
-![CodeSpringApp project setup](docs/assets/setup_folder_selection.png)
-
 ## Run On The Server
 
 Use the launcher script. It checks required packages, clears stale listeners on the chosen port, starts Shiny, and prints the exact SSH tunnel command to run from your laptop.
@@ -132,4 +130,3 @@ Project logs are written under:
 ```text
 <results_root>/<project_name>/log/
 ```
-
