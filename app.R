@@ -87,7 +87,7 @@ APP_HOME <- path.expand(Sys.getenv("CSL_WEB_HOME", unset = "~/.codespringweb"))
 dir.create(APP_HOME, recursive = TRUE, showWarnings = FALSE)
 JOBS_PATH <- file.path(APP_HOME, "jobs.tsv")
 LAST_PROJECT_PATH <- file.path(APP_HOME, "last_project_id.txt")
-PROGRESS_REFRESH_MS <- 10000
+PROGRESS_REFRESH_MS <- 1000
 SAMPLE_PROGRESS_NICE_LIMIT <- 30
 GSEAPY_GENESET_OPTIONS <- c(
   "MSigDB_Hallmark_2020",
@@ -2762,6 +2762,8 @@ completed_project_level_runs <- function(project, step, jobs = NULL) {
     files <- if (dir.exists(gsea_dir)) {
       list.files(gsea_dir, pattern = "gseapy\\.gene_set\\.gsea\\.report\\.csv$|^report\\.gseapy\\..*\\.csv$", recursive = TRUE, full.names = TRUE)
     } else character(0)
+    database_files <- files[grepl("^report\\.gseapy\\..*\\.csv$", basename(files))]
+    if (length(database_files)) files <- database_files
     labels <- vapply(files, function(file) {
       root <- normalizePath(gsea_dir, winslash = "/", mustWork = FALSE)
       full <- normalizePath(file, winslash = "/", mustWork = FALSE)
@@ -2799,6 +2801,7 @@ project_level_step_summary_ui <- function(project, jobs, step) {
   running <- running_project_level_runs(jobs, step)
   if (length(complete) && length(running)) running <- drop_running_completed_labels(running, complete)
   if (!length(complete) && !length(running)) return(NULL)
+  title <- if (identical(step, "GSEA")) "GSEA status" else "Comparison status"
   row_ui <- function(label, values, cls) {
     if (!length(values)) return(NULL)
     div(class = "project-step-summary-row",
@@ -2807,7 +2810,7 @@ project_level_step_summary_ui <- function(project, jobs, step) {
     )
   }
   div(class = "project-step-summary",
-      div(class = "project-step-summary-title", "Comparison status"),
+      div(class = "project-step-summary-title", title),
       row_ui("Running", running, "running"),
       row_ui("Complete", complete, "complete")
   )
