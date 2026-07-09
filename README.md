@@ -63,13 +63,13 @@ Scan FASTQ folders, include/exclude samples, rename samples, and edit metadata c
 
 Each step has its own parameters, submit button, status panel, sample progress, cancel controls, and data-delete controls.
 
-![Run pipeline](docs/assets/run_pipeline.png)
+![Run pipeline](docs/assets/run_readme.png)
 
 ### Progress
 
 See workflow-level status and sample-by-step status in a compact matrix.
 
-![Pipeline progress](docs/assets/progress.png)
+![Pipeline progress](docs/assets/progress_readme.png)
 
 ### Results Explorer
 
