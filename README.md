@@ -29,7 +29,7 @@ Then open:
 http://localhost:<PORT>
 ```
 
-Example launcher output. The port in your terminal may be different if `8601` is already busy:
+Example launcher output. The port in your terminal may differ if the default port is already busy:
 
 ![CodeSpringApp launcher output](docs/assets/launcher_output.png)
 
