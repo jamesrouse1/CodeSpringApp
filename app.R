@@ -1599,13 +1599,16 @@ server_browser_choices <- function(path, mode = "dir") {
   dirs <- dirs[!grepl("^\\.", basename(dirs))]
   dirs <- dirs[basename(dirs) != "__pycache__"]
   dirs <- sort(dirs)
-  choices <- stats::setNames(character(0), character(0))
+  files <- list.files(path, recursive = FALSE, full.names = TRUE, all.files = FALSE, no.. = TRUE)
+  files <- files[file.exists(files) & !dir.exists(files)]
+  files <- files[!grepl("^\\.", basename(files))]
+  files <- sort(files)
+  choices <- list()
   if (length(dirs)) {
-    choices <- stats::setNames(dirs, paste0(basename(dirs), "/"))
+    choices[["Folders"]] <- stats::setNames(dirs, paste0(basename(dirs), "/"))
   }
-  if (!length(choices)) {
-    fallback <- first_scalar_string(path, path.expand("~"))
-    choices <- stats::setNames(fallback, "(empty folder)")
+  if (length(files)) {
+    choices[["Files in this folder"]] <- stats::setNames(rep(path, length(files)), basename(files))
   }
   choices
 }
@@ -4110,10 +4113,12 @@ server <- function(input, output, session) {
 
   output$browser_choices_ui <- renderUI({
     choices <- server_browser_choices(path_browser$path, path_browser$mode)
-    if (!length(choices)) choices <- stats::setNames(first_scalar_string(path_browser$path, path.expand("~")), "(empty folder)")
-    label <- "Folders"
-    selected <- unname(choices[[1]])
-    selectInput("browser_choice", label, choices = choices, selected = selected, selectize = FALSE, size = min(max(length(choices), 4), 18))
+    if (!length(choices)) return(div(class = "empty-box", "No visible folders or files in this folder."))
+    label <- "Folder contents"
+    flat_values <- unlist(choices, use.names = FALSE)
+    selected <- first_scalar_string(flat_values, path_browser$path)
+    item_count <- length(flat_values)
+    selectInput("browser_choice", label, choices = choices, selected = selected, selectize = FALSE, size = min(max(item_count, 4), 18))
   })
 
   observeEvent(input$browse_new_fastq_dir, {
