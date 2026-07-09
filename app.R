@@ -1360,7 +1360,7 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
   for (step in c("DESeq2", "GSEA")) {
     complete <- completed_project_level_runs(project, step, jobs)
     running <- running_project_level_runs(jobs, step)
-    if (length(complete) && length(running)) running <- setdiff(running, complete)
+    if (length(complete) && length(running)) running <- drop_running_completed_labels(running, complete)
     pieces <- character(0)
     if (length(running)) pieces <- c(pieces, paste("Running:", paste(running, collapse = "; ")))
     if (length(complete)) pieces <- c(pieces, paste("Complete:", paste(complete, collapse = "; ")))
@@ -2682,6 +2682,7 @@ clean_run_label <- function(x, fallback = "") {
 
 format_comparison_label <- function(compare_col = "", comparison = "", reference = "", suffix = "") {
   compare_col <- trimws(as.character(compare_col %||% ""))
+  compare_col <- sub(":+$", "", compare_col)
   comparison <- trimws(as.character(comparison %||% ""))
   reference <- trimws(as.character(reference %||% ""))
   suffix <- trimws(as.character(suffix %||% ""))
@@ -2694,21 +2695,41 @@ format_comparison_label <- function(compare_col = "", comparison = "", reference
 parse_comparison_label <- function(x) {
   x <- clean_run_label(x)
   if (!nzchar(x)) return("")
+  x <- gsub("_vs_", " vs ", x, fixed = TRUE)
+  x <- gsub("__vs__", " vs ", x, fixed = TRUE)
   suffix <- ""
   db_split <- strsplit(x, " - ", fixed = TRUE)[[1]]
   if (length(db_split) > 1) {
     suffix <- paste(db_split[-1], collapse = " - ")
     x <- db_split[1]
   }
+  compare_col <- ""
+  if (grepl(":", x, fixed = TRUE)) {
+    colon_split <- strsplit(x, ":", fixed = TRUE)[[1]]
+    compare_col <- sub(":+$", "", trimws(colon_split[1]))
+    x <- sub("^:+", "", trimws(paste(colon_split[-1], collapse = ":")))
+  }
   parts <- strsplit(x, " ", fixed = TRUE)[[1]]
   parts <- parts[nzchar(parts)]
-  if (length(parts) >= 4 && identical(parts[3], "vs")) {
-    return(format_comparison_label(parts[1], parts[2], parts[4], suffix))
-  }
   if (length(parts) >= 3 && identical(parts[2], "vs")) {
-    return(format_comparison_label("", parts[1], parts[3], suffix))
+    return(format_comparison_label(compare_col, parts[1], parts[3], suffix))
+  }
+  if (length(parts) >= 4 && identical(parts[3], "vs")) {
+    return(format_comparison_label(sub(":+$", "", parts[1]), parts[2], parts[4], suffix))
   }
   x
+}
+
+comparison_status_key <- function(x) {
+  x <- vapply(as.character(x %||% ""), parse_comparison_label, character(1))
+  x <- sub("^.*:[[:space:]]*", "", x)
+  x <- sub("[[:space:]]+-[[:space:]].*$", "", x)
+  gsub("[^a-z0-9]+", "", tolower(x))
+}
+
+drop_running_completed_labels <- function(running, complete) {
+  if (!length(running) || !length(complete)) return(running)
+  running[!comparison_status_key(running) %in% comparison_status_key(complete)]
 }
 
 comparison_label_from_file <- function(file, jobs = data.frame(), step = "DESeq2") {
@@ -2776,9 +2797,7 @@ running_project_level_runs <- function(jobs, step) {
 project_level_step_summary_ui <- function(project, jobs, step) {
   complete <- completed_project_level_runs(project, step, jobs)
   running <- running_project_level_runs(jobs, step)
-  if (length(complete) && length(running)) {
-    running <- setdiff(running, complete)
-  }
+  if (length(complete) && length(running)) running <- drop_running_completed_labels(running, complete)
   if (!length(complete) && !length(running)) return(NULL)
   row_ui <- function(label, values, cls) {
     if (!length(values)) return(NULL)
