@@ -3004,7 +3004,9 @@ submit_kallisto_jobs <- function(project, trimmed = FALSE) {
 submit_rsem_jobs <- function(project, feature = "gene_id") {
   res <- genome_resources(project)
   design <- safe_read_table(project$design_matrix_path)
-  if (!NROW(design) || !"sample" %in% names(design)) return("No samples found in design matrix.")
+  if (!NROW(design) || !"sample" %in% names(design)) return(record_preflight_failure(project, "RSEM (optional)", "No samples found in design_matrix.txt. Create or fix the design matrix before running RSEM.", "rsem"))
+  msg <- missing_star_message(project, "RSEM", transcriptome = TRUE)
+  if (nzchar(msg)) return(record_preflight_failure(project, "RSEM (optional)", msg, "rsem"))
   outdir <- file.path(project$data_dir, "rsem")
   counts_dir <- file.path(project$data_dir, "counts")
   dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
@@ -3029,7 +3031,9 @@ submit_rsem_jobs <- function(project, feature = "gene_id") {
 submit_featurecounts_jobs <- function(project, feature = "gene_name") {
   res <- genome_resources(project)
   design <- safe_read_table(project$design_matrix_path)
-  if (!NROW(design) || !"sample" %in% names(design)) return("No samples found in design matrix.")
+  if (!NROW(design) || !"sample" %in% names(design)) return(record_preflight_failure(project, "featureCounts", "No samples found in design_matrix.txt. Create or fix the design matrix before running featureCounts.", "featurecounts"))
+  msg <- missing_star_message(project, "featureCounts", transcriptome = FALSE)
+  if (nzchar(msg)) return(record_preflight_failure(project, "featureCounts", msg, "featurecounts"))
   outdir <- file.path(project$data_dir, "featurecounts")
   counts_dir <- file.path(project$data_dir, "counts")
   dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
@@ -3064,6 +3068,36 @@ expected_featurecounts_files <- function(project) {
   file.path(project$data_dir, "featurecounts", as.character(design$sample), paste0(as.character(design$sample), "_counts.txt"))
 }
 
+expected_star_bam_files <- function(project, transcriptome = FALSE) {
+  design <- safe_read_table(project$design_matrix_path)
+  if (!NROW(design) || !"sample" %in% names(design)) return(character(0))
+  suffix <- if (isTRUE(transcriptome)) "Aligned.toTranscriptome.out.bam" else "Aligned.sortedByCoord.out.bam"
+  file.path(project$data_dir, "star", as.character(design$sample), paste0(as.character(design$sample), suffix))
+}
+
+missing_star_message <- function(project, step = "this step", transcriptome = FALSE) {
+  if (!file.exists(project$design_matrix_path)) {
+    return(paste(
+      "No design_matrix.txt was found for this project.",
+      paste("Expected:", project$design_matrix_path),
+      "Create or save the design matrix before running STAR-dependent steps.",
+      sep = "\n"
+    ))
+  }
+  files <- expected_star_bam_files(project, transcriptome)
+  if (!length(files)) return("No samples were found in design_matrix.txt.")
+  missing <- files[!file.exists(files) | vapply(files, file_size_for, numeric(1)) <= 0]
+  if (length(missing)) {
+    required <- if (isTRUE(transcriptome)) "STAR genome and transcriptome BAM outputs" else "STAR BAM outputs"
+    return(paste(c(
+      paste("Run STAR successfully before", step, "so the required", required, "exist."),
+      "Missing or empty files:",
+      missing
+    ), collapse = "\n"))
+  }
+  ""
+}
+
 featurecounts_outputs_ready <- function(project) {
   files <- expected_featurecounts_files(project)
   length(files) > 0 && all(file.exists(files)) && all(vapply(files, file_size_for, numeric(1)) > 0)
@@ -3077,11 +3111,20 @@ featurecounts_matrix_job_active <- function(jobs, matrix_path) {
 }
 
 submit_deseq2_job <- function(project, compare_col, reference, comparison, redundant = "NoRedundant", gene_name_counts = FALSE) {
+  count_matrix <- file.path(project$data_dir, "counts", "count_matrix.txt")
+  if (!file.exists(count_matrix) || file_size_for(count_matrix) <= 0) {
+    msg <- paste(
+      "Run featureCounts successfully before DESeq2 so count_matrix.txt exists.",
+      paste("Expected:", count_matrix),
+      "If featureCounts sample outputs exist but this matrix is missing, refresh the Run Pipeline tab so the matrix builder can run.",
+      sep = "\n"
+    )
+    return(record_preflight_failure(project, "DESeq2", msg, "deseq2"))
+  }
   outdir <- file.path(project$data_dir, if (isTRUE(gene_name_counts)) "deseq2_gene_name" else "deseq2")
   dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
   script <- file.path(SCRIPTS_DIR, "DESeq2", "qsub_deseq2.sh")
   rscript <- file.path(SCRIPTS_DIR, "DESeq2", "DESeq2.R")
-  count_matrix <- file.path(project$data_dir, "counts", "count_matrix.txt")
   input_mode <- format_comparison_label(compare_col, comparison, reference)
   dependency_ids <- character(0)
   if (isTRUE(gene_name_counts)) {
@@ -3239,7 +3282,12 @@ submit_gseapy_job <- function(project, compare_col, reference, comparison, genes
   deseq_dir <- file.path(project$data_dir, "deseq2")
   normalized_file <- file.path(deseq_dir, paste0("normalized_counts_", comparison, "_vs_", reference, "(ref).txt"))
   if (!file.exists(normalized_file)) {
-    stop("Expected DESeq2 normalized counts file was not found: ", normalized_file)
+    msg <- paste(
+      "Run DESeq2 successfully for this exact comparison before GSEA.",
+      paste("Expected normalized-counts file:", normalized_file),
+      sep = "\n"
+    )
+    return(record_preflight_failure(project, "GSEA", msg, "gseapy"))
   }
   outpath_pathway <- paste0(file.path(project$data_dir, "gseapy", paste0(comparison, "_vs_", reference)), "/")
   dir.create(outpath_pathway, recursive = TRUE, showWarnings = FALSE)
