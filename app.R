@@ -4161,13 +4161,10 @@ ui <- fluidPage(
         var label = $(e.target).text().trim();
         if (label === 'Results Explorer') {
           window.setTimeout(function() {
-            var host = $('.native-results-host');
-            if (window.Shiny && host.length) {
-              try { Shiny.unbindAll(host); } catch(err) {}
-              try { Shiny.bindAll(host); } catch(err) {}
-              $(window).trigger('resize');
+            if (window.Shiny) {
               Shiny.setInputValue('native_results_tab_visible', Date.now(), {priority: 'event'});
             }
+            $(window).trigger('resize');
           }, 100);
         }
       });
@@ -4260,6 +4257,8 @@ server <- function(input, output, session) {
   progress_refresh <- reactiveVal(Sys.time())
   run_cards_refresh <- reactiveVal(Sys.time())
   native_registered_id <- reactiveVal("")
+  native_results_refresh <- reactiveVal(0L)
+  native_results_loaded_project <- reactiveVal("")
   job_history_state <- reactiveVal(data.frame())
   project_status_state <- reactiveVal(data.frame())
   featurecounts_matrix_autosubmitted <- reactiveVal(character(0))
@@ -4543,6 +4542,8 @@ server <- function(input, output, session) {
 
   observeEvent(input$project_id, {
     write_last_project_id(input$project_id %||% "__new__")
+    native_registered_id("")
+    native_results_loaded_project("")
     safe_refresh_progress_now("project switch")
   }, ignoreInit = FALSE)
 
@@ -4985,9 +4986,6 @@ server <- function(input, output, session) {
 
   output$run_output <- renderText(run_message())
 
-
-  native_results_refresh <- reactiveVal(0L)
-
   native_results_app <- reactive({
     native_results_refresh()
     load_native_rnaseq_viewer(current_project())
@@ -4995,16 +4993,24 @@ server <- function(input, output, session) {
 
   native_results_error <- reactiveVal("")
 
+  load_native_results_once <- function() {
+    p <- current_project()
+    key <- as.character(p$id %||% "")
+    if (!identical(native_results_loaded_project(), key)) {
+      native_registered_id("")
+      native_results_loaded_project(key)
+      native_results_refresh(isolate(native_results_refresh()) + 1L)
+    }
+  }
+
   observeEvent(input$web_main_tabs, {
     if (identical(input$web_main_tabs %||% "", "Results Explorer")) {
-      native_registered_id("")
-      native_results_refresh(isolate(native_results_refresh()) + 1L)
+      load_native_results_once()
     }
   }, ignoreInit = TRUE)
 
   observeEvent(input$native_results_tab_visible, {
-    native_registered_id("")
-    native_results_refresh(isolate(native_results_refresh()) + 1L)
+    load_native_results_once()
   }, ignoreInit = TRUE)
 
   output$native_results_ui <- renderUI({
@@ -5035,6 +5041,7 @@ server <- function(input, output, session) {
   output$results_overview <- render_csl_table(project_status(current_project()), page_length = 20)
   output$design_table <- render_csl_table(safe_read_table(current_project()$design_matrix_path), page_length = 50)
   output$fastqc_select_ui <- renderUI({
+    req(identical(input$web_main_tabs %||% "", "Results Explorer"))
     progress_refresh()
     p <- current_project()
     files <- c(list.files(file.path(p$data_dir, "fastqc_cutadapt"), pattern = "\\.html$", full.names = TRUE),
@@ -5051,13 +5058,13 @@ server <- function(input, output, session) {
     files <- if (dir.exists(dir)) list.files(dir, pattern = pattern, recursive = TRUE, full.names = TRUE) else character(0)
     selectInput(id, label, choices = files, selected = files[1] %||% character(0), selectize = FALSE)
   }
-  output$rsem_file_ui <- renderUI({ progress_refresh(); file_select("rsem_file", "RSEM table", file.path(current_project()$data_dir, "rsem"), "\\.(txt|csv|results)$") })
+  output$rsem_file_ui <- renderUI({ req(identical(input$web_main_tabs %||% "", "Results Explorer")); progress_refresh(); file_select("rsem_file", "RSEM table", file.path(current_project()$data_dir, "rsem"), "\\.(txt|csv|results)$") })
   output$rsem_table <- render_csl_table({ req(input$rsem_file); safe_read_table(input$rsem_file, 5000) }, page_length = 50)
-  output$kallisto_file_ui <- renderUI({ progress_refresh(); file_select("kallisto_file", "Kallisto table", file.path(current_project()$data_dir, "kallisto"), "\\.(tsv|txt|csv)$") })
+  output$kallisto_file_ui <- renderUI({ req(identical(input$web_main_tabs %||% "", "Results Explorer")); progress_refresh(); file_select("kallisto_file", "Kallisto table", file.path(current_project()$data_dir, "kallisto"), "\\.(tsv|txt|csv)$") })
   output$kallisto_table <- render_csl_table({ req(input$kallisto_file); safe_read_table(input$kallisto_file, 5000) }, page_length = 50)
-  output$norm_file_ui <- renderUI({ progress_refresh(); file_select("norm_file", "DESeq2 normalized counts", file.path(current_project()$data_dir, "deseq2"), "normalized.*\\.(txt|csv)$") })
+  output$norm_file_ui <- renderUI({ req(identical(input$web_main_tabs %||% "", "Results Explorer")); progress_refresh(); file_select("norm_file", "DESeq2 normalized counts", file.path(current_project()$data_dir, "deseq2"), "normalized.*\\.(txt|csv)$") })
   output$norm_table <- render_csl_table({ req(input$norm_file); safe_read_table(input$norm_file, 5000) }, page_length = 50)
-  output$deseq_file_ui <- renderUI({ progress_refresh(); file_select("deseq_file", "DESeq2 file", file.path(current_project()$data_dir, "deseq2"), "\\.(txt|csv|png|pdf)$") })
+  output$deseq_file_ui <- renderUI({ req(identical(input$web_main_tabs %||% "", "Results Explorer")); progress_refresh(); file_select("deseq_file", "DESeq2 file", file.path(current_project()$data_dir, "deseq2"), "\\.(txt|csv|png|pdf)$") })
   output$deseq_file_view <- renderUI({
     req(input$deseq_file)
     if (tolower(tools::file_ext(input$deseq_file)) %in% c("txt", "csv", "tsv")) {
@@ -5065,7 +5072,7 @@ server <- function(input, output, session) {
     } else image_or_file_ui(input$deseq_file)
   })
   output$deseq_selected_table <- render_csl_table({ req(input$deseq_file); safe_read_table(input$deseq_file, 5000) }, page_length = 50)
-  output$gsea_file_ui <- renderUI({ progress_refresh(); file_select("gsea_file", "GSEA file", file.path(current_project()$data_dir, "gseapy"), "\\.(txt|csv|png|pdf)$") })
+  output$gsea_file_ui <- renderUI({ req(identical(input$web_main_tabs %||% "", "Results Explorer")); progress_refresh(); file_select("gsea_file", "GSEA file", file.path(current_project()$data_dir, "gseapy"), "\\.(txt|csv|png|pdf)$") })
   output$gsea_file_view <- renderUI({
     req(input$gsea_file)
     if (tolower(tools::file_ext(input$gsea_file)) %in% c("txt", "csv", "tsv")) {
@@ -5073,10 +5080,11 @@ server <- function(input, output, session) {
     } else image_or_file_ui(input$gsea_file, "950px")
   })
   output$gsea_selected_table <- render_csl_table({ req(input$gsea_file); safe_read_table(input$gsea_file, 5000) }, page_length = 50)
-  output$all_file_ui <- renderUI({ progress_refresh(); file_select("all_file", "Result file", current_project()$data_dir, "\\.(txt|csv|tsv|html|png|pdf)$") })
+  output$all_file_ui <- renderUI({ req(identical(input$web_main_tabs %||% "", "Results Explorer")); progress_refresh(); file_select("all_file", "Result file", current_project()$data_dir, "\\.(txt|csv|tsv|html|png|pdf)$") })
   output$all_file_view <- renderUI({ req(input$all_file); image_or_file_ui(input$all_file) })
 
   output$log_file_ui <- renderUI({
+    req(identical(input$web_main_tabs %||% "", "Logs"))
     progress_refresh()
     project <- current_project()
     entries <- log_entries(project)
