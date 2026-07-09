@@ -474,6 +474,8 @@ delete_projects <- function(projects_to_delete, delete_data = FALSE) {
   if (!length(projects_to_delete)) return("No projects selected.")
   messages <- character(0)
   for (project in projects_to_delete) {
+    cancelled <- cancel_active_project_jobs(project)
+    if (nzchar(cancelled)) messages <- c(messages, cancelled)
     cfg <- project$source_config %||% ""
     if (is_managed_project_config(cfg)) {
       ok <- unlink(cfg, force = TRUE) == 0
@@ -1006,6 +1008,87 @@ cancel_active_step_jobs <- function(project, step) {
     )
   }
   msg <- paste0("Requested cancellation of ", length(ids), " active ", step, " job", if (length(ids) == 1) "" else "s", ": ", paste(ids, collapse = ", "))
+  if (length(out) && any(nzchar(out))) msg <- paste(msg, paste(out[nzchar(out)], collapse = "\n"), sep = "\n")
+  msg
+}
+
+active_squeue_project_jobs <- function(project) {
+  if (Sys.which("squeue") == "") return(data.frame())
+  prefix <- project_job_name_prefix(project)
+  if (!nzchar(prefix)) return(data.frame())
+  user <- Sys.info()[["user"]] %||% ""
+  args <- c("-h", "-o", "%A|%T|%.200j")
+  if (nzchar(user)) args <- c(args, "-u", user)
+  out <- tryCatch(system2("squeue", args, stdout = TRUE, stderr = FALSE), error = function(e) character(0))
+  out <- out[nzchar(out)]
+  if (!length(out)) return(data.frame())
+  parts <- strsplit(out, "|", fixed = TRUE)
+  rows <- lapply(parts, function(x) {
+    if (length(x) < 3) return(NULL)
+    data.frame(
+      job_id = trimws(x[[1]]),
+      slurm_state = trimws(x[[2]]),
+      slurm_job_name = trimws(paste(x[-c(1, 2)], collapse = "|")),
+      stringsAsFactors = FALSE
+    )
+  })
+  rows <- Filter(Negate(is.null), rows)
+  if (!length(rows)) return(data.frame())
+  jobs <- do.call(rbind, rows)
+  jobs <- jobs[
+    startsWith(jobs$slurm_job_name, prefix) &
+      jobs$slurm_state %in% active_slurm_states() &
+      nzchar(jobs$job_id),
+    ,
+    drop = FALSE
+  ]
+  jobs
+}
+
+cancel_active_project_jobs <- function(project) {
+  jobs <- job_history(project)
+  active_states <- active_slurm_states()
+  if (NROW(jobs) && "job_id" %in% names(jobs) && "slurm_state" %in% names(jobs)) {
+    hit <- jobs[
+      jobs$slurm_state %in% active_states &
+        nzchar(jobs$job_id),
+      ,
+      drop = FALSE
+    ]
+  } else {
+    hit <- data.frame()
+  }
+  squeue_hit <- active_squeue_project_jobs(project)
+  ids <- unique(c(as.character(hit$job_id %||% character(0)), as.character(squeue_hit$job_id %||% character(0))))
+  ids <- ids[nzchar(ids)]
+  if (!length(ids)) {
+    return(paste("No active jobs found for", project$label %||% project$name))
+  }
+  if (Sys.which("scancel") == "") {
+    return("ERROR: scancel was not found. Active project jobs could not be cancelled.")
+  }
+  out <- tryCatch(system2("scancel", ids, stdout = TRUE, stderr = TRUE), error = function(e) conditionMessage(e))
+  for (id in ids) {
+    rows <- hit[hit$job_id == id, , drop = FALSE]
+    row <- if (NROW(rows)) tail(rows, 1) else data.frame()
+    save_job(
+      project,
+      if (NROW(row) && "step" %in% names(row) && nzchar(row$step[1] %||% "")) row$step[1] else "Project",
+      c("scancel", id),
+      paste(
+        c(
+          paste("job_id:", id),
+          "cancelled_by_codespringweb: true",
+          "project_delete_cleanup: true",
+          if (NROW(row) && "sample" %in% names(row) && nzchar(row$sample[1] %||% "")) paste("sample:", row$sample[1]),
+          if (NROW(row) && "target" %in% names(row) && nzchar(row$target[1] %||% "")) paste("target:", row$target[1]),
+          if (NROW(row) && "input_mode" %in% names(row) && nzchar(row$input_mode[1] %||% "")) paste("input_mode:", row$input_mode[1])
+        ),
+        collapse = "\n"
+      )
+    )
+  }
+  msg <- paste0("Requested cancellation of ", length(ids), " active job", if (length(ids) == 1) "" else "s", " for ", project$label %||% project$name, ": ", paste(ids, collapse = ", "))
   if (length(out) && any(nzchar(out))) msg <- paste(msg, paste(out[nzchar(out)], collapse = "\n"), sep = "\n")
   msg
 }
@@ -2409,6 +2492,12 @@ job_name_for <- function(project, step, sample = "") {
   raw <- paste("csl", project$name, step, sample, sep = "_")
   raw <- gsub("[^A-Za-z0-9_]+", "_", raw)
   substr(gsub("_+", "_", raw), 1, 80)
+}
+
+project_job_name_prefix <- function(project) {
+  raw <- paste("csl", project$name, sep = "_")
+  raw <- gsub("[^A-Za-z0-9_]+", "_", raw)
+  gsub("_+", "_", raw)
 }
 
 rna_workdir <- function(project) {
@@ -4565,7 +4654,7 @@ server <- function(input, output, session) {
       tags$hr(),
       tags$details(class = "project-manage",
         tags$summary("Manage projects"),
-        div(class = "muted small-note", "Delete saved project files from project_configs. Project folder deletion is optional and asks for confirmation."),
+        div(class = "muted small-note", "Delete saved project files from project_configs and cancel tracked active jobs. Full project folder deletion is optional and asks for confirmation."),
         checkboxGroupInput("delete_project_ids", "Projects to delete", choices = choices),
         checkboxInput("delete_project_data", "Also delete entire csl_results project folder (data, log, shiny)", value = FALSE),
         actionButton("delete_selected_projects", "Delete selected", class = "btn-danger"),
@@ -4655,7 +4744,7 @@ server <- function(input, output, session) {
       result_dirs <- vapply(to_delete, project_result_dir, character(1))
       showModal(modalDialog(
         title = "Delete entire project folder?",
-        tags$p("This will delete the selected project config file(s), old job records, and the entire csl_results project folder for each selected project, including data, log, and shiny folders:"),
+        tags$p("This will cancel tracked active jobs for the selected project(s), delete the project config file(s), remove old job records, and delete the entire csl_results project folder for each selected project, including data, log, and shiny folders:"),
         tags$ul(lapply(seq_along(labels), function(i) tags$li(tags$strong(labels[[i]]), tags$br(), code(result_dirs[[i]])))),
         tags$p(tags$strong("This cannot be undone.")),
         footer = tagList(
@@ -4695,9 +4784,11 @@ server <- function(input, output, session) {
             "or choose a different project name."
           )
         }
+        cleanup <- cancel_active_project_jobs(p)
         deleted <- delete_project_results(p)
         if (!isTRUE(deleted$ok)) stop(deleted$message)
       } else {
+        cleanup <- cancel_active_project_jobs(p)
         prune_project_job_history(p)
       }
       cfg <- write_project_config(p)
@@ -4705,7 +4796,12 @@ server <- function(input, output, session) {
       projects(refreshed)
       write_last_project_id(p$id)
       updateSelectInput(session, "project_id", choices = project_select_choices(refreshed, p$analysis), selected = p$id)
-      paste("Created project:", p$name, "\nSaved project file:", cfg)
+      cleanup <- cleanup %||% ""
+      paste(c(
+        if (nzchar(cleanup)) cleanup,
+        paste("Created project:", p$name),
+        paste("Saved project file:", cfg)
+      ), collapse = "\n")
     }, error = function(e) paste("ERROR:", conditionMessage(e)))
     output$create_project_status <- renderText(msg)
   })
