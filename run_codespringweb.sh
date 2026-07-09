@@ -81,16 +81,36 @@ if [[ "$PORT" != "$START_PORT" ]]; then
   printf '\033[33mPort %s was busy, so CodeSpringApp will use port %s instead.\033[0m\n' "$START_PORT" "$PORT"
 fi
 
-LOG_FILE="$LOG_DIR/codespringweb_${PORT}.log"
+APP_PID=""
+LOG_FILE=""
 
-nohup env CSL_CODESPRINGLAB_ROOT="$CSL_ROOT" Rscript -e "shiny::runApp('$APP_DIR', host='$HOST', port=$PORT)" > "$LOG_FILE" 2>&1 &
-APP_PID="$!"
-echo "$APP_PID" > "$LOG_DIR/codespringweb_${PORT}.pid"
+for candidate in $(seq "$PORT" "$MAX_PORT"); do
+  PORT="$candidate"
+  LOG_FILE="$LOG_DIR/codespringweb_${PORT}.log"
 
-sleep 2
-if ! kill -0 "$APP_PID" 2>/dev/null; then
-  printf '\033[31mCodeSpringWeb did not start. Last log lines:\033[0m\n'
+  nohup env CSL_CODESPRINGLAB_ROOT="$CSL_ROOT" Rscript -e "shiny::runApp('$APP_DIR', host='$HOST', port=$PORT)" > "$LOG_FILE" 2>&1 &
+  APP_PID="$!"
+  echo "$APP_PID" > "$LOG_DIR/codespringweb_${PORT}.pid"
+
+  sleep 2
+  if kill -0 "$APP_PID" 2>/dev/null; then
+    break
+  fi
+
+  if grep -Eqi "address already in use|Failed to create server|port.*busy|cannot open.*port" "$LOG_FILE" 2>/dev/null; then
+    rm -f "$LOG_DIR/codespringweb_${PORT}.pid"
+    printf '\033[33mPort %s became busy while starting, trying %s instead.\033[0m\n' "$PORT" "$((PORT + 1))"
+    APP_PID=""
+    continue
+  fi
+
+  printf '\033[31mCodeSpringApp did not start. Last log lines:\033[0m\n'
   tail -40 "$LOG_FILE" || true
+  exit 1
+done
+
+if [[ -z "$APP_PID" ]] || ! kill -0 "$APP_PID" 2>/dev/null; then
+  printf '\033[31mNo open CodeSpringApp port found from %s to %s.\033[0m\n' "$START_PORT" "$MAX_PORT"
   exit 1
 fi
 

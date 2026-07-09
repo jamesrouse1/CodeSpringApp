@@ -5647,4 +5647,4 @@ server <- function(input, output, session) {
   )
 }
 
-shinyApp(ui, server, onStart = cleanup_previous_shiny_processes)
+shinyApp(ui, server)
