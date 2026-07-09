@@ -900,6 +900,33 @@ job_history_progress_display_from_jobs <- function(jobs) {
   jobs[, keep, drop = FALSE]
 }
 
+cancel_active_step_jobs <- function(project, step) {
+  if (Sys.which("scancel") == "") {
+    return("ERROR: scancel was not found. Job cancellation must be run on the SLURM server.")
+  }
+  jobs <- job_history(project)
+  if (!NROW(jobs) || !"job_id" %in% names(jobs) || !"step" %in% names(jobs) || !"slurm_state" %in% names(jobs)) {
+    return(paste("No tracked jobs found for", step, "in this project."))
+  }
+  active_states <- active_slurm_states()
+  hit <- jobs[
+    canonical_job_step(jobs$step) == canonical_job_step(step) &
+      jobs$slurm_state %in% active_states &
+      nzchar(jobs$job_id),
+    ,
+    drop = FALSE
+  ]
+  ids <- unique(as.character(hit$job_id))
+  ids <- ids[nzchar(ids)]
+  if (!length(ids)) {
+    return(paste("No active", step, "jobs were found for this project."))
+  }
+  out <- tryCatch(system2("scancel", ids, stdout = TRUE, stderr = TRUE), error = function(e) conditionMessage(e))
+  msg <- paste0("Requested cancellation of ", length(ids), " active ", step, " job", if (length(ids) == 1) "" else "s", ": ", paste(ids, collapse = ", "))
+  if (length(out) && any(nzchar(out))) msg <- paste(msg, paste(out[nzchar(out)], collapse = "\n"), sep = "\n")
+  msg
+}
+
 job_filter_choices_from_jobs <- function(jobs) {
   steps <- if (NROW(jobs) && "step" %in% names(jobs)) unique(as.character(jobs$step)) else character(0)
   steps <- steps[!is.na(steps) & nzchar(steps)]
@@ -1678,8 +1705,20 @@ tool_progress_ui_output_id <- function(step) {
   paste0("tool_progress_ui_", tolower(gsub("[^A-Za-z0-9]+", "_", step)))
 }
 
+tool_cancel_button_id <- function(step) {
+  paste0("cancel_jobs_", tolower(gsub("[^A-Za-z0-9]+", "_", step)))
+}
+
+tool_cancel_confirm_id <- function(step) {
+  paste0("confirm_cancel_", tolower(gsub("[^A-Za-z0-9]+", "_", step)))
+}
+
 sample_level_pipeline_steps <- function() {
   c("FastQC", "Cutadapt", "STAR", "featureCounts", "RSEM (optional)", "Kallisto (optional)")
+}
+
+runnable_pipeline_steps <- function() {
+  setdiff(pipeline_order(), "Design matrix")
 }
 
 selected_choice <- function(value, choices, default = NULL) {
@@ -2707,6 +2746,10 @@ tool_panel <- function(step, status, description, controls, button_id, button_la
     div(class = "tool-body",
         controls,
         actionButton(button_id, button_label, class = "btn-primary"),
+        div(class = "tool-cancel-zone",
+            checkboxInput(tool_cancel_confirm_id(step), paste("Confirm cancel active", step, "jobs"), value = FALSE),
+            actionButton(tool_cancel_button_id(step), "Cancel active jobs", class = "btn-danger btn-sm")
+        ),
         if (step %in% sample_level_pipeline_steps()) uiOutput(tool_progress_ui_output_id(step)) else NULL
     )
   )
@@ -2917,6 +2960,9 @@ body { background:#eef3f8; color:#17202f; }
 .tool-right small { color:#657084; }
 .tool-body { padding:0 16px 16px 16px; border-top:1px solid #edf1f6; }
 .tool-body .form-group { margin-bottom:10px; }
+.tool-cancel-zone { margin-top:12px; padding-top:12px; border-top:1px dashed #d8dde8; display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+.tool-cancel-zone .form-group { margin:0; }
+.tool-cancel-zone label { color:#8a2f24; font-weight:700; }
 .tool-progress-wrap { margin-top:16px; border:1px solid #d8dde8; border-radius:8px; overflow:hidden; background:#f8fafc; }
 .tool-progress-title { padding:12px 14px; font-size:13px; font-weight:800; color:#304a66; text-transform:uppercase; letter-spacing:.04em; border-bottom:1px solid #d8dde8; background:#edf4fb; }
 .tool-progress-table { width:100%; border-collapse:separate; border-spacing:0; table-layout:fixed; }
@@ -4190,6 +4236,26 @@ server <- function(input, output, session) {
       )
     }
   })
+
+  for (step in runnable_pipeline_steps()) {
+    local({
+      this_step <- step
+      button_id <- tool_cancel_button_id(this_step)
+      confirm_id <- tool_cancel_confirm_id(this_step)
+      observeEvent(input[[button_id]], {
+        if (!isTRUE(input[[confirm_id]])) {
+          run_message(paste("Check the confirmation box before canceling active", this_step, "jobs."))
+          return(invisible(NULL))
+        }
+        run_message(paste("Canceling active", this_step, "jobs..."))
+        msg <- tryCatch(cancel_active_step_jobs(current_project(), this_step), error = function(e) paste("ERROR canceling", this_step, "jobs:", conditionMessage(e)))
+        run_message(msg)
+        updateCheckboxInput(session, confirm_id, value = FALSE)
+        safe_refresh_progress_now("cancel")
+      }, ignoreInit = TRUE)
+    })
+  }
+
   output$run_output <- renderText(run_message())
 
 
