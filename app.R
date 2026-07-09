@@ -1678,11 +1678,30 @@ sample_level_pipeline_steps <- function() {
 
 selected_choice <- function(value, choices, default = NULL) {
   choices_vec <- unname(as.character(choices))
+  choices_vec <- choices_vec[nzchar(choices_vec)]
+  if (!length(choices_vec)) return(character(0))
   value <- as.character(value %||% "")
   if (length(value) && nzchar(value[[1]]) && value[[1]] %in% choices_vec) return(value[[1]])
   default <- as.character(default %||% "")
   if (length(default) && nzchar(default[[1]]) && default[[1]] %in% choices_vec) return(default[[1]])
-  choices_vec[[1]] %||% character(0)
+  choices_vec[[1]]
+}
+
+resolve_comparison_inputs <- function(project, compare_col = NULL, reference = NULL, comparison = NULL) {
+  cols <- design_compare_columns(project)
+  if (!length(cols)) stop("No comparison columns found between sample and filename in design_matrix.txt.")
+  default_col <- if ("treatment" %in% cols) "treatment" else cols[[1]]
+  compare_col <- selected_choice(compare_col, cols, default_col)
+  vals <- design_compare_values(project, compare_col)
+  if (length(vals) < 2) stop("Selected comparison column must contain at least two groups: ", compare_col)
+  reference <- selected_choice(reference, vals, vals[[1]])
+  alternatives <- vals[vals != reference]
+  default_comparison <- if (length(alternatives)) alternatives[[1]] else vals[[2]]
+  comparison <- selected_choice(comparison, vals, default_comparison)
+  if (identical(reference, comparison)) {
+    if (length(alternatives)) comparison <- alternatives[[1]]
+  }
+  list(compare_col = compare_col, reference = reference, comparison = comparison, values = vals)
 }
 
 sample_progress_step_table <- function(progress_df, step) {
@@ -4080,19 +4099,16 @@ server <- function(input, output, session) {
   output$gsea_run_controls_ui <- renderUI({
     p <- current_project()
     cols <- design_compare_columns(p)
-    if (!length(cols)) return(div(class = "empty-box", "No comparison columns found between sample and filename in design_matrix.txt."))
-    selected_col <- input$gsea_compare_col %||% if ("treatment" %in% cols) "treatment" else cols[[1]]
-    if (!selected_col %in% cols) selected_col <- cols[[1]]
-    vals <- design_compare_values(p, selected_col)
-    ref <- input$gsea_reference %||% if (length(vals)) vals[[1]] else ""
-    comp <- input$gsea_comparison %||% if (length(vals) > 1) vals[[2]] else ref
-    ref <- selected_choice(ref, vals, if (length(vals)) vals[[1]] else "")
-    comp <- selected_choice(comp, vals, if (length(vals) > 1) vals[[2]] else ref)
+    resolved <- tryCatch(
+      resolve_comparison_inputs(p, input$gsea_compare_col, input$gsea_reference, input$gsea_comparison),
+      error = function(e) e
+    )
+    if (inherits(resolved, "error")) return(div(class = "empty-box", conditionMessage(resolved)))
     geneset <- selected_choice(input$gsea_geneset, GSEAPY_GENESET_OPTIONS, "MSigDB_Hallmark_2020")
     tagList(
-      selectInput("gsea_compare_col", "Comparison column", choices = cols, selected = selected_col, selectize = FALSE),
-      selectInput("gsea_reference", "Reference/baseline", choices = vals, selected = ref, selectize = FALSE),
-      selectInput("gsea_comparison", "Comparison", choices = vals, selected = comp, selectize = FALSE),
+      selectInput("gsea_compare_col", "Comparison column", choices = cols, selected = resolved$compare_col, selectize = FALSE),
+      selectInput("gsea_reference", "Reference/baseline", choices = resolved$values, selected = resolved$reference, selectize = FALSE),
+      selectInput("gsea_comparison", "Comparison", choices = resolved$values, selected = resolved$comparison, selectize = FALSE),
       selectInput("gsea_geneset", "Gene-set database", choices = GSEAPY_GENESET_OPTIONS, selected = geneset, selectize = FALSE)
     )
   })
@@ -4140,11 +4156,23 @@ server <- function(input, output, session) {
     }
   })
   observeEvent(input$run_gsea, {
-    if (identical(input$gsea_reference, input$gsea_comparison)) {
+    resolved <- tryCatch(
+      resolve_comparison_inputs(current_project(), input$gsea_compare_col, input$gsea_reference, input$gsea_comparison),
+      error = function(e) e
+    )
+    if (inherits(resolved, "error")) {
+      run_message(paste("ERROR submitting GSEA:", conditionMessage(resolved)))
+      finish_submit_refresh()
+    } else if (identical(resolved$reference, resolved$comparison)) {
       run_message("Reference and comparison must be different.")
       finish_submit_refresh()
     } else {
-      run_submission("GSEA", submit_gseapy_job(current_project(), input$gsea_compare_col, input$gsea_reference, input$gsea_comparison, input$gsea_geneset), paste(input$gsea_compare_col, input$gsea_comparison, "vs", input$gsea_reference, input$gsea_geneset))
+      geneset <- selected_choice(input$gsea_geneset, GSEAPY_GENESET_OPTIONS, "MSigDB_Hallmark_2020")
+      run_submission(
+        "GSEA",
+        submit_gseapy_job(current_project(), resolved$compare_col, resolved$reference, resolved$comparison, geneset),
+        paste(resolved$compare_col, resolved$comparison, "vs", resolved$reference, geneset)
+      )
     }
   })
   output$run_output <- renderText(run_message())
