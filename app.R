@@ -3026,7 +3026,7 @@ submit_rsem_jobs <- function(project, feature = "gene_id") {
   paste(c(messages, matrix_msg), collapse = "\n")
 }
 
-submit_featurecounts_jobs <- function(project, feature = "gene_id") {
+submit_featurecounts_jobs <- function(project, feature = "gene_name") {
   res <- genome_resources(project)
   design <- safe_read_table(project$design_matrix_path)
   if (!NROW(design) || !"sample" %in% names(design)) return("No samples found in design matrix.")
@@ -3048,7 +3048,7 @@ submit_featurecounts_jobs <- function(project, feature = "gene_id") {
   paste(c(messages, matrix_msg), collapse = "\n")
 }
 
-submit_featurecounts_matrix_job <- function(project, feature = "gene_id", dependency_ids = character(0)) {
+submit_featurecounts_matrix_job <- function(project, feature = "gene_name", dependency_ids = character(0)) {
   res <- genome_resources(project)
   outdir <- file.path(project$data_dir, "featurecounts")
   counts_dir <- file.path(project$data_dir, "counts")
@@ -4298,7 +4298,7 @@ server <- function(input, output, session) {
         FALSE
       })
       if (!built && !p$id %in% autosubmitted) {
-        submit_featurecounts_matrix_job(p, "gene_id")
+        submit_featurecounts_matrix_job(p, "gene_name")
         featurecounts_matrix_autosubmitted(unique(c(autosubmitted, p$id)))
         jobs <- job_history(p)
       }
@@ -4812,7 +4812,7 @@ server <- function(input, output, session) {
         tagList(checkboxInput("star_use_trimmed", "Use trimmed reads", value = if (is.null(input$star_use_trimmed)) TRUE else isTRUE(input$star_use_trimmed))),
         "run_star", "Submit STAR"),
       tool_panel("featureCounts", status, "Quantify STAR BAM files with the selected GTF attribute.",
-        tagList(selectInput("feature_attr", "featureCounts attribute", choices = c("gene_id", "gene_name"), selected = selected_choice(input$feature_attr, c("gene_id", "gene_name"), "gene_id"), selectize = FALSE)),
+        tagList(selectInput("feature_attr", "featureCounts attribute", choices = c("gene_name", "gene_id"), selected = selected_choice(input$feature_attr, c("gene_name", "gene_id"), "gene_name"), selectize = FALSE)),
         "run_featurecounts", "Submit featureCounts"),
       tool_panel("DESeq2", status, "Run differential expression from count_matrix.txt.",
         tagList(
