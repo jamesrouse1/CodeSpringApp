@@ -1857,6 +1857,104 @@ previous_size_for <- function(cache, path) {
   as.numeric(tail(hit$size, 1))
 }
 
+read_metric_lines <- function(path) {
+  if (!nzchar(path %||% "") || !file.exists(path)) return(character(0))
+  tryCatch(readLines(path, warn = FALSE), error = function(e) character(0))
+}
+
+clean_metric_number <- function(x) {
+  x <- gsub(",", "", as.character(x %||% ""))
+  x <- gsub("%", "", x, fixed = TRUE)
+  suppressWarnings(as.numeric(trimws(x)))
+}
+
+format_metric_value <- function(x, suffix = "", digits = 1) {
+  val <- suppressWarnings(as.numeric(x))
+  if (!is.finite(val)) return("")
+  if (identical(suffix, "%")) return(paste0(format(round(val, digits), nsmall = digits, trim = TRUE), "%"))
+  if (abs(val - round(val)) < .Machine$double.eps^0.5) return(format(round(val), big.mark = ",", scientific = FALSE, trim = TRUE))
+  format(round(val, digits), big.mark = ",", scientific = FALSE, trim = TRUE)
+}
+
+latest_job_for_sample <- function(jobs, step, sample) {
+  if (!NROW(jobs) || !"step" %in% names(jobs)) return(data.frame())
+  hit <- jobs[jobs$step == step, , drop = FALSE]
+  if ("sample" %in% names(hit) && NROW(hit)) {
+    sample_hit <- hit[nzchar(hit$sample) & hit$sample == sample, , drop = FALSE]
+    if (NROW(sample_hit)) hit <- sample_hit
+  }
+  if (NROW(hit)) tail(hit, 1) else data.frame()
+}
+
+extract_cutadapt_metrics <- function(project, sample, jobs) {
+  hit <- latest_job_for_sample(jobs, "Cutadapt", sample)
+  stdout <- if (NROW(hit) && "stdout" %in% names(hit)) hit$stdout[1] else ""
+  lines <- read_metric_lines(stdout)
+  text <- paste(lines, collapse = "\n")
+  before <- NA_real_
+  after <- NA_real_
+  m <- regmatches(text, regexec("Total read pairs processed:[[:space:]]*([0-9,]+)", text))[[1]]
+  if (length(m) >= 2) before <- clean_metric_number(m[2])
+  m <- regmatches(text, regexec("Pairs written \\(passing filters\\):[[:space:]]*([0-9,]+)", text))[[1]]
+  if (length(m) >= 2) after <- clean_metric_number(m[2])
+  if (!is.finite(before)) {
+    m <- regmatches(text, regexec("Total reads processed:[[:space:]]*([0-9,]+)", text))[[1]]
+    if (length(m) >= 2) before <- clean_metric_number(m[2])
+  }
+  if (!is.finite(after)) {
+    m <- regmatches(text, regexec("Reads written \\(passing filters\\):[[:space:]]*([0-9,]+)", text))[[1]]
+    if (length(m) >= 2) after <- clean_metric_number(m[2])
+  }
+  c(
+    `Reads before` = format_metric_value(before),
+    `Reads after` = format_metric_value(after)
+  )
+}
+
+extract_star_metrics <- function(project, sample) {
+  log_path <- file.path(project$data_dir, "star", sample, paste0(sample, "Log.final.out"))
+  lines <- read_metric_lines(log_path)
+  if (!length(lines)) return(c(`Input reads` = "", `Uniquely mapped %` = ""))
+  metric_value <- function(pattern) {
+    hit <- grep(pattern, lines, value = TRUE, fixed = TRUE)
+    if (!length(hit)) return(NA_real_)
+    parts <- strsplit(hit[[1]], "\\|", fixed = FALSE)[[1]]
+    clean_metric_number(tail(parts, 1))
+  }
+  c(
+    `Input reads` = format_metric_value(metric_value("Number of input reads")),
+    `Uniquely mapped %` = format_metric_value(metric_value("Uniquely mapped reads %"), "%")
+  )
+}
+
+extract_featurecounts_metrics <- function(project, sample) {
+  summary_path <- file.path(project$data_dir, "featurecounts", sample, paste0(sample, "_counts.txt.summary"))
+  if (!file.exists(summary_path)) {
+    return(c(Assigned = "", `Assigned %` = ""))
+  }
+  x <- tryCatch(utils::read.table(summary_path, sep = "\t", header = TRUE, quote = "\"", comment.char = "", check.names = FALSE), error = function(e) NULL)
+  if (is.null(x) || !NROW(x) || NCOL(x) < 2) return(c(Assigned = "", `Assigned %` = ""))
+  names(x)[1] <- "Status"
+  val_col <- setdiff(names(x), "Status")[1]
+  vals <- suppressWarnings(as.numeric(x[[val_col]]))
+  assigned <- vals[match("Assigned", x$Status)]
+  total <- sum(vals, na.rm = TRUE)
+  pct <- if (is.finite(assigned) && total > 0) assigned * 100 / total else NA_real_
+  c(
+    Assigned = format_metric_value(assigned),
+    `Assigned %` = format_metric_value(pct, "%")
+  )
+}
+
+sample_step_metrics <- function(project, sample, step, jobs) {
+  switch(step,
+    "Cutadapt" = extract_cutadapt_metrics(project, sample, jobs),
+    "STAR" = extract_star_metrics(project, sample),
+    "featureCounts" = extract_featurecounts_metrics(project, sample),
+    c()
+  )
+}
+
 sample_progress <- function(project, active_states = active_job_state_map(project), previous_cache = data.frame(), jobs = NULL) {
   design <- safe_read_table(project$design_matrix_path)
   if (!NROW(design) || !"sample" %in% names(design)) return(list(table = data.frame(), cache = previous_cache))
@@ -1946,6 +2044,7 @@ sample_progress <- function(project, active_states = active_job_state_map(projec
         ""
       }
       display_status <- status
+      metrics <- sample_step_metrics(project, sample, step, jobs)
       rows[[length(rows) + 1]] <- data.frame(
         sample = sample,
         step = step,
@@ -1956,6 +2055,10 @@ sample_progress <- function(project, active_states = active_job_state_map(projec
         output_bytes = size,
         target = target,
         note = note,
+        metric_1_name = if (length(metrics) >= 1) names(metrics)[1] else "",
+        metric_1_value = if (length(metrics) >= 1) unname(metrics[1]) else "",
+        metric_2_name = if (length(metrics) >= 2) names(metrics)[2] else "",
+        metric_2_value = if (length(metrics) >= 2) unname(metrics[2]) else "",
         stringsAsFactors = FALSE
       )
       if (length(targets)) {
@@ -2008,6 +2111,8 @@ sample_progress_matrix_ui <- function(progress_df) {
               "Status: ", hit$status[1],
               "\nBytes: ", hit$output_bytes[1],
               "\nPath: ", hit$target[1],
+              if ("metric_1_name" %in% names(hit) && nzchar(hit$metric_1_name[1])) paste0("\n", hit$metric_1_name[1], ": ", hit$metric_1_value[1]) else "",
+              if ("metric_2_name" %in% names(hit) && nzchar(hit$metric_2_name[1])) paste0("\n", hit$metric_2_name[1], ": ", hit$metric_2_value[1]) else "",
               if (nzchar(hit$note[1])) paste0("\nNote: ", hit$note[1]) else ""
             )
             tags$td(
@@ -2035,6 +2140,12 @@ sample_progress_detail_table <- function(progress_df) {
     check.names = FALSE,
     stringsAsFactors = FALSE
   )
+  if (all(c("metric_1_name", "metric_1_value", "metric_2_name", "metric_2_value") %in% names(progress_df))) {
+    metric_1_names <- unique(progress_df$metric_1_name[nzchar(progress_df$metric_1_name)])
+    metric_2_names <- unique(progress_df$metric_2_name[nzchar(progress_df$metric_2_name)])
+    if (length(metric_1_names) == 1) out[[metric_1_names[[1]]]] <- progress_df$metric_1_value
+    if (length(metric_2_names) == 1) out[[metric_2_names[[1]]]] <- progress_df$metric_2_value
+  }
   out[order(out$Sample, step_order(out$Step)), , drop = FALSE]
 }
 
@@ -2104,13 +2215,18 @@ sample_progress_step_table <- function(progress_df, step) {
   if (!NROW(hit)) return(NULL)
   hit <- hit[order(hit$sample), , drop = FALSE]
   time_running <- if ("time_running" %in% names(hit)) as.character(hit$time_running) else rep("", NROW(hit))
-  data.frame(
+  out <- data.frame(
     Sample = hit$sample,
     Status = hit$display_status,
     `Time running` = ifelse(nzchar(time_running), time_running, "-"),
     check.names = FALSE,
     stringsAsFactors = FALSE
   )
+  metric_1_names <- if ("metric_1_name" %in% names(hit)) unique(hit$metric_1_name[nzchar(hit$metric_1_name)]) else character(0)
+  metric_2_names <- if ("metric_2_name" %in% names(hit)) unique(hit$metric_2_name[nzchar(hit$metric_2_name)]) else character(0)
+  if (length(metric_1_names) == 1) out[[metric_1_names[[1]]]] <- hit$metric_1_value
+  if (length(metric_2_names) == 1) out[[metric_2_names[[1]]]] <- hit$metric_2_value
+  out
 }
 
 sample_progress_step_ui <- function(progress_df, step) {
@@ -2124,21 +2240,26 @@ sample_progress_step_ui <- function(progress_df, step) {
       div(class = "tool-progress-title", "Sample progress"),
       tags$table(
         class = "tool-progress-table",
-        tags$thead(tags$tr(tags$th("Sample"), tags$th("Status"), tags$th("Time running"))),
+        tags$thead(tags$tr(lapply(colnames(table), tags$th))),
         tags$tbody(lapply(seq_len(NROW(hit)), function(i) {
           title <- paste0(
             "Status: ", hit$status[i],
             "\nSLURM: ", if (nzchar(hit$slurm_state[i])) hit$slurm_state[i] else "-",
             "\nBytes: ", hit$output_bytes[i],
             "\nPath: ", hit$target[i],
+            if ("metric_1_name" %in% names(hit) && nzchar(hit$metric_1_name[i])) paste0("\n", hit$metric_1_name[i], ": ", hit$metric_1_value[i]) else "",
+            if ("metric_2_name" %in% names(hit) && nzchar(hit$metric_2_name[i])) paste0("\n", hit$metric_2_name[i], ": ", hit$metric_2_value[i]) else "",
             if (nzchar(hit$note[i])) paste0("\nNote: ", hit$note[i]) else ""
           )
           time_running <- if ("time_running" %in% names(hit) && nzchar(hit$time_running[i])) hit$time_running[i] else "-"
-          tags$tr(
-            tags$td(class = "sample-name", hit$sample[i]),
-            tags$td(tags$span(class = status_class(hit$status[i]), title = title, hit$display_status[i])),
-            tags$td(time_running)
-          )
+          row_values <- as.list(table[i, , drop = FALSE])
+          tags$tr(lapply(seq_along(row_values), function(j) {
+            nm <- names(row_values)[j]
+            value <- as.character(row_values[[j]])
+            if (identical(nm, "Sample")) return(tags$td(class = "sample-name", value))
+            if (identical(nm, "Status")) return(tags$td(tags$span(class = status_class(hit$status[i]), title = title, value)))
+            tags$td(value)
+          }))
         }))
       )
     ))
