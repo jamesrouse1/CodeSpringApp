@@ -1638,10 +1638,10 @@ server_browser_choices <- function(path, mode = "dir") {
   files <- sort(files)
   choices <- list()
   if (length(dirs)) {
-    choices[["Folders"]] <- stats::setNames(dirs, paste0(basename(dirs), "/"))
+    choices[["Folders"]] <- stats::setNames(dirs, paste0("📁 ", basename(dirs)))
   }
   if (length(files)) {
-    choices[["Files in this folder"]] <- stats::setNames(rep(path, length(files)), basename(files))
+    choices[["Files in this folder"]] <- stats::setNames(rep(path, length(files)), paste0("📄 ", basename(files)))
   }
   choices
 }
@@ -1692,11 +1692,11 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
   feature_count_files <- count_files(file.path(data_dir, "featurecounts"), "_counts\\.txt$")
   feature_matrix_exists <- file.exists(file.path(data_dir, "counts", "count_matrix.txt"))
   raw <- data.frame(
-    step = c("Design matrix", "FastQC", "Cutadapt", "STAR", "featureCounts", "DESeq2", "GSEA", "RSEM (optional)", "Kallisto (optional)"),
+    step = c("Design matrix", "Cutadapt", "FastQC", "STAR", "featureCounts", "DESeq2", "GSEA", "RSEM (optional)", "Kallisto (optional)"),
     status = c(
       if (file.exists(design)) "Complete" else "Not started",
-      if (count_files(file.path(data_dir, "fastqc"), "\\.html$") + count_files(file.path(data_dir, "fastqc_cutadapt"), "\\.html$") > 0) "Complete" else "Not started",
       if (count_files(file.path(data_dir, "cutadapt"), fastq_suffix_regex) > 0) "Complete" else "Not started",
+      if (count_files(file.path(data_dir, "fastqc"), "\\.html$") + count_files(file.path(data_dir, "fastqc_cutadapt"), "\\.html$") > 0) "Complete" else "Not started",
       if (count_files(file.path(data_dir, "star"), "Aligned\\.sortedByCoord\\.out\\.bam$") > 0) "Complete" else "Not started",
       if (feature_matrix_exists) "Complete" else if (feature_count_files > 0) "Active" else "Not started",
       if (count_files(file.path(data_dir, "deseq2"), "DEG|normalized") > 0) "Complete" else "Not started",
@@ -1706,8 +1706,8 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
     ),
     path = c(
       design,
-      file.path(data_dir, "fastqc"),
       file.path(data_dir, "cutadapt"),
+      file.path(data_dir, "fastqc"),
       file.path(data_dir, "star"),
       file.path(data_dir, "counts", "count_matrix.txt"),
       file.path(data_dir, "deseq2"),
@@ -1739,7 +1739,7 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
   }
   if (is.null(progress)) progress <- tryCatch(sample_progress(project, active_states, data.frame(), jobs = jobs)$table, error = function(e) data.frame())
   if (NROW(progress)) {
-    for (step in c("FastQC", "Cutadapt", "STAR", "featureCounts", "RSEM (optional)", "Kallisto (optional)")) {
+    for (step in c("Cutadapt", "FastQC", "STAR", "featureCounts", "RSEM (optional)", "Kallisto (optional)")) {
       hit <- progress[progress$step == step, , drop = FALSE]
       if (!NROW(hit)) next
       if (any(hit$status == "Likely failed, Deleted")) {
@@ -1773,7 +1773,7 @@ status_rank <- function(status) {
 }
 
 pipeline_order <- function() {
-  c("Design matrix", "FastQC", "Cutadapt", "STAR", "featureCounts", "DESeq2", "GSEA", "RSEM (optional)", "Kallisto (optional)")
+  c("Design matrix", "Cutadapt", "FastQC", "STAR", "featureCounts", "DESeq2", "GSEA", "RSEM (optional)", "Kallisto (optional)")
 }
 
 step_order <- function(step) {
@@ -1991,7 +1991,7 @@ sample_step_metrics <- function(project, sample, step, jobs) {
 sample_progress <- function(project, active_states = active_job_state_map(project), previous_cache = data.frame(), jobs = NULL) {
   design <- safe_read_table(project$design_matrix_path)
   if (!NROW(design) || !"sample" %in% names(design)) return(list(table = data.frame(), cache = previous_cache))
-  sample_steps <- c("FastQC", "Cutadapt", "STAR", "featureCounts", "RSEM (optional)", "Kallisto (optional)")
+  sample_steps <- c("Cutadapt", "FastQC", "STAR", "featureCounts", "RSEM (optional)", "Kallisto (optional)")
   if (is.null(jobs)) jobs <- job_history(project)
   active_job_states <- c("PENDING", "CONFIGURING", "COMPLETING", "RUNNING", "SUSPENDED", "Submitted")
   completed_job_states <- c("COMPLETED", "COMPLETED+", "CD")
@@ -2115,7 +2115,7 @@ status_class <- function(status) {
 
 sample_progress_matrix_ui <- function(progress_df) {
   if (!NROW(progress_df)) return(div(class = "empty-box", "No sample progress available yet."))
-  steps <- c("FastQC", "Cutadapt", "STAR", "featureCounts", "RSEM (optional)", "Kallisto (optional)")
+  steps <- c("Cutadapt", "FastQC", "STAR", "featureCounts", "RSEM (optional)", "Kallisto (optional)")
   samples <- unique(progress_df$sample)
   if (length(samples) > SAMPLE_PROGRESS_NICE_LIMIT) {
     return(div(
@@ -2207,7 +2207,7 @@ tool_delete_data_confirm_id <- function(step) {
 }
 
 sample_level_pipeline_steps <- function() {
-  c("FastQC", "Cutadapt", "STAR", "featureCounts", "RSEM (optional)", "Kallisto (optional)")
+  c("Cutadapt", "FastQC", "STAR", "featureCounts", "RSEM (optional)", "Kallisto (optional)")
 }
 
 runnable_pipeline_steps <- function() {
@@ -3301,7 +3301,31 @@ load_native_rnaseq_viewer <- function(project) {
   Sys.setenv(RNASEQ_SHINY_CONFIG = cfg)
   setwd(file.path(SCRIPTS_DIR, "Shiny"))
   env <- new.env(parent = globalenv())
-  sys.source(app_file, envir = env)
+  source_result <- tryCatch({
+    sys.source(app_file, envir = env)
+    NULL
+  }, error = function(e) e)
+  if (inherits(source_result, "error")) {
+    return(list(
+      id = paste(project$id, "native-error", normalizePath(cfg, winslash = "/", mustWork = FALSE), sep = "::"),
+      ui = div(
+        class = "empty-box",
+        tags$h4("Results Explorer could not load."),
+        tags$p("The embedded CodeSpringLab RNA-seq viewer raised an error while loading."),
+        tags$pre(conditionMessage(source_result)),
+        tags$p("Project data folder:"),
+        tags$code(project$data_dir)
+      ),
+      server = function(input, output, session) NULL
+    ))
+  }
+  if (!exists("ui", envir = env, inherits = FALSE) || !exists("server", envir = env, inherits = FALSE)) {
+    return(list(
+      id = paste(project$id, "native-missing-objects", normalizePath(cfg, winslash = "/", mustWork = FALSE), sep = "::"),
+      ui = div(class = "empty-box", "Results Explorer loaded, but did not expose both ui and server objects."),
+      server = function(input, output, session) NULL
+    ))
+  }
   list(
     id = paste(project$id, normalizePath(cfg, winslash = "/", mustWork = FALSE), sep = "::"),
     ui = div(class = "native-results-host", env$ui),
@@ -3315,8 +3339,8 @@ run_step_meta <- function() {
     step = pipeline_order(),
     description = c(
       "Create or load design_matrix.txt.",
-      "Generate per-read quality reports.",
       "Trim adapters and short reads.",
+      "Generate per-read quality reports.",
       "Align reads and write BAM files.",
       "Create gene-level count files and count_matrix.txt.",
       "Run differential expression and normalized counts.",
@@ -3681,7 +3705,8 @@ body { background:#eef3f8; color:#17202f; }
 .analysis-badge.atac { background:#fff4d6; color:#7a4f00; border-color:#f0c36d; }
 .analysis-badge.chip { background:#def7e8; color:#176a38; border-color:#8fd8ad; }
 .project-meta-row { display:flex; flex-wrap:wrap; gap:7px; margin-bottom:12px; }
-.meta-chip { background:#eef3f8; border:1px solid #d8dde8; border-radius:999px; padding:5px 8px; font-size:12px; color:#273449; font-weight:700; }
+.meta-chip { background:#eef3f8; border:1px solid #d8dde8; border-radius:999px; padding:5px 8px; font-size:12px; color:#273449; font-weight:700; white-space:normal; overflow-wrap:anywhere; line-height:1.25; }
+.meta-chip.ref-chip { border-radius:8px; max-width:100%; }
 .path-list { display:flex; flex-direction:column; gap:8px; }
 .path-item { border-top:1px solid #edf1f6; padding-top:8px; }
 .path-item span { display:block; font-size:11px; color:#657084; text-transform:uppercase; font-weight:800; margin-bottom:3px; }
@@ -4174,6 +4199,13 @@ ui <- fluidPage(
                  br(),
                  actionButton("save_design", "Save design_matrix.txt", class = "btn-primary"),
                  verbatimTextOutput("design_save_status")),
+        tabPanel("Run Pipeline", br(), h3("Run Pipeline"),
+                 tags$p(class = "muted", "Each tool has its own settings. Jobs are submitted with SLURM sbatch and keep running after this app or browser is closed. If a path or design matrix check fails before sbatch, the app writes a pre-submit error log instead of submitting an empty job."),
+                 uiOutput("run_resource_strip"),
+                 uiOutput("run_pipeline_stepper"),
+                 uiOutput("run_step_cards"),
+                 br(),
+                 verbatimTextOutput("run_output")),
         tabPanel("Progress", br(),
                  div(class = "progress-header-row",
                      div(h3("Pipeline Progress"), tags$p(class = "muted", "Steps are shown in workflow order. The sample matrix below updates as outputs appear.")),
@@ -4184,13 +4216,6 @@ ui <- fluidPage(
                  br(),
                  h4("Sample Progress"),
                  uiOutput("sample_progress_matrix_ui")),
-        tabPanel("Run Pipeline", br(), h3("Run Pipeline"),
-                 tags$p(class = "muted", "Each tool has its own settings. Jobs are submitted with SLURM sbatch and keep running after this app or browser is closed. If a path or design matrix check fails before sbatch, the app writes a pre-submit error log instead of submitting an empty job."),
-                 uiOutput("run_resource_strip"),
-                 uiOutput("run_pipeline_stepper"),
-                 uiOutput("run_step_cards"),
-                 br(),
-                 verbatimTextOutput("run_output")),
         tabPanel("Results Explorer", uiOutput("native_results_ui")),
         tabPanel("Logs", br(), h3("Logs"), uiOutput("log_file_ui"), tags$pre(class = "log-viewer", textOutput("selected_log_text"))),
         tabPanel("Methods", br(),
@@ -4298,7 +4323,7 @@ server <- function(input, output, session) {
       "GSEApy" = "GSEA",
       label
     )
-    sample_level_steps <- c("FastQC", "Cutadapt", "STAR", "featureCounts", "RSEM (optional)", "Kallisto (optional)")
+    sample_level_steps <- c("Cutadapt", "FastQC", "STAR", "featureCounts", "RSEM (optional)", "Kallisto (optional)")
     if (step %in% sample_level_steps) {
       optimistic <- optimistic_step_progress(p, step, input_mode)
       if (NROW(optimistic)) {
@@ -4516,7 +4541,7 @@ server <- function(input, output, session) {
         ),
         div(class = "project-meta-row",
             span(class = "meta-chip", paste("Species", genome_species(p))),
-            span(class = "meta-chip", gencode_label(p)),
+            span(class = "meta-chip ref-chip", gencode_label(p)),
             span(class = "meta-chip", if (isTRUE(p$paired_end)) "Paired-end" else "Single-end")
         ),
         div(class = "path-list compact-path-list",
@@ -4735,7 +4760,7 @@ server <- function(input, output, session) {
     div(class = "resource-strip",
         div(class = "resource-card",
             tags$strong("Genome resources"),
-            tags$p(class = "muted", gencode_label(p)),
+            tags$p(class = "muted status-path", gencode_label(p)),
             tags$p(class = "status-path", genome_resources(p)$gtf)
         ),
         div(class = "resource-card flowchart-card",
@@ -4753,9 +4778,6 @@ server <- function(input, output, session) {
     r1_choices <- adapter_choices_r1()
     r2_choices <- adapter_choices_r2()
     div(class = "run-grid",
-      tool_panel("FastQC", status, "Quality reports for raw or trimmed reads.",
-        tagList(checkboxInput("fastqc_use_trimmed", "Use trimmed reads", value = if (is.null(input$fastqc_use_trimmed)) FALSE else isTRUE(input$fastqc_use_trimmed))),
-        "run_fastqc", "Submit FastQC"),
       tool_panel("Cutadapt", status, "Trim adapters and short reads from raw FASTQs.",
         tagList(
           selectInput("cutadapt_adapter1", "R1/read1 adapter", choices = r1_choices, selected = selected_choice(input$cutadapt_adapter1, r1_choices, r1_choices[[1]]), width = "100%", selectize = FALSE),
@@ -4765,6 +4787,9 @@ server <- function(input, output, session) {
           textInput("cutadapt_min_length", "Minimum read length", value = input$cutadapt_min_length %||% "20")
         ),
         "run_cutadapt", "Submit cutadapt"),
+      tool_panel("FastQC", status, "Quality reports for raw or trimmed reads.",
+        tagList(checkboxInput("fastqc_use_trimmed", "Use trimmed reads", value = if (is.null(input$fastqc_use_trimmed)) FALSE else isTRUE(input$fastqc_use_trimmed))),
+        "run_fastqc", "Submit FastQC"),
       tool_panel("STAR", status, "Align raw or trimmed reads to the selected genome index.",
         tagList(checkboxInput("star_use_trimmed", "Use trimmed reads", value = if (is.null(input$star_use_trimmed)) TRUE else isTRUE(input$star_use_trimmed))),
         "run_star", "Submit STAR"),
@@ -4774,7 +4799,6 @@ server <- function(input, output, session) {
       tool_panel("DESeq2", status, "Run differential expression from count_matrix.txt.",
         tagList(
           uiOutput("deseq_controls_ui"),
-          checkboxInput("deseq_use_gene_name_counts", "Run DESeq2 on gene-name aggregated counts", value = isTRUE(input$deseq_use_gene_name_counts)),
           uiOutput("deseq_project_summary_ui")
         ),
         "run_deseq2", "Submit DESeq2", data.frame()),
@@ -4790,7 +4814,7 @@ server <- function(input, output, session) {
     )
   })
 
-  for (step in c("FastQC", "Cutadapt", "STAR", "featureCounts", "RSEM (optional)", "Kallisto (optional)")) {
+  for (step in c("Cutadapt", "FastQC", "STAR", "featureCounts", "RSEM (optional)", "Kallisto (optional)")) {
     local({
       this_step <- step
       output[[tool_progress_ui_output_id(this_step)]] <- renderUI({
@@ -4883,8 +4907,8 @@ server <- function(input, output, session) {
     } else {
       run_submission(
         "DESeq2",
-        submit_deseq2_job(current_project(), input$deseq_compare_col, input$deseq_reference, input$deseq_comparison, "NoRedundant", isTRUE(input$deseq_use_gene_name_counts)),
-        paste(input$deseq_compare_col, input$deseq_comparison, "vs", input$deseq_reference, if (isTRUE(input$deseq_use_gene_name_counts)) "gene-name counts" else "")
+        submit_deseq2_job(current_project(), input$deseq_compare_col, input$deseq_reference, input$deseq_comparison, "NoRedundant", FALSE),
+        paste(input$deseq_compare_col, input$deseq_comparison, "vs", input$deseq_reference)
       )
     }
   })
@@ -4948,15 +4972,30 @@ server <- function(input, output, session) {
     load_native_rnaseq_viewer(current_project())
   })
 
+  native_results_error <- reactiveVal("")
+
   output$native_results_ui <- renderUI({
-    native_results_app()$ui
+    err <- native_results_error()
+    if (nzchar(err)) {
+      return(div(class = "empty-box", tags$h4("Results Explorer server error"), tags$pre(err)))
+    }
+    app <- native_results_app()
+    tagList(app$ui)
   })
 
   observeEvent(native_results_app(), {
     app <- native_results_app()
     if (!identical(native_registered_id(), app$id)) {
-      app$server(input, output, session)
-      native_registered_id(app$id)
+      native_results_error("")
+      server_result <- tryCatch({
+        app$server(input, output, session)
+        NULL
+      }, error = function(e) e)
+      if (inherits(server_result, "error")) {
+        native_results_error(conditionMessage(server_result))
+      } else {
+        native_registered_id(app$id)
+      }
     }
   }, ignoreInit = FALSE)
 
