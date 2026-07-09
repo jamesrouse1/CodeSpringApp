@@ -550,9 +550,9 @@ project_select_choices <- function(projects, analysis = "RNA-seq") {
 record_preflight_failure <- function(project, step, message, log_name = clean_name(step, "preflight")) {
   log_dir <- file.path(dirname(project$data_dir), "log")
   dir.create(log_dir, recursive = TRUE, showWarnings = FALSE)
-  stamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
-  stderr <- file.path(log_dir, paste0("error_", log_name, "_preflight_", stamp, ".txt"))
-  submit_log <- file.path(log_dir, paste0("submit_", log_name, "_preflight_", stamp, ".txt"))
+  tool <- clean_name(log_name, clean_name(step, "preflight"))
+  stderr <- file.path(log_dir, paste0("error_", tool, "_preflight.txt"))
+  submit_log <- file.path(log_dir, paste0("submit_", tool, "_preflight.txt"))
   lines <- c(
     paste("time:", format(Sys.time(), "%Y-%m-%d %H:%M:%S")),
     paste("project:", project$name),
@@ -1448,60 +1448,99 @@ log_label_from_path <- function(path, fallback = "Log") {
   paste(fallback, base)
 }
 
-log_file_choices <- function(project, tool = "All", log_type = "All") {
-  vals <- character(0)
-  normalize_log_tool <- function(x) {
-    x <- tolower(trimws(as.character(x %||% "")))
-    x <- gsub("\\(optional\\)", "", x)
-    gsub("[^a-z0-9]+", "", x)
-  }
-  add_log_choice <- function(label, path) {
-    path <- as.character(path %||% "")
-    path <- path[!is.na(path) & nzchar(path)]
-    if (!length(path)) return(invisible(NULL))
-    for (one_path in path) {
-      one_label <- label
-      if (!nzchar(one_label %||% "")) one_label <- log_label_from_path(one_path)
-      vals[[one_label]] <<- one_path
-    }
-    invisible(NULL)
-  }
+canonical_log_tool <- function(step, fallback = "Job") {
+  step <- as.character(step %||% fallback)
+  key <- tolower(gsub("[^a-z0-9]+", "", step))
+  if (grepl("fastqc", key)) return("FastQC")
+  if (grepl("cutadapt", key)) return("Cutadapt")
+  if (grepl("star", key)) return("STAR")
+  if (grepl("featurecounts", key)) return("featureCounts")
+  if (grepl("deseq2", key)) return("DESeq2")
+  if (grepl("gsea", key)) return("GSEA")
+  if (grepl("rsem", key)) return("RSEM")
+  if (grepl("kallisto", key)) return("Kallisto")
+  pretty_tool_name(step)
+}
 
-  project_log_dir <- file.path(dirname(project$data_dir), "log")
-  if (dir.exists(project_log_dir)) {
-    files <- list.files(project_log_dir, pattern = "^(output|error|submit)_.*\\.txt$", full.names = TRUE)
-    for (one_path in files) add_log_choice(log_label_from_path(one_path), one_path)
+log_scope_from_job <- function(job_row) {
+  sample <- trimws(job_row[["sample"]] %||% "")
+  if (nzchar(sample)) return(sample)
+  mode <- trimws(job_row[["input_mode"]] %||% "")
+  if (nzchar(mode)) return(mode)
+  target <- trimws(job_row[["target"]] %||% "")
+  if (nzchar(target)) return(basename(target))
+  "project"
+}
+
+parse_log_filename <- function(path) {
+  base <- basename(path %||% "")
+  hit <- regmatches(base, regexec("^(output|error)_([^_]+)_(.+)\\.txt$", base))[[1]]
+  if (length(hit) == 4) {
+    return(list(type = hit[[2]], tool = canonical_log_tool(hit[[3]]), scope = hit[[4]]))
+  }
+  hit <- regmatches(base, regexec("^(output|error)_([^.]*)\\.txt$", base))[[1]]
+  if (length(hit) == 3) {
+    raw <- sub("_[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]_[0-9][0-9][0-9][0-9][0-9][0-9]$", "", hit[[3]])
+    return(list(type = hit[[2]], tool = canonical_log_tool(raw), scope = "project"))
+  }
+  list(type = "", tool = "Other", scope = "project")
+}
+
+log_entries <- function(project) {
+  rows <- list()
+  add_row <- function(tool, log_type, scope, path, label = "") {
+    path <- as.character(path %||% "")
+    if (!nzchar(path) || !file.exists(path)) return(invisible(NULL))
+    rows[[length(rows) + 1]] <<- data.frame(
+      tool = canonical_log_tool(tool),
+      log_type = log_type,
+      scope = if (nzchar(scope %||% "")) scope else "project",
+      label = if (nzchar(label %||% "")) label else paste(canonical_log_tool(tool), log_type, scope),
+      path = path,
+      stringsAsFactors = FALSE
+    )
+    invisible(NULL)
   }
 
   jobs <- job_history(project)
   if (NROW(jobs)) {
     for (i in seq_len(NROW(jobs))) {
-      step <- jobs$step[i] %||% "Job"
-      job_id <- jobs$job_id[i] %||% ""
-      suffix <- if (nzchar(job_id)) paste0(" job ", job_id) else trimws(jobs$time[i] %||% "")
-      if ("stdout" %in% names(jobs) && nzchar(jobs$stdout[i] %||% "")) add_log_choice(trimws(paste(step, "output", suffix)), jobs$stdout[i])
-      if ("stderr" %in% names(jobs) && nzchar(jobs$stderr[i] %||% "")) add_log_choice(trimws(paste(step, "error", suffix)), jobs$stderr[i])
+      row <- jobs[i, , drop = FALSE]
+      scope <- log_scope_from_job(row)
+      job_id <- row[["job_id"]] %||% ""
+      suffix <- if (nzchar(job_id)) paste0("job ", job_id) else trimws(row[["time"]] %||% "")
+      if ("stdout" %in% names(row)) add_row(row[["step"]], "output", scope, row[["stdout"]], trimws(paste(row[["step"]], scope, "output", suffix)))
+      if ("stderr" %in% names(row)) add_row(row[["step"]], "error", scope, row[["stderr"]], trimws(paste(row[["step"]], scope, "error", suffix)))
     }
   }
 
-  keep <- !is.na(vals) & nzchar(vals) & file.exists(vals)
-  vals <- vals[keep]
-  vals <- vals[!duplicated(vals)]
-  if (length(vals) && !identical(tool %||% "All", "All")) {
-    label_tools <- sub("\\s+(output|error|submit).*$", "", names(vals), ignore.case = TRUE)
-    vals <- vals[normalize_log_tool(label_tools) == normalize_log_tool(tool)]
+  project_log_dir <- file.path(dirname(project$data_dir), "log")
+  if (dir.exists(project_log_dir)) {
+    files <- list.files(project_log_dir, pattern = "^(output|error)_.*\\.txt$", full.names = TRUE)
+    known <- if (length(rows)) vapply(rows, function(x) x$path[[1]], character(1)) else character(0)
+    for (one_path in setdiff(files, known)) {
+      parsed <- parse_log_filename(one_path)
+      if (nzchar(parsed$type)) add_row(parsed$tool, parsed$type, parsed$scope, one_path, log_label_from_path(one_path))
+    }
   }
-  if (length(vals) && !identical(log_type %||% "All", "All")) {
-    vals <- vals[grepl(paste0("\\b", log_type, "\\b"), names(vals), ignore.case = TRUE)]
+
+  if (!length(rows)) {
+    return(data.frame(tool = character(), log_type = character(), scope = character(), label = character(), path = character()))
   }
-  vals
+  out <- do.call(rbind, rows)
+  out <- out[!duplicated(out$path), , drop = FALSE]
+  out[order(out$tool, out$scope, out$log_type, out$label), , drop = FALSE]
 }
 
-log_tool_choices <- function(project) {
-  vals <- log_file_choices(project)
-  if (!length(vals)) return("All")
-  tools <- sub("\\s+(output|error|submit).*$", "", names(vals), ignore.case = TRUE)
-  c("All", sort(unique(tools[nzchar(tools)])))
+log_file_choices <- function(project, tool = "All", log_type = "All", scope = "All") {
+  entries <- log_entries(project)
+  if (!NROW(entries)) return(character(0))
+  if (!identical(tool %||% "All", "All")) entries <- entries[entries$tool == tool, , drop = FALSE]
+  if (!identical(log_type %||% "All", "All")) entries <- entries[entries$log_type == log_type, , drop = FALSE]
+  if (!identical(scope %||% "All", "All")) entries <- entries[entries$scope == scope, , drop = FALSE]
+  if (!NROW(entries)) return(character(0))
+  labels <- paste(entries$scope, entries$log_type, basename(entries$path), sep = " - ")
+  stats::setNames(entries$path, labels)
 }
 
 read_log_excerpt <- function(path, mode = "tail", n = 120) {
@@ -2341,17 +2380,25 @@ submit_screen_message <- function(step, sample = "", job_id = "", input_mode = "
 submit_sbatch <- function(project, step, script, args, log_name, input_mode = "", sample = "", target = "", reference = "") {
   log_dir <- file.path(dirname(project$data_dir), "log")
   dir.create(log_dir, recursive = TRUE, showWarnings = FALSE)
-  stamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
-  stdout <- file.path(log_dir, paste0("output_", log_name, "_", stamp, ".txt"))
-  stderr <- file.path(log_dir, paste0("error_", log_name, "_", stamp, ".txt"))
-  submit_log <- file.path(log_dir, paste0("submit_", log_name, "_", stamp, ".txt"))
+  tool_slug <- clean_name(log_name, clean_name(step, "job"))
+  scope <- sample %||% ""
+  if (!nzchar(scope)) scope <- input_mode %||% ""
+  if (!nzchar(scope) && nzchar(target %||% "")) scope <- basename(target)
+  if (!nzchar(scope)) scope <- "project"
+  scope_slug <- clean_name(scope, "project")
+  stdout <- file.path(log_dir, paste0("output_", tool_slug, "_", scope_slug, ".txt"))
+  stderr <- file.path(log_dir, paste0("error_", tool_slug, "_", scope_slug, ".txt"))
+  submit_log <- file.path(log_dir, paste0("submit_", tool_slug, "_", scope_slug, ".txt"))
+  cat("", file = stdout)
+  cat("", file = stderr)
   job_name <- job_name_for(project, step, sample)
-  cmd <- c("sbatch", "-J", job_name, "-e", stderr, "-o", stdout, script, args)
+  cmd <- c("sbatch", "--open-mode=append", "-J", job_name, "-e", stderr, "-o", stdout, script, args)
   writeLines(c(
     paste("time:", format(Sys.time(), "%Y-%m-%d %H:%M:%S")),
     paste("project:", project$name),
     paste("step:", step),
     paste("sample:", sample %||% ""),
+    paste("log_scope:", scope),
     paste("target:", target %||% ""),
     paste("stdout:", stdout),
     paste("stderr:", stderr),
@@ -2360,7 +2407,7 @@ submit_sbatch <- function(project, step, script, args, log_name, input_mode = ""
   if (Sys.which("sbatch") == "") {
     msg <- "ERROR: sbatch was not found. Run on the server to submit jobs."
     write(msg, submit_log, append = TRUE)
-    save_job(project, step, cmd, paste(c(msg, if (nzchar(sample)) paste("sample:", sample), if (nzchar(target)) paste("target:", target), paste("submit_log:", submit_log)), collapse = "\n"))
+    save_job(project, step, cmd, paste(c(msg, if (nzchar(sample)) paste("sample:", sample), if (nzchar(target)) paste("target:", target), paste("stdout:", stdout), paste("stderr:", stderr), paste("submit_log:", submit_log)), collapse = "\n"))
     return(msg)
   }
   wd <- rna_workdir(project)
@@ -2383,14 +2430,21 @@ submit_sbatch <- function(project, step, script, args, log_name, input_mode = ""
 submit_sbatch_wrap <- function(project, step, shell_command, log_name, input_mode = "", sample = "", target = "", reference = "", dependency_ids = character(0)) {
   log_dir <- file.path(dirname(project$data_dir), "log")
   dir.create(log_dir, recursive = TRUE, showWarnings = FALSE)
-  stamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
-  stdout <- file.path(log_dir, paste0("output_", log_name, "_", stamp, ".txt"))
-  stderr <- file.path(log_dir, paste0("error_", log_name, "_", stamp, ".txt"))
-  submit_log <- file.path(log_dir, paste0("submit_", log_name, "_", stamp, ".txt"))
-  wrap_script <- file.path(log_dir, paste0("sbatch_", log_name, "_", stamp, ".sh"))
+  tool_slug <- clean_name(log_name, clean_name(step, "job"))
+  scope <- sample %||% ""
+  if (!nzchar(scope)) scope <- input_mode %||% ""
+  if (!nzchar(scope) && nzchar(target %||% "")) scope <- basename(target)
+  if (!nzchar(scope)) scope <- "project"
+  scope_slug <- clean_name(scope, "project")
+  stdout <- file.path(log_dir, paste0("output_", tool_slug, "_", scope_slug, ".txt"))
+  stderr <- file.path(log_dir, paste0("error_", tool_slug, "_", scope_slug, ".txt"))
+  submit_log <- file.path(log_dir, paste0("submit_", tool_slug, "_", scope_slug, ".txt"))
+  wrap_script <- file.path(log_dir, paste0("sbatch_", tool_slug, "_", scope_slug, ".sh"))
+  cat("", file = stdout)
+  cat("", file = stderr)
   job_name <- job_name_for(project, step, sample)
   dep <- dependency_ids[nzchar(dependency_ids)]
-  cmd <- c("sbatch", "-J", job_name, "-e", stderr, "-o", stdout)
+  cmd <- c("sbatch", "--open-mode=append", "-J", job_name, "-e", stderr, "-o", stdout)
   if (length(dep)) cmd <- c(cmd, paste0("--dependency=afterok:", paste(dep, collapse = ":")))
   writeLines(c(
     "#!/usr/bin/env bash",
@@ -2404,6 +2458,7 @@ submit_sbatch_wrap <- function(project, step, shell_command, log_name, input_mod
     paste("project:", project$name),
     paste("step:", step),
     paste("sample:", sample %||% ""),
+    paste("log_scope:", scope),
     paste("target:", target %||% ""),
     paste("dependencies:", paste(dep, collapse = ",")),
     paste("stdout:", stdout),
@@ -2415,7 +2470,7 @@ submit_sbatch_wrap <- function(project, step, shell_command, log_name, input_mod
   if (Sys.which("sbatch") == "") {
     msg <- "ERROR: sbatch was not found. Run on the server to submit jobs."
     write(msg, submit_log, append = TRUE)
-    save_job(project, step, cmd, paste(c(msg, if (nzchar(target)) paste("target:", target), paste("submit_log:", submit_log)), collapse = "\n"))
+    save_job(project, step, cmd, paste(c(msg, if (nzchar(target)) paste("target:", target), paste("stdout:", stdout), paste("stderr:", stderr), paste("submit_log:", submit_log)), collapse = "\n"))
     return(msg)
   }
   out <- tryCatch(system2(cmd[1], cmd[-1], stdout = TRUE, stderr = TRUE), error = function(e) conditionMessage(e))
@@ -3862,8 +3917,9 @@ ui <- fluidPage(
                  h4("Project and Reference"),
                  div(class = "methods-table-wrap", table_output("methods_project_table")),
                  br(),
-                 h4("Copyable Methods Text"),
-                 tags$pre(class = "log-viewer", textOutput("methods_text")))
+                 div(class = "button-row",
+                     downloadButton("download_methods_project", "Download project/reference"),
+                     downloadButton("download_methods_tools", "Download tools/reference")))
       )
     )
   )
@@ -4655,13 +4711,23 @@ server <- function(input, output, session) {
   output$log_file_ui <- renderUI({
     progress_refresh()
     project <- current_project()
-    all_choices <- log_file_choices(project)
-    selected_type <- input$log_type_filter %||% "All"
-    choices <- log_file_choices(project, "All", selected_type)
-    if (!length(all_choices)) return(div(class = "empty-box", paste("No stdout/stderr log files were found in", file.path(dirname(project$data_dir), "log"))))
+    entries <- log_entries(project)
+    if (!NROW(entries)) return(div(class = "empty-box", paste("No stdout/stderr log files were found in", file.path(dirname(project$data_dir), "log"))))
+    tool_choices <- c("All", sort(unique(entries$tool)))
+    selected_tool <- selected_choice(input$log_tool_filter, tool_choices, tool_choices[[1]])
+    tool_entries <- if (identical(selected_tool, "All")) entries else entries[entries$tool == selected_tool, , drop = FALSE]
+    type_choices <- c("All", sort(unique(tool_entries$log_type)))
+    selected_type <- selected_choice(input$log_type_filter, type_choices, type_choices[[1]])
+    type_entries <- if (identical(selected_type, "All")) tool_entries else tool_entries[tool_entries$log_type == selected_type, , drop = FALSE]
+    scope_choices <- c("All", sort(unique(type_entries$scope)))
+    selected_scope <- selected_choice(input$log_scope_filter, scope_choices, scope_choices[[1]])
+    choices <- log_file_choices(project, selected_tool, selected_type, selected_scope)
+    scope_label <- if (selected_tool %in% c("DESeq2", "GSEA")) "Comparison" else "Sample or run"
     controls <- fluidRow(
-      column(3, selectInput("log_type_filter", "Log type", choices = c("All", "output", "error"), selected = selected_type, selectize = FALSE)),
-      column(9, if (length(choices)) selectInput("selected_log_file", "Log file", choices = choices, selectize = FALSE) else div(class = "empty-box", "No logs match this filter."))
+      column(3, selectInput("log_tool_filter", "Tool", choices = tool_choices, selected = selected_tool, selectize = FALSE)),
+      column(2, selectInput("log_type_filter", "Log type", choices = type_choices, selected = selected_type, selectize = FALSE)),
+      column(3, selectInput("log_scope_filter", scope_label, choices = scope_choices, selected = selected_scope, selectize = FALSE)),
+      column(4, if (length(choices)) selectInput("selected_log_file", "Log file", choices = choices, selected = selected_choice(input$selected_log_file, choices, choices[[1]]), selectize = FALSE) else div(class = "empty-box", "No logs match this filter."))
     )
     tagList(
       controls,
@@ -4682,9 +4748,19 @@ server <- function(input, output, session) {
     tool_reference_summary(current_project())
   }, page_length = 25, scroll_y = "560px")
 
-  output$methods_text <- renderText({
-    project_methods_text(current_project())
-  })
+  output$download_methods_project <- downloadHandler(
+    filename = function() paste0(clean_name(current_project()$name, "project"), "_project_reference.csv"),
+    content = function(file) {
+      utils::write.csv(project_methods_summary(current_project()), file, row.names = FALSE, na = "")
+    }
+  )
+
+  output$download_methods_tools <- downloadHandler(
+    filename = function() paste0(clean_name(current_project()$name, "project"), "_tools_reference.csv"),
+    content = function(file) {
+      utils::write.csv(tool_reference_summary(current_project()), file, row.names = FALSE, na = "")
+    }
+  )
 }
 
 shinyApp(ui, server, onStart = cleanup_previous_shiny_processes)
