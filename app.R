@@ -5047,10 +5047,10 @@ server <- function(input, output, session) {
         ),
         "run_cutadapt", "Submit cutadapt"),
       tool_panel("FastQC", status, "Quality reports for raw or trimmed reads.",
-        tagList(checkboxInput("fastqc_use_trimmed", "Use trimmed reads", value = trimmed_checkbox_default(p, input$fastqc_use_trimmed))),
+        tagList(checkboxInput("fastqc_use_trimmed", "Use trimmed reads", value = trimmed_checkbox_default(p, isolate(input$fastqc_use_trimmed)))),
         "run_fastqc", "Submit FastQC"),
       tool_panel("STAR", status, "Align raw or trimmed reads to the selected genome index.",
-        tagList(checkboxInput("star_use_trimmed", "Use trimmed reads", value = trimmed_checkbox_default(p, input$star_use_trimmed))),
+        tagList(checkboxInput("star_use_trimmed", "Use trimmed reads", value = trimmed_checkbox_default(p, isolate(input$star_use_trimmed)))),
         "run_star", "Submit STAR"),
       tool_panel("featureCounts", status, "Quantify STAR BAM files with the selected GTF attribute.",
         tagList(selectInput("feature_attr", "featureCounts attribute", choices = c("gene_name", "gene_id"), selected = selected_choice(input$feature_attr, c("gene_name", "gene_id"), "gene_name"), selectize = FALSE)),
@@ -5068,7 +5068,7 @@ server <- function(input, output, session) {
         tagList(selectInput("rsem_feature_attr", "RSEM feature attribute", choices = c("gene_id", "gene_name"), selected = selected_choice(input$rsem_feature_attr, c("gene_id", "gene_name"), "gene_id"), selectize = FALSE)),
         "run_rsem", "Submit RSEM"),
       tool_panel("Kallisto (optional)", status, "Optional transcript abundance quantification from raw or trimmed reads.",
-        tagList(checkboxInput("kallisto_use_trimmed", "Use trimmed reads", value = trimmed_checkbox_default(p, input$kallisto_use_trimmed))),
+        tagList(checkboxInput("kallisto_use_trimmed", "Use trimmed reads", value = trimmed_checkbox_default(p, isolate(input$kallisto_use_trimmed)))),
         "run_kallisto", "Submit Kallisto")
     )
   })
