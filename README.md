@@ -4,6 +4,18 @@ CodeSpringApp is a Shiny-based control center for running, monitoring, and revie
 
 It is designed for shared HPC environments where analyses should continue running after the browser or app is closed.
 
+## Required Companion Repository
+
+CodeSpringApp runs the web interface, but it depends on CodeSpringLab for the analysis scripts, project configs, reference settings, and embedded RNA-seq Results Explorer. Install both repositories in your home directory on the server:
+
+```bash
+cd ~
+git clone https://github.com/jamesrouse1/CodeSpringLab.git
+git clone https://github.com/jamesrouse1/CodeSpringApp.git
+```
+
+CodeSpringLab is mandatory for CodeSpringApp. The launcher expects to find it at `~/CodeSpringLab` unless you set `CSL_CODESPRINGLAB_ROOT` manually.
+
 ## Run On The Server
 
 Use the launcher script. It checks required packages, finds an open server port, starts Shiny, and prints the exact SSH tunnel command to run from your laptop.
