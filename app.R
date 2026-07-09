@@ -3583,11 +3583,9 @@ tool_panel <- function(step, status, description, controls, button_id, button_la
         uiOutput(tool_message_output_id(step)),
         if (step %in% sample_level_pipeline_steps()) uiOutput(tool_progress_ui_output_id(step)) else NULL,
         div(class = "tool-cancel-zone",
-            checkboxInput(tool_cancel_confirm_id(step), paste("Confirm cancel active", step, "jobs"), value = FALSE),
             actionButton(tool_cancel_button_id(step), "Cancel active jobs", class = "btn-danger btn-sm")
         ),
         div(class = "tool-delete-zone",
-            checkboxInput(tool_delete_data_confirm_id(step), paste("Confirm delete", step, "data outputs"), value = FALSE),
             actionButton(tool_delete_data_button_id(step), "Delete step data", class = "btn-danger btn-sm")
         )
     )
@@ -3828,11 +3826,7 @@ body { background:#eef3f8; color:#17202f; }
 .run-message-alert.active { background:#fff4d6; border-color:#f0c36d; color:#7c3d00; }
 .tool-message-alert { margin:12px 0; }
 .tool-cancel-zone { margin-top:12px; padding-top:12px; border-top:1px dashed #d8dde8; display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
-.tool-cancel-zone .form-group { margin:0; }
-.tool-cancel-zone label { color:#8a2f24; font-weight:700; }
 .tool-delete-zone { margin-top:8px; padding:10px 12px; border:1px solid #f0c1ba; border-radius:8px; background:#fff7f5; display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
-.tool-delete-zone .form-group { margin:0; }
-.tool-delete-zone label { color:#8a2f24; font-weight:800; }
 .tool-progress-wrap { margin-top:16px; border:1px solid #d8dde8; border-radius:8px; overflow:hidden; background:#f8fafc; }
 .tool-progress-title { padding:12px 14px; font-size:13px; font-weight:800; color:#304a66; text-transform:uppercase; letter-spacing:.04em; border-bottom:1px solid #d8dde8; background:#edf4fb; }
 .tool-progress-table { width:100%; border-collapse:separate; border-spacing:0; table-layout:fixed; }
@@ -5229,25 +5223,57 @@ server <- function(input, output, session) {
       delete_button_id <- tool_delete_data_button_id(this_step)
       delete_confirm_id <- tool_delete_data_confirm_id(this_step)
       observeEvent(input[[button_id]], {
-        if (!isTRUE(input[[confirm_id]])) {
-          run_message(paste("Check the confirmation box before canceling active", this_step, "jobs."))
-          return(invisible(NULL))
-        }
+        p <- current_project()
+        showModal(modalDialog(
+          title = paste("Cancel active", this_step, "jobs?"),
+          tags$p("This will cancel tracked active SLURM jobs for this step in the selected project only."),
+          tags$ul(
+            tags$li(tags$strong("Project: "), p$label %||% p$name),
+            tags$li(tags$strong("Step: "), this_step)
+          ),
+          tags$p(tags$strong("Running jobs will stop and may leave partial outputs.")),
+          footer = tagList(
+            modalButton("Keep jobs running"),
+            actionButton(confirm_id, "Yes, cancel active jobs", class = "btn-danger")
+          ),
+          easyClose = TRUE
+        ))
+      }, ignoreInit = TRUE)
+      observeEvent(input[[confirm_id]], {
+        removeModal()
         run_message(paste("Canceling active", this_step, "jobs..."))
+        set_tool_message(this_step, paste("Canceling active", this_step, "jobs..."))
         msg <- tryCatch(cancel_active_step_jobs(current_project(), this_step), error = function(e) paste("ERROR canceling", this_step, "jobs:", conditionMessage(e)))
         run_message(msg)
-        updateCheckboxInput(session, confirm_id, value = FALSE)
+        set_tool_message(this_step, msg)
         safe_refresh_progress_now("cancel")
       }, ignoreInit = TRUE)
       observeEvent(input[[delete_button_id]], {
-        if (!isTRUE(input[[delete_confirm_id]])) {
-          run_message(paste("Check the confirmation box before deleting", this_step, "data outputs."))
-          return(invisible(NULL))
-        }
+        p <- current_project()
+        paths <- unique(step_data_paths(p, this_step))
+        showModal(modalDialog(
+          title = paste("Delete", this_step, "data outputs?"),
+          tags$p("This will delete this step's output data for the selected project. It will not delete the whole project folder."),
+          tags$ul(
+            tags$li(tags$strong("Project: "), p$label %||% p$name),
+            tags$li(tags$strong("Step: "), this_step)
+          ),
+          if (length(paths)) tagList(tags$p("Data paths:"), tags$ul(lapply(paths, function(path) tags$li(code(path))))) else tags$p("No expected data paths were found for this step."),
+          tags$p(tags$strong("This cannot be undone.")),
+          footer = tagList(
+            modalButton("Cancel"),
+            actionButton(delete_confirm_id, "Yes, delete step data", class = "btn-danger")
+          ),
+          easyClose = TRUE
+        ))
+      }, ignoreInit = TRUE)
+      observeEvent(input[[delete_confirm_id]], {
+        removeModal()
         run_message(paste("Deleting", this_step, "data outputs..."))
+        set_tool_message(this_step, paste("Deleting", this_step, "data outputs..."))
         msg <- tryCatch(delete_step_data(current_project(), this_step), error = function(e) paste("ERROR deleting", this_step, "data outputs:", conditionMessage(e)))
         run_message(msg)
-        updateCheckboxInput(session, delete_confirm_id, value = FALSE)
+        set_tool_message(this_step, msg)
         safe_refresh_progress_now("delete data")
       }, ignoreInit = TRUE)
     })
