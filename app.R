@@ -927,6 +927,55 @@ cancel_active_step_jobs <- function(project, step) {
   msg
 }
 
+step_data_paths <- function(project, step) {
+  data_dir <- project$data_dir
+  counts_dir <- file.path(data_dir, "counts")
+  count_matches <- function(pattern) {
+    if (!dir.exists(counts_dir)) return(character(0))
+    list.files(counts_dir, pattern = pattern, full.names = TRUE)
+  }
+  switch(canonical_job_step(step),
+    "FastQC" = c(file.path(data_dir, "fastqc"), file.path(data_dir, "fastqc_cutadapt")),
+    "Cutadapt" = file.path(data_dir, "cutadapt"),
+    "STAR" = file.path(data_dir, "star"),
+    "featureCounts" = c(
+      file.path(data_dir, "featurecounts"),
+      file.path(counts_dir, "count_matrix.txt"),
+      file.path(counts_dir, "featurecounts_summary.txt")
+    ),
+    "DESeq2" = file.path(data_dir, "deseq2"),
+    "GSEA" = file.path(data_dir, "gseapy"),
+    "RSEM (optional)" = c(file.path(data_dir, "rsem"), count_matches("^rsem_.*")),
+    "Kallisto (optional)" = c(file.path(data_dir, "kallisto"), count_matches("^kallisto_.*")),
+    character(0)
+  )
+}
+
+delete_step_data <- function(project, step) {
+  data_dir <- project$data_dir %||% ""
+  if (!nzchar(data_dir) || !dir.exists(data_dir)) {
+    return("Project data folder does not exist.")
+  }
+  data_root <- normalizePath(data_dir, winslash = "/", mustWork = TRUE)
+  paths <- unique(step_data_paths(project, step))
+  paths <- paths[nzchar(paths) & file.exists(paths)]
+  if (!length(paths)) return(paste("No existing data outputs found for", step, "in this project."))
+  normalized <- normalizePath(paths, winslash = "/", mustWork = TRUE)
+  inside <- startsWith(normalized, paste0(sub("/+$", "", data_root), "/"))
+  if (any(!inside)) {
+    blocked <- paste(normalized[!inside], collapse = "\n")
+    return(paste("ERROR: Refusing to delete paths outside the project data folder:", blocked, sep = "\n"))
+  }
+  ok <- unlink(normalized, recursive = TRUE, force = TRUE)
+  still_exists <- normalized[file.exists(normalized)]
+  deleted <- setdiff(normalized, still_exists)
+  msg <- paste0("Deleted ", length(deleted), " ", step, " data path", if (length(deleted) == 1) "" else "s", ".")
+  if (length(deleted)) msg <- paste(msg, paste(deleted, collapse = "\n"), sep = "\n")
+  if (length(still_exists)) msg <- paste(msg, "Still exists after delete:", paste(still_exists, collapse = "\n"), sep = "\n")
+  if (!is.null(ok) && ok != 0) msg <- paste(msg, "unlink returned a non-zero status.", sep = "\n")
+  msg
+}
+
 job_filter_choices_from_jobs <- function(jobs) {
   steps <- if (NROW(jobs) && "step" %in% names(jobs)) unique(as.character(jobs$step)) else character(0)
   steps <- steps[!is.na(steps) & nzchar(steps)]
@@ -1711,6 +1760,14 @@ tool_cancel_button_id <- function(step) {
 
 tool_cancel_confirm_id <- function(step) {
   paste0("confirm_cancel_", tolower(gsub("[^A-Za-z0-9]+", "_", step)))
+}
+
+tool_delete_data_button_id <- function(step) {
+  paste0("delete_data_", tolower(gsub("[^A-Za-z0-9]+", "_", step)))
+}
+
+tool_delete_data_confirm_id <- function(step) {
+  paste0("confirm_delete_data_", tolower(gsub("[^A-Za-z0-9]+", "_", step)))
 }
 
 sample_level_pipeline_steps <- function() {
@@ -2750,6 +2807,11 @@ tool_panel <- function(step, status, description, controls, button_id, button_la
             checkboxInput(tool_cancel_confirm_id(step), paste("Confirm cancel active", step, "jobs"), value = FALSE),
             actionButton(tool_cancel_button_id(step), "Cancel active jobs", class = "btn-danger btn-sm")
         ),
+        div(class = "tool-delete-zone",
+            div(class = "tool-delete-title", "Danger zone"),
+            checkboxInput(tool_delete_data_confirm_id(step), paste("Confirm delete", step, "data outputs"), value = FALSE),
+            actionButton(tool_delete_data_button_id(step), "Delete step data", class = "btn-danger btn-sm")
+        ),
         if (step %in% sample_level_pipeline_steps()) uiOutput(tool_progress_ui_output_id(step)) else NULL
     )
   )
@@ -2963,6 +3025,10 @@ body { background:#eef3f8; color:#17202f; }
 .tool-cancel-zone { margin-top:12px; padding-top:12px; border-top:1px dashed #d8dde8; display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
 .tool-cancel-zone .form-group { margin:0; }
 .tool-cancel-zone label { color:#8a2f24; font-weight:700; }
+.tool-delete-zone { margin-top:8px; padding:10px 12px; border:1px solid #f0c1ba; border-radius:8px; background:#fff7f5; display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+.tool-delete-title { width:100%; color:#8a2f24; font-size:12px; font-weight:900; text-transform:uppercase; letter-spacing:.05em; }
+.tool-delete-zone .form-group { margin:0; }
+.tool-delete-zone label { color:#8a2f24; font-weight:800; }
 .tool-progress-wrap { margin-top:16px; border:1px solid #d8dde8; border-radius:8px; overflow:hidden; background:#f8fafc; }
 .tool-progress-title { padding:12px 14px; font-size:13px; font-weight:800; color:#304a66; text-transform:uppercase; letter-spacing:.04em; border-bottom:1px solid #d8dde8; background:#edf4fb; }
 .tool-progress-table { width:100%; border-collapse:separate; border-spacing:0; table-layout:fixed; }
@@ -4242,6 +4308,8 @@ server <- function(input, output, session) {
       this_step <- step
       button_id <- tool_cancel_button_id(this_step)
       confirm_id <- tool_cancel_confirm_id(this_step)
+      delete_button_id <- tool_delete_data_button_id(this_step)
+      delete_confirm_id <- tool_delete_data_confirm_id(this_step)
       observeEvent(input[[button_id]], {
         if (!isTRUE(input[[confirm_id]])) {
           run_message(paste("Check the confirmation box before canceling active", this_step, "jobs."))
@@ -4252,6 +4320,17 @@ server <- function(input, output, session) {
         run_message(msg)
         updateCheckboxInput(session, confirm_id, value = FALSE)
         safe_refresh_progress_now("cancel")
+      }, ignoreInit = TRUE)
+      observeEvent(input[[delete_button_id]], {
+        if (!isTRUE(input[[delete_confirm_id]])) {
+          run_message(paste("Check the confirmation box before deleting", this_step, "data outputs."))
+          return(invisible(NULL))
+        }
+        run_message(paste("Deleting", this_step, "data outputs..."))
+        msg <- tryCatch(delete_step_data(current_project(), this_step), error = function(e) paste("ERROR deleting", this_step, "data outputs:", conditionMessage(e)))
+        run_message(msg)
+        updateCheckboxInput(session, delete_confirm_id, value = FALSE)
+        safe_refresh_progress_now("delete data")
       }, ignoreInit = TRUE)
     })
   }
