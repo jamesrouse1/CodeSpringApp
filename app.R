@@ -908,17 +908,30 @@ job_filter_choices_from_jobs <- function(jobs) {
   c("All", ordered, extra)
 }
 
+canonical_job_step <- function(x) {
+  x <- trimws(as.character(x %||% ""))
+  if (!length(x)) return(character(0))
+  x_norm <- gsub("[^a-z0-9]+", "", tolower(gsub("\\(optional\\)", "", x)))
+  map <- c(
+    fastqc = "FastQC",
+    cutadapt = "Cutadapt",
+    star = "STAR",
+    featurecounts = "featureCounts",
+    deseq2 = "DESeq2",
+    gsea = "GSEA",
+    gseapy = "GSEA",
+    rsem = "RSEM (optional)",
+    kallisto = "Kallisto (optional)"
+  )
+  out <- unname(map[x_norm])
+  out[is.na(out)] <- x[is.na(out)]
+  out
+}
+
 filter_jobs_by_tool <- function(jobs, tool) {
   tool <- trimws(as.character(tool %||% "All"))
   if (!NROW(jobs) || identical(tool, "All") || !nzchar(tool) || !"step" %in% names(jobs)) return(jobs)
-  normalize_tool <- function(x) {
-    x <- tolower(trimws(as.character(x %||% "")))
-    x <- gsub("\\(optional\\)", "", x)
-    gsub("[^a-z0-9]+", "", x)
-  }
-  step_norm <- normalize_tool(jobs$step)
-  tool_norm <- normalize_tool(tool)
-  jobs[step_norm == tool_norm | startsWith(step_norm, tool_norm) | startsWith(tool_norm, step_norm), , drop = FALSE]
+  jobs[canonical_job_step(jobs$step) == canonical_job_step(tool), , drop = FALSE]
 }
 
 empty_job_filter_message <- function(jobs, original_jobs, tool) {
