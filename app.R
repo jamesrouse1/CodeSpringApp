@@ -851,6 +851,14 @@ count_files <- function(path, pattern) {
   length(list.files(path, pattern = pattern, recursive = TRUE, full.names = TRUE))
 }
 
+cutadapt_outputs_available <- function(project) {
+  count_files(file.path(project$data_dir, "cutadapt"), fastq_suffix_regex) > 0
+}
+
+trimmed_checkbox_default <- function(project, current_value) {
+  if (is.null(current_value)) cutadapt_outputs_available(project) else isTRUE(current_value)
+}
+
 extract_job_id <- function(x) {
   m <- regexpr("job_id:[[:space:]]*[0-9]+", x)
   if (m >= 0) return(sub("job_id:[[:space:]]*", "", regmatches(x, m)))
@@ -2497,7 +2505,7 @@ job_name_for <- function(project, step, sample = "") {
 project_job_name_prefix <- function(project) {
   raw <- paste("csl", project$name, sep = "_")
   raw <- gsub("[^A-Za-z0-9_]+", "_", raw)
-  gsub("_+", "_", raw)
+  paste0(gsub("_+", "_", raw), "_")
 }
 
 rna_workdir <- function(project) {
@@ -3524,6 +3532,7 @@ tool_panel <- function(step, status, description, controls, button_id, button_la
     div(class = "tool-body",
         controls,
         actionButton(button_id, button_label, class = "btn-primary"),
+        if (step %in% sample_level_pipeline_steps()) uiOutput(tool_progress_ui_output_id(step)) else NULL,
         div(class = "tool-cancel-zone",
             checkboxInput(tool_cancel_confirm_id(step), paste("Confirm cancel active", step, "jobs"), value = FALSE),
             actionButton(tool_cancel_button_id(step), "Cancel active jobs", class = "btn-danger btn-sm")
@@ -3531,8 +3540,7 @@ tool_panel <- function(step, status, description, controls, button_id, button_la
         div(class = "tool-delete-zone",
             checkboxInput(tool_delete_data_confirm_id(step), paste("Confirm delete", step, "data outputs"), value = FALSE),
             actionButton(tool_delete_data_button_id(step), "Delete step data", class = "btn-danger btn-sm")
-        ),
-        if (step %in% sample_level_pipeline_steps()) uiOutput(tool_progress_ui_output_id(step)) else NULL
+        )
     )
   )
 }
@@ -4681,6 +4689,12 @@ server <- function(input, output, session) {
     write_last_project_id(input$project_id %||% "__new__")
     native_registered_id("")
     native_results_loaded_project("")
+    p <- current_project()
+    if (cutadapt_outputs_available(p)) {
+      updateCheckboxInput(session, "fastqc_use_trimmed", value = TRUE)
+      updateCheckboxInput(session, "star_use_trimmed", value = TRUE)
+      updateCheckboxInput(session, "kallisto_use_trimmed", value = TRUE)
+    }
     safe_refresh_progress_now("project switch")
   }, ignoreInit = FALSE)
 
@@ -4951,10 +4965,10 @@ server <- function(input, output, session) {
         ),
         "run_cutadapt", "Submit cutadapt"),
       tool_panel("FastQC", status, "Quality reports for raw or trimmed reads.",
-        tagList(checkboxInput("fastqc_use_trimmed", "Use trimmed reads", value = if (is.null(input$fastqc_use_trimmed)) FALSE else isTRUE(input$fastqc_use_trimmed))),
+        tagList(checkboxInput("fastqc_use_trimmed", "Use trimmed reads", value = trimmed_checkbox_default(p, input$fastqc_use_trimmed))),
         "run_fastqc", "Submit FastQC"),
       tool_panel("STAR", status, "Align raw or trimmed reads to the selected genome index.",
-        tagList(checkboxInput("star_use_trimmed", "Use trimmed reads", value = if (is.null(input$star_use_trimmed)) TRUE else isTRUE(input$star_use_trimmed))),
+        tagList(checkboxInput("star_use_trimmed", "Use trimmed reads", value = trimmed_checkbox_default(p, input$star_use_trimmed))),
         "run_star", "Submit STAR"),
       tool_panel("featureCounts", status, "Quantify STAR BAM files with the selected GTF attribute.",
         tagList(selectInput("feature_attr", "featureCounts attribute", choices = c("gene_name", "gene_id"), selected = selected_choice(input$feature_attr, c("gene_name", "gene_id"), "gene_name"), selectize = FALSE)),
@@ -4972,7 +4986,7 @@ server <- function(input, output, session) {
         tagList(selectInput("rsem_feature_attr", "RSEM feature attribute", choices = c("gene_id", "gene_name"), selected = selected_choice(input$rsem_feature_attr, c("gene_id", "gene_name"), "gene_id"), selectize = FALSE)),
         "run_rsem", "Submit RSEM"),
       tool_panel("Kallisto (optional)", status, "Optional transcript abundance quantification from raw or trimmed reads.",
-        tagList(checkboxInput("kallisto_use_trimmed", "Use trimmed reads", value = if (is.null(input$kallisto_use_trimmed)) TRUE else isTRUE(input$kallisto_use_trimmed))),
+        tagList(checkboxInput("kallisto_use_trimmed", "Use trimmed reads", value = trimmed_checkbox_default(p, input$kallisto_use_trimmed))),
         "run_kallisto", "Submit Kallisto")
     )
   })
@@ -5046,6 +5060,9 @@ server <- function(input, output, session) {
       finish_submit_refresh()
     } else {
       run_submission("Cutadapt", submit_cutadapt_jobs(current_project(), adapter1, adapter2, input$cutadapt_min_length), "raw reads")
+      updateCheckboxInput(session, "fastqc_use_trimmed", value = TRUE)
+      updateCheckboxInput(session, "star_use_trimmed", value = TRUE)
+      updateCheckboxInput(session, "kallisto_use_trimmed", value = TRUE)
     }
   })
   observeEvent(input$run_star, {
