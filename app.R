@@ -52,6 +52,42 @@ render_csl_table <- function(expr, page_length = 50, editable = FALSE, scroll_y 
   }
 }
 
+render_methods_table <- function(expr, page_length = 25, scroll_y = "520px") {
+  if (DT_AVAILABLE) {
+    DT::renderDataTable({
+      df <- expr
+      if (!NROW(df)) df <- data.frame()
+      widths <- c("90px", "190px", "360px", "260px", "320px")
+      column_defs <- lapply(seq_len(min(NCOL(df), length(widths))), function(i) {
+        list(width = widths[[i]], targets = i - 1)
+      })
+      DT::datatable(
+        df,
+        rownames = FALSE,
+        escape = TRUE,
+        class = "compact stripe hover methods-dt",
+        options = list(
+          scrollX = FALSE,
+          scrollY = scroll_y,
+          pageLength = page_length,
+          lengthMenu = list(c(10, 25, 50, -1), c("10", "25", "50", "All")),
+          paging = TRUE,
+          pagingType = "full_numbers",
+          dom = "lfrtip",
+          autoWidth = FALSE,
+          columnDefs = column_defs
+        )
+      )
+    }, server = FALSE)
+  } else {
+    renderTable({
+      df <- expr
+      if (!NROW(df)) return(data.frame())
+      df
+    }, striped = TRUE, bordered = TRUE, spacing = "s")
+  }
+}
+
 `%||%` <- function(x, y) {
   if (is.null(x) || length(x) == 0 || (length(x) == 1 && is.na(x)) || !nzchar(as.character(x)[1])) y else x
 }
@@ -3249,6 +3285,13 @@ body { background:#eef3f8; color:#17202f; }
 .project-step-chip.running { background:#fff4d6; color:#7c3d00; border-color:#f0c36d; }
 .project-step-chip.cancelled { background:#fff0ed; color:#8a2f24; border-color:#e5a397; }
 .project-step-chip.complete { background:#def7e8; color:#0b6b3a; border-color:#8fd8ad; }
+.methods-table-wrap { background:white; border:1px solid #d8dde8; border-radius:8px; padding:12px; overflow:visible; }
+.methods-table-wrap .dataTables_wrapper { width:100%; overflow:visible; }
+.methods-table-wrap table.dataTable { width:100% !important; table-layout:fixed; }
+.methods-table-wrap table.dataTable th,
+.methods-table-wrap table.dataTable td { white-space:normal !important; overflow-wrap:anywhere; word-break:break-word; vertical-align:top; line-height:1.35; }
+.methods-table-wrap table.dataTable td { padding-top:10px; padding-bottom:10px; }
+.methods-table-wrap .dataTables_scrollBody { overflow-x:hidden !important; }
 .adaptive-table-note { color:#657084; font-size:13px; font-weight:700; margin:0 0 10px 0; }
 .resource-strip { display:grid; grid-template-columns:minmax(280px,.85fr) minmax(460px,1.45fr); gap:16px; align-items:stretch; margin:12px 0 18px 0; }
 .resource-card { background:white; border:1px solid #d8dde8; border-radius:8px; padding:16px; }
@@ -3813,11 +3856,11 @@ ui <- fluidPage(
         tabPanel("Methods", br(),
                  h3("Methods Documentation"),
                  tags$p(class = "muted", "Project-level methods, reference genome, tool usage, and detected versions where available."),
-                 h4("Project and Reference"),
-                 table_output("methods_project_table"),
-                 br(),
                  h4("Tools and References"),
-                 table_output("methods_tools_table"),
+                 div(class = "methods-table-wrap", table_output("methods_tools_table")),
+                 br(),
+                 h4("Project and Reference"),
+                 div(class = "methods-table-wrap", table_output("methods_project_table")),
                  br(),
                  h4("Copyable Methods Text"),
                  tags$pre(class = "log-viewer", textOutput("methods_text")))
@@ -4631,13 +4674,13 @@ server <- function(input, output, session) {
     read_log_excerpt(input$selected_log_file, input$log_view_mode %||% "tail")
   })
 
-  output$methods_project_table <- render_csl_table({
+  output$methods_project_table <- render_methods_table({
     project_methods_summary(current_project())
-  }, page_length = 25, scroll_y = "360px")
+  }, page_length = 25, scroll_y = "320px")
 
-  output$methods_tools_table <- render_csl_table({
+  output$methods_tools_table <- render_methods_table({
     tool_reference_summary(current_project())
-  }, page_length = 25, scroll_y = "520px")
+  }, page_length = 25, scroll_y = "560px")
 
   output$methods_text <- renderText({
     project_methods_text(current_project())
