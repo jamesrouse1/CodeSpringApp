@@ -2410,7 +2410,7 @@ submit_screen_message <- function(step, sample = "", job_id = "", input_mode = "
   paste(lines, collapse = "\n")
 }
 
-submit_sbatch <- function(project, step, script, args, log_name, input_mode = "", sample = "", target = "", reference = "") {
+submit_sbatch <- function(project, step, script, args, log_name, input_mode = "", sample = "", target = "", reference = "", dependency_ids = character(0)) {
   log_dir <- file.path(dirname(project$data_dir), "log")
   dir.create(log_dir, recursive = TRUE, showWarnings = FALSE)
   tool_slug <- clean_name(log_name, clean_name(step, "job"))
@@ -2425,7 +2425,10 @@ submit_sbatch <- function(project, step, script, args, log_name, input_mode = ""
   cat("", file = stdout)
   cat("", file = stderr)
   job_name <- job_name_for(project, step, sample)
-  cmd <- c("sbatch", "--open-mode=append", "-J", job_name, "-e", stderr, "-o", stdout, script, args)
+  dep <- dependency_ids[nzchar(dependency_ids)]
+  cmd <- c("sbatch", "--open-mode=append", "-J", job_name, "-e", stderr, "-o", stdout)
+  if (length(dep)) cmd <- c(cmd, paste0("--dependency=afterok:", paste(dep, collapse = ":")))
+  cmd <- c(cmd, script, args)
   writeLines(c(
     paste("time:", format(Sys.time(), "%Y-%m-%d %H:%M:%S")),
     paste("project:", project$name),
@@ -2433,6 +2436,7 @@ submit_sbatch <- function(project, step, script, args, log_name, input_mode = ""
     paste("sample:", sample %||% ""),
     paste("log_scope:", scope),
     paste("target:", target %||% ""),
+    paste("dependencies:", paste(dep, collapse = ",")),
     paste("stdout:", stdout),
     paste("stderr:", stderr),
     paste("command:", paste(shQuote(cmd), collapse = " "))
@@ -2457,7 +2461,7 @@ submit_sbatch <- function(project, step, script, args, log_name, input_mode = ""
   if (!nzchar(job_id)) {
     return(paste("ERROR: sbatch did not return a job ID for", step, "\nSubmit log:", submit_log, "\nsbatch response:\n", out_text))
   }
-  submit_screen_message(step, sample, job_id, input_mode)
+  submit_screen_message(step, sample, job_id, input_mode, dep)
 }
 
 submit_sbatch_wrap <- function(project, step, shell_command, log_name, input_mode = "", sample = "", target = "", reference = "", dependency_ids = character(0)) {
@@ -2545,8 +2549,24 @@ write_featurecounts_matrix_script <- function(project) {
     "mat[is.na(mat)] <- 0",
     "names(mat)[1] <- 'Geneid'",
     "write.table(mat, file=file.path(counts_dir, 'count_matrix.txt'), sep='\\t', row.names=FALSE, quote=FALSE)",
-    "summary <- data.frame(sample=samples, total_counts=vapply(parts, function(x) sum(x$value, na.rm=TRUE), numeric(1)), stringsAsFactors=FALSE)",
-    "write.table(summary, file=file.path(counts_dir, 'featurecounts_summary.txt'), sep='\\t', row.names=FALSE, quote=FALSE)"
+    "read_summary <- function(count_path) {",
+    "  summary_path <- paste0(count_path, '.summary')",
+    "  sample <- sub('_counts\\\\.txt$', '', basename(count_path))",
+    "  if (!file.exists(summary_path)) {",
+    "    return(data.frame(Status='Assigned', value=sum(read_one(count_path)$value, na.rm=TRUE), sample=sample, stringsAsFactors=FALSE))",
+    "  }",
+    "  s <- read.table(summary_path, sep='\\t', header=TRUE, quote='\"', comment.char='', check.names=FALSE)",
+    "  if (!nrow(s)) return(NULL)",
+    "  names(s)[1] <- 'Status'",
+    "  value_col <- setdiff(names(s), 'Status')[1]",
+    "  data.frame(Status=s$Status, value=suppressWarnings(as.numeric(s[[value_col]])), sample=sample, stringsAsFactors=FALSE)",
+    "}",
+    "summary_parts <- Filter(Negate(is.null), lapply(files, read_summary))",
+    "if (length(summary_parts)) {",
+    "  summary <- Reduce(function(a,b) merge(a,b, by='Status', all=TRUE), lapply(summary_parts, function(x) { out <- x[, c('Status','value')]; names(out)[2] <- unique(x$sample)[1]; out }))",
+    "  summary[is.na(summary)] <- 0",
+    "  write.table(summary, file=file.path(counts_dir, 'featurecounts_summary.txt'), sep='\\t', row.names=FALSE, quote=FALSE)",
+    "}"
   )
   writeLines(lines, script)
   script
@@ -2578,9 +2598,74 @@ build_featurecounts_matrix_now <- function(project) {
   mat[is.na(mat)] <- 0
   names(mat)[1] <- "Geneid"
   utils::write.table(mat, file = file.path(counts_dir, "count_matrix.txt"), sep = "\t", row.names = FALSE, quote = FALSE)
-  summary <- data.frame(sample = samples, total_counts = vapply(parts, function(x) sum(x$value, na.rm = TRUE), numeric(1)), stringsAsFactors = FALSE)
-  utils::write.table(summary, file = file.path(counts_dir, "featurecounts_summary.txt"), sep = "\t", row.names = FALSE, quote = FALSE)
+  read_summary <- function(count_path) {
+    summary_path <- paste0(count_path, ".summary")
+    sample <- sub("_counts\\.txt$", "", basename(count_path))
+    if (!file.exists(summary_path)) {
+      return(data.frame(Status = "Assigned", value = sum(read_one(count_path)$value, na.rm = TRUE), sample = sample, stringsAsFactors = FALSE))
+    }
+    s <- utils::read.table(summary_path, sep = "\t", header = TRUE, quote = "\"", comment.char = "", check.names = FALSE)
+    if (!NROW(s)) return(NULL)
+    names(s)[1] <- "Status"
+    value_col <- setdiff(names(s), "Status")[1]
+    data.frame(Status = s$Status, value = suppressWarnings(as.numeric(s[[value_col]])), sample = sample, stringsAsFactors = FALSE)
+  }
+  summary_parts <- Filter(Negate(is.null), lapply(files, read_summary))
+  if (length(summary_parts)) {
+    summary <- Reduce(function(a, b) merge(a, b, by = "Status", all = TRUE), lapply(summary_parts, function(x) {
+      out <- x[, c("Status", "value")]
+      names(out)[2] <- unique(x$sample)[1]
+      out
+    }))
+    summary[is.na(summary)] <- 0
+    utils::write.table(summary, file = file.path(counts_dir, "featurecounts_summary.txt"), sep = "\t", row.names = FALSE, quote = FALSE)
+  }
   file.path(counts_dir, "count_matrix.txt")
+}
+
+write_gene_name_count_matrix_script <- function(project) {
+  log_dir <- file.path(dirname(project$data_dir), "log")
+  dir.create(log_dir, recursive = TRUE, showWarnings = FALSE)
+  script <- file.path(log_dir, "build_gene_name_count_matrix.R")
+  lines <- c(
+    "args <- commandArgs(TRUE)",
+    "count_matrix <- args[[1]]",
+    "gtf <- args[[2]]",
+    "out_file <- args[[3]]",
+    "if (!file.exists(count_matrix)) stop('Count matrix not found: ', count_matrix)",
+    "if (!file.exists(gtf)) stop('GTF not found: ', gtf)",
+    "x <- read.table(count_matrix, sep='\\t', header=TRUE, quote='\"', comment.char='', check.names=FALSE)",
+    "gene_col <- intersect(c('Geneid','gene_id','GeneID'), names(x))[1]",
+    "if (is.na(gene_col)) gene_col <- names(x)[1]",
+    "ids <- sub('\\\\..*$', '', as.character(x[[gene_col]]))",
+    "map <- new.env(parent=emptyenv())",
+    "con <- file(gtf, open='r')",
+    "on.exit(close(con), add=TRUE)",
+    "repeat {",
+    "  lines <- readLines(con, n=100000, warn=FALSE)",
+    "  if (!length(lines)) break",
+    "  lines <- lines[grepl('\\\\tgene\\\\t', lines, fixed=FALSE)]",
+    "  if (!length(lines)) next",
+    "  gid <- sub('.*gene_id \"([^\"]+)\".*', '\\\\1', lines)",
+    "  gname <- sub('.*gene_name \"([^\"]+)\".*', '\\\\1', lines)",
+    "  keep <- gid != lines & gname != lines & nzchar(gid) & nzchar(gname)",
+    "  if (any(keep)) {",
+    "    gid <- sub('\\\\..*$', '', gid[keep])",
+    "    gname <- gname[keep]",
+    "    for (i in seq_along(gid)) if (!exists(gid[[i]], envir=map, inherits=FALSE)) assign(gid[[i]], gname[[i]], envir=map)",
+    "  }",
+    "}",
+    "gene_name <- vapply(ids, function(id) if (exists(id, envir=map, inherits=FALSE)) get(id, envir=map, inherits=FALSE) else id, character(1))",
+    "sample_cols <- setdiff(names(x), gene_col)",
+    "for (col in sample_cols) x[[col]] <- suppressWarnings(as.numeric(x[[col]]))",
+    "agg <- aggregate(x[, sample_cols, drop=FALSE], by=list(gene_name), FUN=sum, na.rm=TRUE)",
+    "names(agg)[1] <- 'Geneid'",
+    "agg <- agg[order(agg$Geneid), , drop=FALSE]",
+    "dir.create(dirname(out_file), recursive=TRUE, showWarnings=FALSE)",
+    "write.table(agg, out_file, sep='\\t', quote=FALSE, row.names=FALSE)"
+  )
+  writeLines(lines, script)
+  script
 }
 
 write_quant_matrix_script <- function(project, tool = c("rsem", "kallisto")) {
@@ -2837,14 +2922,27 @@ featurecounts_matrix_job_active <- function(jobs, matrix_path) {
   NROW(hit) > 0 && any(hit$slurm_state %in% active_states)
 }
 
-submit_deseq2_job <- function(project, compare_col, reference, comparison, redundant = "NoRedundant") {
-  outdir <- file.path(project$data_dir, "deseq2")
+submit_deseq2_job <- function(project, compare_col, reference, comparison, redundant = "NoRedundant", gene_name_counts = FALSE) {
+  outdir <- file.path(project$data_dir, if (isTRUE(gene_name_counts)) "deseq2_gene_name" else "deseq2")
   dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
   script <- file.path(SCRIPTS_DIR, "DESeq2", "qsub_deseq2.sh")
   rscript <- file.path(SCRIPTS_DIR, "DESeq2", "DESeq2.R")
   count_matrix <- file.path(project$data_dir, "counts", "count_matrix.txt")
+  input_mode <- format_comparison_label(compare_col, comparison, reference)
+  dependency_ids <- character(0)
+  if (isTRUE(gene_name_counts)) {
+    res <- genome_resources(project)
+    gene_matrix <- file.path(project$data_dir, "counts", "count_matrix_gene_name_aggregated.txt")
+    build_script <- write_gene_name_count_matrix_script(project)
+    build_cmd <- paste("Rscript", shQuote(build_script), shQuote(count_matrix), shQuote(res$gtf), shQuote(gene_matrix))
+    build_msg <- submit_sbatch_wrap(project, "DESeq2", build_cmd, "deseq2_gene_name_count_matrix", "gene-name aggregated count matrix", target = gene_matrix, reference = res$gtf)
+    build_id <- extract_job_id(build_msg)
+    dependency_ids <- build_id[nzchar(build_id)]
+    count_matrix <- gene_matrix
+    input_mode <- paste(input_mode, "gene-name aggregated counts", sep = " - ")
+  }
   design_matrix <- deseq_design_for_column(project, compare_col)
-  submit_sbatch(project, "DESeq2", script, c(rscript, count_matrix, design_matrix, outdir, reference, comparison, redundant, project$name), "deseq2", format_comparison_label(compare_col, comparison, reference))
+  submit_sbatch(project, "DESeq2", script, c(rscript, count_matrix, design_matrix, outdir, reference, comparison, redundant, project$name), "deseq2", input_mode, target = file.path(outdir, sprintf("DEG_%s_vs_%s(ref).txt", comparison, reference)), dependency_ids = dependency_ids)
 }
 
 write_gseapy_script <- function(project) {
@@ -4520,7 +4618,11 @@ server <- function(input, output, session) {
         tagList(selectInput("feature_attr", "featureCounts attribute", choices = c("gene_id", "gene_name"), selected = selected_choice(input$feature_attr, c("gene_id", "gene_name"), "gene_id"), selectize = FALSE)),
         "run_featurecounts", "Submit featureCounts"),
       tool_panel("DESeq2", status, "Run differential expression from count_matrix.txt.",
-        tagList(uiOutput("deseq_controls_ui"), uiOutput("deseq_project_summary_ui")),
+        tagList(
+          uiOutput("deseq_controls_ui"),
+          checkboxInput("deseq_use_gene_name_counts", "Run DESeq2 on gene-name aggregated counts", value = isTRUE(input$deseq_use_gene_name_counts)),
+          uiOutput("deseq_project_summary_ui")
+        ),
         "run_deseq2", "Submit DESeq2", data.frame()),
       tool_panel("GSEA", status, "Run pathway analysis from DESeq2 normalized counts.",
         tagList(uiOutput("gsea_run_controls_ui"), uiOutput("gsea_project_summary_ui")),
@@ -4625,7 +4727,11 @@ server <- function(input, output, session) {
       run_message("Reference and comparison must be different.")
       finish_submit_refresh()
     } else {
-      run_submission("DESeq2", submit_deseq2_job(current_project(), input$deseq_compare_col, input$deseq_reference, input$deseq_comparison, "NoRedundant"), paste(input$deseq_compare_col, input$deseq_comparison, "vs", input$deseq_reference))
+      run_submission(
+        "DESeq2",
+        submit_deseq2_job(current_project(), input$deseq_compare_col, input$deseq_reference, input$deseq_comparison, "NoRedundant", isTRUE(input$deseq_use_gene_name_counts)),
+        paste(input$deseq_compare_col, input$deseq_comparison, "vs", input$deseq_reference, if (isTRUE(input$deseq_use_gene_name_counts)) "gene-name counts" else "")
+      )
     }
   })
   observeEvent(input$run_gsea, {
