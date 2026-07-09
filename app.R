@@ -1668,6 +1668,23 @@ tool_progress_output_id <- function(step) {
   paste0("tool_progress_", tolower(gsub("[^A-Za-z0-9]+", "_", step)))
 }
 
+tool_progress_ui_output_id <- function(step) {
+  paste0("tool_progress_ui_", tolower(gsub("[^A-Za-z0-9]+", "_", step)))
+}
+
+sample_level_pipeline_steps <- function() {
+  c("FastQC", "Cutadapt", "STAR", "featureCounts", "RSEM (optional)", "Kallisto (optional)")
+}
+
+selected_choice <- function(value, choices, default = NULL) {
+  choices_vec <- unname(as.character(choices))
+  value <- as.character(value %||% "")
+  if (length(value) && nzchar(value[[1]]) && value[[1]] %in% choices_vec) return(value[[1]])
+  default <- as.character(default %||% "")
+  if (length(default) && nzchar(default[[1]]) && default[[1]] %in% choices_vec) return(default[[1]])
+  choices_vec[[1]] %||% character(0)
+}
+
 sample_progress_step_table <- function(progress_df, step) {
   if (!NROW(progress_df) || !"step" %in% names(progress_df)) return(NULL)
   hit <- progress_df[progress_df$step == step, , drop = FALSE]
@@ -2665,7 +2682,7 @@ tool_panel <- function(step, status, description, controls, button_id, button_la
     div(class = "tool-body",
         controls,
         actionButton(button_id, button_label, class = "btn-primary"),
-        if (identical(st, "Active")) sample_progress_step_ui(progress_df, step) else NULL
+        if (step %in% sample_level_pipeline_steps()) uiOutput(tool_progress_ui_output_id(step)) else NULL
     )
   )
 }
@@ -3987,29 +4004,29 @@ server <- function(input, output, session) {
   })
 
   output$run_step_cards <- renderUI({
-    progress_refresh()
     p <- current_project()
-    status <- progress_status()
-    progress_df <- sample_progress_state()
+    status <- isolate(progress_status())
+    r1_choices <- adapter_choices_r1()
+    r2_choices <- adapter_choices_r2()
     div(class = "run-grid",
       tool_panel("FastQC", status, "Quality reports for raw or trimmed reads.",
-        tagList(checkboxInput("fastqc_use_trimmed", "Use trimmed reads", value = FALSE)),
-        "run_fastqc", "Submit FastQC", progress_df),
+        tagList(checkboxInput("fastqc_use_trimmed", "Use trimmed reads", value = if (is.null(input$fastqc_use_trimmed)) FALSE else isTRUE(input$fastqc_use_trimmed))),
+        "run_fastqc", "Submit FastQC"),
       tool_panel("Cutadapt", status, "Trim adapters and short reads from raw FASTQs.",
         tagList(
-          selectInput("cutadapt_adapter1", "R1/read1 adapter", choices = adapter_choices_r1(), selected = adapter_choices_r1()[[1]], width = "100%", selectize = FALSE),
-          conditionalPanel("input.cutadapt_adapter1 == '__custom__'", textInput("cutadapt_adapter1_custom", "Custom R1/read1 adapter sequence", value = "", width = "100%")),
-          selectInput("cutadapt_adapter2", "R2/read2 adapter", choices = adapter_choices_r2(), selected = adapter_choices_r2()[[1]], width = "100%", selectize = FALSE),
-          conditionalPanel("input.cutadapt_adapter2 == '__custom__'", textInput("cutadapt_adapter2_custom", "Custom R2/read2 adapter sequence", value = "", width = "100%")),
-          textInput("cutadapt_min_length", "Minimum read length", value = "20")
+          selectInput("cutadapt_adapter1", "R1/read1 adapter", choices = r1_choices, selected = selected_choice(input$cutadapt_adapter1, r1_choices, r1_choices[[1]]), width = "100%", selectize = FALSE),
+          conditionalPanel("input.cutadapt_adapter1 == '__custom__'", textInput("cutadapt_adapter1_custom", "Custom R1/read1 adapter sequence", value = input$cutadapt_adapter1_custom %||% "", width = "100%")),
+          selectInput("cutadapt_adapter2", "R2/read2 adapter", choices = r2_choices, selected = selected_choice(input$cutadapt_adapter2, r2_choices, r2_choices[[1]]), width = "100%", selectize = FALSE),
+          conditionalPanel("input.cutadapt_adapter2 == '__custom__'", textInput("cutadapt_adapter2_custom", "Custom R2/read2 adapter sequence", value = input$cutadapt_adapter2_custom %||% "", width = "100%")),
+          textInput("cutadapt_min_length", "Minimum read length", value = input$cutadapt_min_length %||% "20")
         ),
-        "run_cutadapt", "Submit cutadapt", progress_df),
+        "run_cutadapt", "Submit cutadapt"),
       tool_panel("STAR", status, "Align raw or trimmed reads to the selected genome index.",
-        tagList(checkboxInput("star_use_trimmed", "Use trimmed reads", value = TRUE)),
-        "run_star", "Submit STAR", progress_df),
+        tagList(checkboxInput("star_use_trimmed", "Use trimmed reads", value = if (is.null(input$star_use_trimmed)) TRUE else isTRUE(input$star_use_trimmed))),
+        "run_star", "Submit STAR"),
       tool_panel("featureCounts", status, "Quantify STAR BAM files with the selected GTF attribute.",
-        tagList(selectInput("feature_attr", "featureCounts attribute", choices = c("gene_id", "gene_name"), selected = "gene_id", selectize = FALSE)),
-        "run_featurecounts", "Submit featureCounts", progress_df),
+        tagList(selectInput("feature_attr", "featureCounts attribute", choices = c("gene_id", "gene_name"), selected = selected_choice(input$feature_attr, c("gene_id", "gene_name"), "gene_id"), selectize = FALSE)),
+        "run_featurecounts", "Submit featureCounts"),
       tool_panel("DESeq2", status, "Run differential expression from count_matrix.txt.",
         tagList(uiOutput("deseq_controls_ui"), uiOutput("deseq_project_summary_ui")),
         "run_deseq2", "Submit DESeq2", data.frame()),
@@ -4017,17 +4034,20 @@ server <- function(input, output, session) {
         tagList(uiOutput("gsea_run_controls_ui"), uiOutput("gsea_project_summary_ui")),
         "run_gsea", "Submit GSEA", data.frame()),
       tool_panel("RSEM (optional)", status, "Optional quantification from STAR BAM/transcriptome outputs.",
-        tagList(selectInput("rsem_feature_attr", "RSEM feature attribute", choices = c("gene_id", "gene_name"), selected = "gene_id", selectize = FALSE)),
-        "run_rsem", "Submit RSEM", progress_df),
+        tagList(selectInput("rsem_feature_attr", "RSEM feature attribute", choices = c("gene_id", "gene_name"), selected = selected_choice(input$rsem_feature_attr, c("gene_id", "gene_name"), "gene_id"), selectize = FALSE)),
+        "run_rsem", "Submit RSEM"),
       tool_panel("Kallisto (optional)", status, "Optional transcript abundance quantification from raw or trimmed reads.",
-        tagList(checkboxInput("kallisto_use_trimmed", "Use trimmed reads", value = TRUE)),
-        "run_kallisto", "Submit Kallisto", progress_df)
+        tagList(checkboxInput("kallisto_use_trimmed", "Use trimmed reads", value = if (is.null(input$kallisto_use_trimmed)) TRUE else isTRUE(input$kallisto_use_trimmed))),
+        "run_kallisto", "Submit Kallisto")
     )
   })
 
   for (step in c("FastQC", "Cutadapt", "STAR", "featureCounts", "RSEM (optional)", "Kallisto (optional)")) {
     local({
       this_step <- step
+      output[[tool_progress_ui_output_id(this_step)]] <- renderUI({
+        sample_progress_step_ui(sample_progress_state(), this_step)
+      })
       output[[tool_progress_output_id(this_step)]] <- render_csl_table({
         sample_progress_step_table(sample_progress_state(), this_step)
       }, page_length = 20, scroll_y = "360px")
@@ -4043,6 +4063,8 @@ server <- function(input, output, session) {
     vals <- design_compare_values(p, selected_col)
     ref <- input$deseq_reference %||% if (length(vals)) vals[[1]] else ""
     comp <- input$deseq_comparison %||% if (length(vals) > 1) vals[[2]] else ref
+    ref <- selected_choice(ref, vals, if (length(vals)) vals[[1]] else "")
+    comp <- selected_choice(comp, vals, if (length(vals) > 1) vals[[2]] else ref)
     tagList(
       selectInput("deseq_compare_col", "Comparison column", choices = cols, selected = selected_col, selectize = FALSE),
       selectInput("deseq_reference", "Reference/baseline", choices = vals, selected = ref, selectize = FALSE),
@@ -4064,11 +4086,14 @@ server <- function(input, output, session) {
     vals <- design_compare_values(p, selected_col)
     ref <- input$gsea_reference %||% if (length(vals)) vals[[1]] else ""
     comp <- input$gsea_comparison %||% if (length(vals) > 1) vals[[2]] else ref
+    ref <- selected_choice(ref, vals, if (length(vals)) vals[[1]] else "")
+    comp <- selected_choice(comp, vals, if (length(vals) > 1) vals[[2]] else ref)
+    geneset <- selected_choice(input$gsea_geneset, GSEAPY_GENESET_OPTIONS, "MSigDB_Hallmark_2020")
     tagList(
       selectInput("gsea_compare_col", "Comparison column", choices = cols, selected = selected_col, selectize = FALSE),
       selectInput("gsea_reference", "Reference/baseline", choices = vals, selected = ref, selectize = FALSE),
       selectInput("gsea_comparison", "Comparison", choices = vals, selected = comp, selectize = FALSE),
-      selectInput("gsea_geneset", "Gene-set database", choices = GSEAPY_GENESET_OPTIONS, selected = "MSigDB_Hallmark_2020", selectize = FALSE)
+      selectInput("gsea_geneset", "Gene-set database", choices = GSEAPY_GENESET_OPTIONS, selected = geneset, selectize = FALSE)
     )
   })
 
