@@ -2378,6 +2378,66 @@ cutrun_summary_cards_ui <- function(project) {
   )
 }
 
+cutrun_qc_samples <- function(project) {
+  design <- project_design_df(project)
+  samples <- if (NROW(design) && "sample" %in% names(design)) trimws(as.character(design$sample)) else character(0)
+  samples <- samples[nzchar(samples)]
+  if (length(samples)) return(unique(samples))
+  dirs <- file.path(project$data_dir, c("fastqc_cutadapt", "fastqc"))
+  reports <- unlist(lapply(dirs[dir.exists(dirs)], function(path) {
+    list.files(path, pattern = "_(fastqc|screen)\\.html$", full.names = FALSE, ignore.case = TRUE)
+  }), use.names = FALSE)
+  stems <- sub("_(fastqc|screen)\\.html$", "", reports, ignore.case = TRUE)
+  stems <- sub("([._-]R)[12]([._-]?[0-9]*)$", "", stems, ignore.case = TRUE)
+  sort(unique(stems[nzchar(stems)]))
+}
+
+cutrun_qc_report_path <- function(project, sample, read = c("R1", "R2"), report = c("fastqc", "screen"), trimmed = TRUE) {
+  read <- match.arg(read)
+  report <- match.arg(report)
+  base_dir <- file.path(project$data_dir, if (isTRUE(trimmed)) "fastqc_cutadapt" else "fastqc")
+  design <- project_design_df(project)
+  filenames <- character(0)
+  if (NROW(design) && all(c("sample", "filename") %in% names(design))) {
+    hit <- design[trimws(as.character(design$sample)) == sample, , drop = FALSE]
+    if (NROW(hit)) filenames <- trimws(unlist(strsplit(as.character(hit$filename[[1]]), ",", fixed = TRUE), use.names = FALSE))
+  }
+  read_index <- if (identical(read, "R2")) 2L else 1L
+  read_file <- if (length(filenames) >= read_index) filenames[[read_index]] else ""
+  candidates <- character(0)
+  if (nzchar(read_file)) {
+    stem <- sub(fastq_suffix_regex, "", basename(read_file), ignore.case = TRUE)
+    candidates <- file.path(base_dir, paste0(stem, "_", report, ".html"))
+  }
+  candidates <- unique(c(
+    candidates,
+    file.path(base_dir, paste0(sample, "_", read, "_001_", report, ".html")),
+    file.path(base_dir, paste0(sample, "_", read, "_", report, ".html"))
+  ))
+  hit <- candidates[file.exists(candidates)]
+  if (length(hit)) return(hit[[1]])
+  if (dir.exists(base_dir)) {
+    files <- list.files(base_dir, pattern = paste0("_", report, "\\.html$"), full.names = TRUE, ignore.case = TRUE)
+    sample_key <- gsub("[^a-z0-9]+", "", tolower(sample))
+    file_key <- gsub("[^a-z0-9]+", "", tolower(basename(files)))
+    read_key <- tolower(read)
+    fallback <- files[grepl(sample_key, file_key, fixed = TRUE) & grepl(read_key, file_key, fixed = TRUE)]
+    if (length(fallback)) return(fallback[[1]])
+  }
+  candidates[[1]]
+}
+
+cutrun_qc_report_ui <- function(project, sample, read, report, trimmed) {
+  if (!nzchar(sample %||% "")) return(div(class = "empty-box", "No sample selected."))
+  path <- cutrun_qc_report_path(project, sample, read, report, trimmed)
+  if (!file.exists(path)) {
+    mode <- if (isTRUE(trimmed)) "trimmed" else "raw"
+    label <- if (identical(report, "fastqc")) "FastQC" else "FastQ Screen"
+    return(div(class = "empty-box", sprintf("%s has not been generated for %s %s (%s reads).", label, sample, read, mode)))
+  }
+  image_or_file_ui(path, "calc(100vh - 210px)")
+}
+
 cutrun_results_explorer_ui <- function() {
   div(
     class = "native-results-host cutrun-results-host",
@@ -2390,9 +2450,13 @@ cutrun_results_explorer_ui <- function() {
           div(
             class = "hero-copy",
             h1(class = "hero-title", "CUT&RUN Results Explorer"),
-            div(class = "hero-kicker", "CodeSpringLab peak, signal, and quality-control results")
+            div(class = "hero-kicker", "Developed by CSHL's Bioinformatics Shared Resource")
           ),
-          actionButton("refresh_cutrun_results", "Refresh results", class = "btn-primary")
+          div(
+            class = "hero-logos",
+            if (file.exists(LOGO_CSL_PATH)) tags$img(class = "hero-logo", src = file.path("csl_logo", basename(LOGO_CSL_PATH))),
+            if (file.exists(LOGO_PATH)) tags$img(class = "hero-logo", src = file.path("codespring_logo", basename(LOGO_PATH)))
+          )
         )
       ),
       div(
@@ -2401,6 +2465,7 @@ cutrun_results_explorer_ui <- function() {
           id = "cutrun_results_tabs",
           tabPanel("Overview",
             br(),
+            div(class = "cutrun-results-actions", actionButton("refresh_cutrun_results", "Refresh results", class = "btn-primary")),
             uiOutput("cutrun_summary_cards"),
             tags$h4("Pipeline status"),
             table_output("results_overview"),
@@ -2410,22 +2475,61 @@ cutrun_results_explorer_ui <- function() {
           ),
           tabPanel("QC",
             br(),
-            uiOutput("fastqc_select_ui"),
-            uiOutput("fastqc_view")
+            sidebarLayout(
+              sidebarPanel(
+                width = 2,
+                uiOutput("cutrun_qc_sample_control"),
+                uiOutput("cutrun_qc_mode_control"),
+                tags$hr(),
+                helpText("This tab renders FastQC and FastQ Screen HTML reports for both reads.")
+              ),
+              mainPanel(
+                width = 10,
+                uiOutput("cutrun_qc_status_ui"),
+                tabsetPanel(
+                  tabPanel("R1 FastQC", uiOutput("cutrun_r1_fastqc_ui")),
+                  tabPanel("R1 Screen", uiOutput("cutrun_r1_screen_ui")),
+                  tabPanel("R2 FastQC", uiOutput("cutrun_r2_fastqc_ui")),
+                  tabPanel("R2 Screen", uiOutput("cutrun_r2_screen_ui"))
+                )
+              )
+            )
           ),
           tabPanel("Alignment",
             br(),
-            div(class = "cutrun-chart-card", plotOutput("cutrun_alignment_plot", height = "360px")),
-            tags$h4("Bowtie2 alignment summary"),
-            table_output("cutrun_alignment_summary")
+            sidebarLayout(
+              sidebarPanel(
+                width = 2,
+                uiOutput("cutrun_alignment_sample_control"),
+                tags$hr(),
+                helpText("Compact Bowtie2, duplicate, fragment, normalization, and spike-in metrics.")
+              ),
+              mainPanel(
+                width = 10,
+                uiOutput("cutrun_alignment_status_ui"),
+                div(class = "cutrun-chart-card", plotOutput("cutrun_alignment_plot", height = "360px")),
+                tags$h4("Alignment summary across samples"),
+                table_output("cutrun_alignment_summary"),
+                tags$hr(),
+                tags$h4("Selected sample"),
+                table_output("cutrun_alignment_sample_table")
+              )
+            )
           ),
           tabPanel("Peaks",
             br(),
             tabsetPanel(
               tabPanel("SEACR",
                 br(),
-                uiOutput("cutrun_seacr_peak_ui"),
-                table_output("cutrun_seacr_peak_table")
+                sidebarLayout(
+                  sidebarPanel(
+                    width = 2,
+                    uiOutput("cutrun_seacr_peak_ui"),
+                    tags$hr(),
+                    helpText("Inspect the selected sample's SEACR peak calls.")
+                  ),
+                  mainPanel(width = 10, table_output("cutrun_seacr_peak_table"))
+                )
               ),
               tabPanel("Peak QC",
                 br(),
@@ -2438,8 +2542,15 @@ cutrun_results_explorer_ui <- function() {
               ),
               tabPanel("MACS2 (optional)",
                 br(),
-                uiOutput("cutrun_macs2_peak_ui"),
-                table_output("cutrun_macs2_peak_table")
+                sidebarLayout(
+                  sidebarPanel(
+                    width = 2,
+                    uiOutput("cutrun_macs2_peak_ui"),
+                    tags$hr(),
+                    helpText("Optional comparison or broad-mark peak calls.")
+                  ),
+                  mainPanel(width = 10, table_output("cutrun_macs2_peak_table"))
+                )
               )
             )
           ),
@@ -4711,13 +4822,29 @@ body { background:#eef3f8; color:#17202f; }
 .cutrun-metric-note { color:#657084; font-size:12px; line-height:1.35; }
 .cutrun-chart-card { background:white; border:1px solid #d8dde8; border-radius:10px; padding:14px 16px 8px 16px; margin:12px 0 18px 0; }
 .read-source-note { background:#f5f9ff; border-left:4px solid #2f6fed; border-radius:6px; padding:10px 12px; margin:8px 0 12px 0; color:#48627d; }
-.cutrun-results-host { overflow:visible !important; }
-.cutrun-results-shell { border-radius:10px !important; }
-.cutrun-results-hero { background:linear-gradient(135deg,#123a68 0%,#176b83 55%,#15936f 100%); color:white; padding:18px 22px; }
+.cutrun-results-host { overflow:visible !important; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; }
+.cutrun-results-shell { background:rgba(255,255,255,.72); border:1px solid rgba(255,255,255,.9); border-radius:10px !important; box-shadow:none; overflow:hidden; }
+.cutrun-results-hero { position:relative; background:linear-gradient(135deg,rgba(8,41,84,.96) 0%,rgba(12,69,132,.92) 54%,rgba(20,132,107,.86) 100%); color:white; }
+.cutrun-results-hero:after { content:''; position:absolute; inset:0; background:radial-gradient(circle at 85% 18%,rgba(255,255,255,.16),transparent 20%),radial-gradient(circle at 18% 120%,rgba(255,255,255,.10),transparent 24%); pointer-events:none; }
 .cutrun-results-hero .hero-topbar { display:flex; align-items:center; justify-content:space-between; gap:18px; flex-wrap:wrap; }
 .cutrun-results-hero .hero-title { color:white; margin:0 0 4px 0; }
 .cutrun-results-hero .hero-kicker { color:#dff7f0; }
-.cutrun-results-hero .btn-primary { background:white; color:#155d70; border-color:white; font-weight:800; }
+.cutrun-results-host .main-tabs { padding:10px 12px 14px; }
+.cutrun-results-host .main-tabs > .tabbable > .nav-tabs { border:0; display:flex; flex-wrap:wrap; gap:10px; margin-bottom:18px; }
+.cutrun-results-host .main-tabs > .tabbable > .nav-tabs > li { margin:0; }
+.cutrun-results-host .main-tabs > .tabbable > .nav-tabs > li > a { border:0 !important; border-radius:999px !important; background:rgba(255,255,255,.8); color:#27425f !important; font-weight:700; padding:11px 18px; box-shadow:0 6px 16px rgba(28,54,88,.08); }
+.cutrun-results-host .main-tabs > .tabbable > .nav-tabs > li.active > a { background:linear-gradient(135deg,#0f62c6,#19a974) !important; color:white !important; box-shadow:0 10px 22px rgba(24,95,185,.28); }
+.cutrun-results-host .tab-content .tabbable > .nav-tabs { border:1px solid rgba(209,223,239,.95); display:inline-flex; flex-wrap:wrap; gap:8px; margin:6px 0 18px; padding:8px; background:rgba(237,244,251,.95); border-radius:18px; }
+.cutrun-results-host .tab-content .tabbable > .nav-tabs > li { margin:0; }
+.cutrun-results-host .tab-content .tabbable > .nav-tabs > li > a { border:0 !important; border-radius:14px !important; background:transparent; color:#48627d !important; font-weight:700; padding:10px 14px; }
+.cutrun-results-host .tab-content .tabbable > .nav-tabs > li.active > a { background:linear-gradient(135deg,#fff,#f4f9ff) !important; color:#143150 !important; box-shadow:0 8px 16px rgba(35,63,99,.10); }
+.cutrun-results-host .row > .col-sm-2 > .well { background:rgba(248,251,255,.96); border:1px solid rgba(197,215,236,.9); border-radius:22px; padding:20px 18px; box-shadow:inset 0 1px 0 rgba(255,255,255,.9); }
+.cutrun-results-host .row > .col-sm-10 { background:rgba(255,255,255,.86); border:1px solid rgba(214,225,238,.95); border-radius:22px; padding:20px 22px; box-shadow:0 10px 26px rgba(32,56,84,.08); }
+.cutrun-results-host .form-control { border-radius:14px !important; border:1px solid #d7e0ea !important; box-shadow:none !important; min-height:46px; font-size:15px !important; }
+.cutrun-results-host .control-label { font-size:13px; text-transform:uppercase; letter-spacing:.08em; color:#5a7088; margin-bottom:8px; }
+.cutrun-results-host h4 { color:#18314e; font-weight:800; letter-spacing:-.02em; font-size:22px; }
+.cutrun-results-host iframe { display:block; width:100%; min-height:680px; border:1px solid #d7e0ea !important; border-radius:18px; background:white; box-shadow:0 8px 22px rgba(32,56,84,.10); }
+.cutrun-results-actions { display:flex; justify-content:flex-end; margin-bottom:8px; }
 .btn-primary { background:#1f5eff; border-color:#1f5eff; }
 .status-toolbar { display:flex; gap:12px; align-items:flex-end; flex-wrap:wrap; margin-bottom:16px; }
 .status-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(250px, 1fr)); gap:12px; margin-bottom:18px; }
@@ -6517,20 +6644,54 @@ server <- function(input, output, session) {
   output$cutrun_alignment_summary <- render_csl_table({
     cutrun_alignment_summary_table(current_project())
   }, page_length = 50)
+  output$cutrun_alignment_sample_control <- renderUI({
+    progress_refresh()
+    df <- cutrun_alignment_summary_table(current_project())
+    samples <- if (NROW(df) && "sample" %in% names(df)) trimws(as.character(df$sample)) else character(0)
+    samples <- unique(samples[nzchar(samples)])
+    if (!length(samples)) return(NULL)
+    selectInput("cutrun_alignment_sample", "Bowtie2 sample", choices = samples,
+                selected = selected_choice(input$cutrun_alignment_sample, samples, samples[[1]]), selectize = FALSE)
+  })
+  output$cutrun_alignment_status_ui <- renderUI({
+    progress_refresh()
+    df <- cutrun_alignment_summary_table(current_project())
+    if (!NROW(df)) div(class = "empty-box", "Bowtie2 alignment summaries have not been generated yet.") else NULL
+  })
+  output$cutrun_alignment_sample_table <- render_csl_table({
+    req(input$cutrun_alignment_sample)
+    df <- cutrun_alignment_summary_table(current_project())
+    validate(need(NROW(df) && "sample" %in% names(df), "No Bowtie2 alignment summary is available."))
+    hit <- df[trimws(as.character(df$sample)) == input$cutrun_alignment_sample, , drop = FALSE]
+    validate(need(NROW(hit), "The selected sample is not present in the alignment summary."))
+    data.frame(Metric = setdiff(names(hit), "sample"), Value = unlist(hit[1, setdiff(names(hit), "sample"), drop = FALSE], use.names = FALSE), check.names = FALSE)
+  }, page_length = 50, scroll_y = "420px")
   output$cutrun_alignment_plot <- renderPlot({
     progress_refresh()
     df <- cutrun_alignment_summary_table(current_project())
     validate(need(NROW(df), "No Bowtie2 alignment summaries were found yet."))
-    sample <- if ("sample" %in% names(df)) as.character(df$sample) else paste0("sample_", seq_len(NROW(df)))
-    mapped <- if ("mapped_reads" %in% names(df)) clean_metric_number(df$mapped_reads) else rep(NA_real_, NROW(df))
-    spikein <- if ("spikein_mapped_reads" %in% names(df)) clean_metric_number(df$spikein_mapped_reads) else rep(NA_real_, NROW(df))
+    n <- NROW(df)
+    sample <- if ("sample" %in% names(df)) trimws(as.character(df$sample)) else rep("", n)
+    if (length(sample) != n) sample <- rep("", n)
+    blank <- !nzchar(sample) | is.na(sample)
+    sample[blank] <- paste0("sample_", seq_len(n))[blank]
+    mapped <- if ("mapped_reads" %in% names(df)) clean_metric_number(df$mapped_reads) else rep(NA_real_, n)
+    spikein <- if ("spikein_mapped_reads" %in% names(df)) clean_metric_number(df$spikein_mapped_reads) else rep(NA_real_, n)
+    if (length(mapped) != n) mapped <- rep(NA_real_, n)
+    if (length(spikein) != n) spikein <- rep(NA_real_, n)
+    keep <- is.finite(mapped) | is.finite(spikein)
+    validate(need(any(keep), "Alignment summaries were found, but they do not contain finite mapped-read values yet."))
+    sample <- sample[keep]
+    mapped <- mapped[keep]
+    spikein <- spikein[keep]
     mapped[!is.finite(mapped)] <- 0
     spikein[!is.finite(spikein)] <- 0
     values <- rbind(`Genome mapped` = log10(mapped + 1), `E. coli spike-in` = log10(spikein + 1))
+    validate(need(NCOL(values) > 0 && all(is.finite(values)), "No finite alignment values are available to plot."))
     old <- par(mar = c(8, 4.4, 2.5, 1), xpd = FALSE)
     on.exit(par(old), add = TRUE)
     barplot(values, beside = TRUE, names.arg = sample, las = 2, col = c("#2f6fed", "#d39116"), border = NA,
-            ylab = "log10(reads + 1)", main = "Bowtie2 mapped and spike-in reads")
+            ylim = c(0, max(1, max(values) * 1.12)), ylab = "log10(reads + 1)", main = "Bowtie2 mapped and spike-in reads")
     legend("topright", legend = rownames(values), fill = c("#2f6fed", "#d39116"), bty = "n", cex = 0.85)
   }, res = 110)
   output$cutrun_frip_summary <- render_csl_table({
@@ -6562,7 +6723,10 @@ server <- function(input, output, session) {
     progress_refresh()
     choices <- result_file_choices(current_project(), "seacr", "\\.bed$")
     if (!length(choices)) return(div(class = "empty-box", "No SEACR peak BED files were found yet."))
-    selectInput("cutrun_seacr_peak_file", "SEACR peak file", choices = choices, selected = selected_choice(input$cutrun_seacr_peak_file, choices, choices[[1]]), selectize = FALSE)
+    paths <- unname(choices)
+    labels <- paste(basename(dirname(paths)), basename(paths), sep = " — ")
+    friendly <- stats::setNames(paths, labels)
+    selectInput("cutrun_seacr_peak_file", "SEACR sample", choices = friendly, selected = selected_choice(input$cutrun_seacr_peak_file, paths, paths[[1]]), selectize = FALSE)
   })
   output$cutrun_seacr_peak_table <- render_csl_table({
     req(input$cutrun_seacr_peak_file)
@@ -6573,7 +6737,10 @@ server <- function(input, output, session) {
     progress_refresh()
     choices <- result_file_choices(current_project(), "macs2", "(narrowPeak|broadPeak|peaks\\.xls)$")
     if (!length(choices)) return(div(class = "empty-box", "No MACS2 peak files were found yet. MACS2 is optional."))
-    selectInput("cutrun_macs2_peak_file", "MACS2 peak file", choices = choices, selected = selected_choice(input$cutrun_macs2_peak_file, choices, choices[[1]]), selectize = FALSE)
+    paths <- unname(choices)
+    labels <- paste(basename(dirname(paths)), basename(paths), sep = " — ")
+    friendly <- stats::setNames(paths, labels)
+    selectInput("cutrun_macs2_peak_file", "MACS2 sample", choices = friendly, selected = selected_choice(input$cutrun_macs2_peak_file, paths, paths[[1]]), selectize = FALSE)
   })
   output$cutrun_macs2_peak_table <- render_csl_table({
     req(input$cutrun_macs2_peak_file)
@@ -6600,31 +6767,44 @@ server <- function(input, output, session) {
     req(input$cutrun_file)
     safe_read_result_table(input$cutrun_file, 5000)
   }, page_length = 50)
-  output$fastqc_select_ui <- renderUI({
+  output$cutrun_qc_sample_control <- renderUI({
     req(identical(input$web_main_tabs %||% "", "Results Explorer"))
     progress_refresh()
-    p <- current_project()
-    trimmed <- if (dir.exists(file.path(p$data_dir, "fastqc_cutadapt"))) list.files(file.path(p$data_dir, "fastqc_cutadapt"), pattern = "\\.html$", full.names = TRUE) else character(0)
-    raw <- if (dir.exists(file.path(p$data_dir, "fastqc"))) list.files(file.path(p$data_dir, "fastqc"), pattern = "\\.html$", full.names = TRUE) else character(0)
-    available <- c(if (length(trimmed)) "trimmed", if (length(raw)) "raw")
-    source_choices <- c("Trimmed reads (after Cutadapt)" = "trimmed", "Raw reads" = "raw", "All reports" = "all")
-    default_source <- if (length(trimmed)) "trimmed" else if (length(raw)) "raw" else "all"
-    source <- selected_choice(input$cutrun_fastqc_source, unname(source_choices), default_source)
-    files <- switch(source, trimmed = trimmed, raw = raw, all = c(trimmed, raw), c(trimmed, raw))
-    source_control <- radioButtons("cutrun_fastqc_source", "Read source", choices = source_choices, selected = source, inline = TRUE)
-    if (!length(files)) {
-      note <- if (!length(available)) "No FastQC HTML reports were found yet." else paste("No", source, "FastQC reports were found. Available:", paste(available, collapse = ", "))
-      return(tagList(source_control, div(class = "empty-box", note)))
-    }
-    labels <- paste0(ifelse(files %in% trimmed, "[trimmed] ", "[raw] "), basename(files))
-    choices <- stats::setNames(files, labels)
-    tagList(
-      source_control,
-      tags$p(class = "read-source-note", if (identical(source, "trimmed")) "Showing FastQC reports generated from Cutadapt outputs." else if (identical(source, "raw")) "Showing FastQC reports generated from the original FASTQs." else "Showing both raw and trimmed FastQC reports."),
-      selectInput("fastqc_file", "FastQC report", choices = choices, selected = selected_choice(input$fastqc_file, unname(choices), unname(choices)[[1]]), selectize = FALSE)
-    )
+    samples <- cutrun_qc_samples(current_project())
+    if (!length(samples)) return(NULL)
+    selectInput("cutrun_qc_sample", "Sample", choices = samples,
+                selected = selected_choice(input$cutrun_qc_sample, samples, samples[[1]]), selectize = FALSE)
   })
-  output$fastqc_view <- renderUI({ req(input$fastqc_file); image_or_file_ui(input$fastqc_file, "1050px") })
+  output$cutrun_qc_mode_control <- renderUI({
+    progress_refresh()
+    p <- current_project()
+    raw_dir <- file.path(p$data_dir, "fastqc")
+    trim_dir <- file.path(p$data_dir, "fastqc_cutadapt")
+    raw_available <- dir.exists(raw_dir) && length(list.files(raw_dir, pattern = "_(fastqc|screen)\\.html$", ignore.case = TRUE)) > 0
+    trim_available <- dir.exists(trim_dir) && length(list.files(trim_dir, pattern = "_(fastqc|screen)\\.html$", ignore.case = TRUE)) > 0
+    selected <- if (trim_available && !raw_available) TRUE else if (raw_available && !trim_available) FALSE else if (is.null(input$cutrun_qc_show_trimmed)) trim_available else isTRUE(input$cutrun_qc_show_trimmed)
+    checkboxInput("cutrun_qc_show_trimmed", "Show cutadapt-trimmed QC", value = selected)
+  })
+  output$cutrun_qc_status_ui <- renderUI({
+    progress_refresh()
+    p <- current_project()
+    raw_available <- dir.exists(file.path(p$data_dir, "fastqc")) && length(list.files(file.path(p$data_dir, "fastqc"), pattern = "_(fastqc|screen)\\.html$", ignore.case = TRUE)) > 0
+    trim_available <- dir.exists(file.path(p$data_dir, "fastqc_cutadapt")) && length(list.files(file.path(p$data_dir, "fastqc_cutadapt"), pattern = "_(fastqc|screen)\\.html$", ignore.case = TRUE)) > 0
+    if (!raw_available && !trim_available) return(div(class = "empty-box", "FastQC has not been run yet."))
+    if (isTRUE(input$cutrun_qc_show_trimmed) && !trim_available) return(div(class = "empty-box", "QC has not been run on trimmed reads."))
+    if (!isTRUE(input$cutrun_qc_show_trimmed) && !raw_available) return(div(class = "empty-box", "QC has not been run on raw reads."))
+    NULL
+  })
+  output$cutrun_r1_fastqc_ui <- renderUI({ cutrun_qc_report_ui(current_project(), input$cutrun_qc_sample %||% "", "R1", "fastqc", isTRUE(input$cutrun_qc_show_trimmed)) })
+  output$cutrun_r1_screen_ui <- renderUI({ cutrun_qc_report_ui(current_project(), input$cutrun_qc_sample %||% "", "R1", "screen", isTRUE(input$cutrun_qc_show_trimmed)) })
+  output$cutrun_r2_fastqc_ui <- renderUI({
+    if (!isTRUE(current_project()$paired_end)) return(div(class = "empty-box", "This is a single-end project; there is no R2 report."))
+    cutrun_qc_report_ui(current_project(), input$cutrun_qc_sample %||% "", "R2", "fastqc", isTRUE(input$cutrun_qc_show_trimmed))
+  })
+  output$cutrun_r2_screen_ui <- renderUI({
+    if (!isTRUE(current_project()$paired_end)) return(div(class = "empty-box", "This is a single-end project; there is no R2 report."))
+    cutrun_qc_report_ui(current_project(), input$cutrun_qc_sample %||% "", "R2", "screen", isTRUE(input$cutrun_qc_show_trimmed))
+  })
   output$star_summary <- render_csl_table(safe_read_table(file.path(current_project()$data_dir, "star_summary", "summary_matrix.txt")), page_length = 50)
   output$featurecounts_summary <- render_csl_table(safe_read_table(file.path(current_project()$data_dir, "counts", "featurecounts_summary.txt")), page_length = 50)
   output$count_matrix <- render_csl_table(safe_read_table(file.path(current_project()$data_dir, "counts", "count_matrix.txt"), 5000), page_length = 50)
