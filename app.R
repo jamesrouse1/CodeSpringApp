@@ -5273,6 +5273,13 @@ server <- function(input, output, session) {
   }
 
   refresh_progress_now <- function() {
+    if (!isTRUE(existing_project_selected())) {
+      job_history_state(data.frame())
+      sample_progress_state(data.frame())
+      project_status_state(data.frame())
+      progress_refresh(Sys.time())
+      return(invisible(NULL))
+    }
     p <- current_project()
     jobs <- carry_forward_job_elapsed(job_history(p), isolate(job_history_state()))
     matrix_path <- file.path(p$data_dir, "counts", "count_matrix.txt")
@@ -5489,10 +5496,7 @@ server <- function(input, output, session) {
     p <- filtered_projects()
     choices <- project_select_choices(p, input$analysis %||% "RNA-seq")
     selected <- isolate(input$project_id)
-    if (is.null(selected) || !selected %in% unname(choices)) {
-      last <- read_last_project_id()
-      selected <- if (last %in% unname(choices)) last else "__new__"
-    }
+    if (is.null(selected) || !selected %in% unname(choices)) selected <- "__new__"
     selectInput("project_id", "Project Name", choices = choices, selected = selected, selectize = FALSE)
   })
 
@@ -5552,17 +5556,20 @@ server <- function(input, output, session) {
   })
 
   current_project <- reactive({
-    if (identical(input$project_id, "__new__")) return(new_project_from_inputs(input))
+    selected <- input$project_id
+    if (is.null(selected) || !length(selected) || !nzchar(selected) || identical(selected, "__new__")) {
+      return(new_project_from_inputs(input))
+    }
     p <- filtered_projects()
     req(length(p) > 0)
-    selected <- input$project_id
-    if (!length(selected) || is.null(selected) || !nzchar(selected)) {
-      idx <- 1
-    } else {
-      idx <- match(selected, names(p))
-      if (!length(idx) || is.na(idx)) idx <- 1
-    }
+    idx <- match(selected, names(p))
+    if (!length(idx) || is.na(idx)) return(new_project_from_inputs(input))
     p[[idx]]
+  })
+
+  existing_project_selected <- reactive({
+    selected <- input$project_id
+    !is.null(selected) && length(selected) && nzchar(selected) && !identical(selected, "__new__")
   })
 
   observeEvent(input$project_id, {
@@ -5571,13 +5578,13 @@ server <- function(input, output, session) {
     native_results_loaded_project("")
     p <- current_project()
     updateTextInput(session, "metadata_cols", value = paste(default_metadata_cols(p), collapse = ", "))
-    if (cutadapt_outputs_available(p)) {
+    if (isTRUE(existing_project_selected()) && cutadapt_outputs_available(p)) {
       updateCheckboxInput(session, "fastqc_use_trimmed", value = TRUE)
       updateCheckboxInput(session, "star_use_trimmed", value = TRUE)
       updateCheckboxInput(session, "kallisto_use_trimmed", value = TRUE)
       updateCheckboxInput(session, "cutrun_bowtie2_use_trimmed", value = TRUE)
     }
-    safe_refresh_progress_now("project switch")
+    if (isTRUE(existing_project_selected())) safe_refresh_progress_now("project switch")
   }, ignoreInit = FALSE)
 
   observeEvent(input$cutrun_normalization_mode, {
@@ -5588,6 +5595,20 @@ server <- function(input, output, session) {
 
   output$project_card <- renderUI({
     p <- current_project()
+    if (!isTRUE(existing_project_selected())) {
+      return(div(class = "project-card",
+        div(class = "project-card-top",
+          div(class = "project-title-wrap",
+            div(class = "eyebrow", "Selected project"),
+            h3("Start a new project")
+          ),
+          span(class = paste("analysis-badge", p$analysis_key), p$analysis)
+        ),
+        div(class = "path-list compact-path-list",
+          div(class = "path-item", span("Data"), code("Create or select a project to begin."))
+        )
+      ))
+    }
     badge_class <- paste("analysis-badge", p$analysis_key)
     div(class = "project-card",
         div(class = "project-card-top",
@@ -5610,6 +5631,13 @@ server <- function(input, output, session) {
 
   output$setup_table <- renderTable({
     p <- current_project()
+    if (!isTRUE(existing_project_selected())) {
+      return(data.frame(
+        field = c("Project", "Analysis", "Species", "Genome/reference", "Paired-end"),
+        value = c("New project", p$analysis, genome_species(p), project_reference_label(p), as.character(p$paired_end)),
+        stringsAsFactors = FALSE
+      ))
+    }
     data.frame(
       field = c("Project", "Analysis", "Species", "Genome/reference", "Reference key", "Paired-end", "Results root", "Data folder", "FASTQ folder", "Design matrix"),
       value = c(p$label, p$analysis, genome_species(p), project_reference_label(p), genome_reference_key(p), as.character(p$paired_end), p$results_root, p$data_dir, p$fastq_dir, p$design_matrix_path),
@@ -5618,6 +5646,7 @@ server <- function(input, output, session) {
   })
 
   output$source_config_ui <- renderUI({
+    if (!isTRUE(existing_project_selected())) return(NULL)
     p <- current_project()
     if (!nzchar(p$source_config)) return(NULL)
     div(class = "config-card",
@@ -5846,6 +5875,7 @@ server <- function(input, output, session) {
 
   progress_status <- reactive({
     progress_refresh()
+    if (!isTRUE(existing_project_selected())) return(data.frame())
     df <- project_status_state()
     if (!NROW(df)) df <- project_status(current_project())
     df[order(step_order(df$step)), , drop = FALSE]
@@ -5856,10 +5886,12 @@ server <- function(input, output, session) {
   })
 
   output$pipeline_stepper <- renderUI({
+    if (!isTRUE(existing_project_selected())) return(div(class = "empty-box", "Select or create a project to see pipeline progress."))
     pipeline_stepper_ui(current_project(), progress_status())
   })
 
   output$sample_progress_matrix_ui <- renderUI({
+    if (!isTRUE(existing_project_selected())) return(div(class = "empty-box", "Select or create a project to see sample progress."))
     sample_progress_matrix_ui(sample_progress_state())
   })
 
@@ -5868,12 +5900,21 @@ server <- function(input, output, session) {
   }, page_length = 20, scroll_y = "520px")
 
   output$run_pipeline_stepper <- renderUI({
+    if (!isTRUE(existing_project_selected())) return(div(class = "empty-box", "Create or select a project before running pipeline steps."))
     progress_refresh()
     pipeline_stepper_ui(current_project(), progress_status())
   })
 
   output$run_resource_strip <- renderUI({
     p <- current_project()
+    if (!isTRUE(existing_project_selected())) {
+      return(div(class = "resource-strip",
+        div(class = "resource-card",
+          tags$strong("Genome resources"),
+          tags$p(class = "muted status-path", project_reference_label(p))
+        )
+      ))
+    }
     ref <- if (is_cutrun_project(p)) cutrun_reference_resources(p) else genome_resources(p)
     div(class = "resource-strip",
         div(class = "resource-card",
@@ -5890,6 +5931,7 @@ server <- function(input, output, session) {
 
   output$run_step_cards <- renderUI({
     run_cards_refresh()
+    if (!isTRUE(existing_project_selected())) return(div(class = "empty-box", "Create or select a project to enable pipeline tools."))
     p <- current_project()
     status <- isolate(project_status_state())
     if (!NROW(status)) status <- project_status(p)
