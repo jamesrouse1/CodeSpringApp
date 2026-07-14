@@ -5714,13 +5714,16 @@ server <- function(input, output, session) {
             checkboxInput("cutrun_remove_mito", "Remove mitochondrial fragments from peak-calling bedGraph", value = if (is.null(input$cutrun_remove_mito)) TRUE else isTRUE(input$cutrun_remove_mito))
           ),
           "run_cutrun_bowtie2", "Submit Bowtie2"),
-        tool_panel("SEACR", status, "Recommended sparse CUT&RUN peak calling from fragment bedGraphs.",
+        {
+          seacr_norm_default <- if (identical(tolower(input$cutrun_normalization_mode %||% "CPM"), "spikein")) "non" else "norm"
+          tool_panel("SEACR", status, "Recommended sparse CUT&RUN peak calling from fragment bedGraphs.",
           tagList(
-            selectInput("cutrun_seacr_norm", "SEACR normalization", choices = c("norm", "non"), selected = selected_choice(input$cutrun_seacr_norm, c("norm", "non"), "norm"), selectize = FALSE),
+            selectInput("cutrun_seacr_norm", "SEACR normalization", choices = c("norm", "non"), selected = selected_choice(input$cutrun_seacr_norm, c("norm", "non"), seacr_norm_default), selectize = FALSE),
             selectInput("cutrun_seacr_stringency", "SEACR stringency", choices = c("stringent", "relaxed"), selected = selected_choice(input$cutrun_seacr_stringency, c("stringent", "relaxed"), "stringent"), selectize = FALSE),
             tags$p(class = "muted small-note", "Controls are read from the design matrix control_sample column. If blank, the app tries an IgG/input/control row from the same condition.")
           ),
-          "run_cutrun_seacr", "Submit SEACR"),
+          "run_cutrun_seacr", "Submit SEACR")
+        },
         tool_panel("Peak QC", status, "Build SEACR consensus peaks, a consensus peak count matrix, and FRiP summaries.",
           tags$p(class = "muted small-note", "Run after SEACR. This mirrors nf-core-style peak-level summaries in a lightweight CodeSpringLab format."),
           "run_cutrun_peakqc", "Submit Peak QC"),
