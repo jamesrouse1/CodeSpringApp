@@ -5424,6 +5424,12 @@ server <- function(input, output, session) {
     safe_refresh_progress_now("project switch")
   }, ignoreInit = FALSE)
 
+  observeEvent(input$cutrun_normalization_mode, {
+    if (identical(tolower(input$cutrun_normalization_mode %||% ""), "spikein")) {
+      updateSelectInput(session, "cutrun_seacr_norm", selected = "non")
+    }
+  }, ignoreInit = TRUE)
+
   output$project_card <- renderUI({
     p <- current_project()
     badge_class <- paste("analysis-badge", p$analysis_key)
