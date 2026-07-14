@@ -575,12 +575,12 @@ write_project_config <- function(project) {
       sprintf("chrom_sizes = %s", deparse(ref$chrom_sizes)),
       sprintf("macs2_genome_size = %s", deparse(ref$macs2_genome)),
       "peakcaller = 'seacr'",
-      "seacr_norm = 'norm'",
+      "seacr_norm = 'non'",
       "seacr_stringency = 'stringent'",
       "minimum_alignment_q_score = '30'",
       "max_fragment_length = '1000'",
-      "normalization_mode = 'CPM'",
-      "normalisation_mode = 'CPM'",
+      "normalization_mode = 'spikein'",
+      "normalisation_mode = 'spikein'",
       sprintf("spikein_index_path = %s", deparse(CUTRUN_DEFAULT_SPIKEIN_INDEX)),
       sprintf("spikein_genome = %s", deparse(CUTRUN_DEFAULT_SPIKEIN_INDEX)),
       sprintf("spikein_name = %s", deparse(CUTRUN_DEFAULT_SPIKEIN_NAME)),
@@ -1646,8 +1646,8 @@ tool_reference_summary <- function(project) {
       c("Reference", "CUT&RUN genome reference", ref$label, paste0(genome_species(project), " / ", genome_reference_key(project)), "Bowtie2, SEACR, MACS2", paste("Bowtie2 index:", ref$bowtie2_index, "| Chrom sizes:", ref$chrom_sizes)),
       c("Tool", "FastQC", fastqc_modules, "Read quality control", "Raw or trimmed FASTQ", "Input mode selected per run; reruns skip completed samples and submit failed/deleted samples only."),
       c("Tool", "cutadapt", cutadapt_modules, "Adapter trimming", "Raw FASTQ", "Adapter presets or custom adapters from Run Pipeline; minimum length from Run Pipeline."),
-      c("Tool", "Bowtie2", bowtie2_modules, "CUT&RUN fragment alignment and normalization", ref$label, "Defaults: MAPQ 30, max fragment 1000 bp, CPM normalization, keep target duplicates, deduplicate IgG/input controls, remove mitochondrial fragments from peak-calling bedGraphs. Optional spike-in alignment/normalization is available when a spike-in Bowtie2 index is supplied."),
-      c("Tool", "SEACR", seacr_modules, "Recommended sparse CUT&RUN peak calling and FRiP QC", "Bowtie2 normalized fragment bedGraphs and optional IgG/input control bedGraph", "Default stringent; normalization defaults to norm for CPM/raw tracks and non for spike-in-normalized tracks. Controls are selected from control_sample or inferred IgG/input rows. FRiP is written from fragments overlapping SEACR peaks."),
+      c("Tool", "Bowtie2", bowtie2_modules, "CUT&RUN fragment alignment and normalization", ref$label, "Defaults: MAPQ 30, max fragment 1000 bp, E. coli K-12 MG1655 spike-in normalization, keep target duplicates, deduplicate IgG/input controls, and remove mitochondrial fragments from peak-calling bedGraphs. CPM and no normalization remain available as explicit alternatives."),
+      c("Tool", "SEACR", seacr_modules, "Recommended sparse CUT&RUN peak calling and FRiP QC", "Bowtie2 normalized fragment bedGraphs and optional IgG/input control bedGraph", "Default stringent with non selected for the default spike-in-normalized tracks; norm is used for CPM/raw tracks. Controls are selected from control_sample or inferred IgG/input rows. FRiP is written from fragments overlapping SEACR peaks."),
       c("Tool", "Peak QC", "BEDTools module listed in CodeSpringLab script", "Consensus peaks, peak count matrix, and FRiP summary", "SEACR peak BED files and Bowtie2 BAM files", "Merges SEACR peaks across samples and counts fragments over consensus peaks."),
       c("Tool", "MACS2", macs2_modules, "Optional peak calling comparison", "Bowtie2 BAM and optional IgG/input control BAM", "Default q-value 0.01 and narrow peaks; broad mode available for broad histone marks.")
     )
@@ -3878,12 +3878,12 @@ extract_bowtie2_metrics <- function(project, sample) {
 
 submit_cutrun_bowtie2_jobs <- function(project, trimmed = TRUE, mapq = 30, max_fragment = 1000,
                                        dedup_target = FALSE, dedup_control = TRUE, remove_mito = TRUE,
-                                       normalization_mode = "CPM", spikein_index_path = CUTRUN_DEFAULT_SPIKEIN_INDEX,
+                                       normalization_mode = "spikein", spikein_index_path = CUTRUN_DEFAULT_SPIKEIN_INDEX,
                                        spikein_name = CUTRUN_DEFAULT_SPIKEIN_NAME, spikein_min_reads = "1000") {
   res <- cutrun_reference_resources(project)
   outdir <- file.path(project$data_dir, "bowtie2")
   dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
-  normalization_mode <- selected_choice(normalization_mode, c("CPM", "spikein", "none"), "CPM")
+  normalization_mode <- selected_choice(normalization_mode, c("CPM", "spikein", "none"), "spikein")
   spikein_index_path <- trimws(as.character(spikein_index_path %||% "none"))
   if (!nzchar(spikein_index_path) || identical(tolower(spikein_index_path), "none")) spikein_index_path <- CUTRUN_DEFAULT_SPIKEIN_INDEX
   if (identical(tolower(normalization_mode), "spikein") && !file.exists(paste0(spikein_index_path, ".1.bt2"))) {
@@ -5521,7 +5521,7 @@ server <- function(input, output, session) {
   featurecounts_matrix_autosubmitted <- reactiveVal(character(0))
   sample_size_cache <- reactiveVal(data.frame(path = character(), size = numeric(), checked = character(), stringsAsFactors = FALSE))
   sample_progress_state <- reactiveVal(data.frame())
-  cutrun_normalization_choice <- reactiveVal("CPM")
+  cutrun_normalization_choice <- reactiveVal("spikein")
   path_browser <- reactiveValues(target = "", mode = "dir", path = path.expand("~"))
   project_selection <- reactiveValues(rna = "", cutrun = "", atac = "", chip = "")
 
