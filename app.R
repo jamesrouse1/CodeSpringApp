@@ -5865,9 +5865,8 @@ server <- function(input, output, session) {
   observeEvent(input$cutrun_normalization_mode, {
     choice <- selected_choice(input$cutrun_normalization_mode, c("CPM", "spikein", "none"), isolate(cutrun_normalization_choice()))
     cutrun_normalization_choice(choice)
-    if (identical(tolower(choice), "spikein")) {
-      updateSelectInput(session, "cutrun_seacr_norm", selected = "non")
-    }
+    seacr_norm <- if (identical(tolower(choice), "spikein")) "non" else "norm"
+    updateSelectInput(session, "cutrun_seacr_norm", selected = seacr_norm)
   }, ignoreInit = FALSE)
 
   output$project_card <- renderUI({
@@ -6254,7 +6253,7 @@ server <- function(input, output, session) {
           tagList(
             selectInput("cutrun_seacr_norm", "SEACR normalization", choices = c("norm", "non"), selected = selected_choice(input$cutrun_seacr_norm, c("norm", "non"), seacr_norm_default), selectize = FALSE),
             selectInput("cutrun_seacr_stringency", "SEACR stringency", choices = c("stringent", "relaxed"), selected = selected_choice(input$cutrun_seacr_stringency, c("stringent", "relaxed"), "stringent"), selectize = FALSE),
-            tags$p(class = "muted small-note", "Controls are read from the design matrix control_sample column. If blank, the app tries an IgG/input/control row from the same condition.")
+            tags$p(class = "muted small-note", "SEACR normalization follows the Bowtie signal automatically: non for E. coli spike-in, norm for CPM or raw signal. Controls are read from control_sample; if blank, the app tries an IgG/input/control row from the same condition.")
           ),
           "run_cutrun_seacr", "Submit SEACR")
         },
