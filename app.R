@@ -151,6 +151,7 @@ PROGRESS_REFRESH_MS <- 1000
 SAMPLE_PROGRESS_NICE_LIMIT <- 30
 CUTRUN_DEFAULT_SPIKEIN_INDEX <- "/grid/bsr/data/data/utama/genome/ecoli_k12/bowtie2_index/ecoli_k12_mg1655"
 CUTRUN_DEFAULT_SPIKEIN_NAME <- "ecoli"
+CUTRUN_SPIKEIN_GENOME_CHOICES <- c("E. coli K-12 MG1655" = CUTRUN_DEFAULT_SPIKEIN_INDEX)
 GSEAPY_GENESET_OPTIONS <- c(
   "MSigDB_Hallmark_2020",
   "KEGG_2021_Human",
@@ -5520,6 +5521,7 @@ server <- function(input, output, session) {
   featurecounts_matrix_autosubmitted <- reactiveVal(character(0))
   sample_size_cache <- reactiveVal(data.frame(path = character(), size = numeric(), checked = character(), stringsAsFactors = FALSE))
   sample_progress_state <- reactiveVal(data.frame())
+  cutrun_normalization_choice <- reactiveVal("CPM")
   path_browser <- reactiveValues(target = "", mode = "dir", path = path.expand("~"))
   project_selection <- reactiveValues(rna = "", cutrun = "", atac = "", chip = "")
 
@@ -5861,10 +5863,12 @@ server <- function(input, output, session) {
   }, ignoreInit = FALSE)
 
   observeEvent(input$cutrun_normalization_mode, {
-    if (identical(tolower(input$cutrun_normalization_mode %||% ""), "spikein")) {
+    choice <- selected_choice(input$cutrun_normalization_mode, c("CPM", "spikein", "none"), isolate(cutrun_normalization_choice()))
+    cutrun_normalization_choice(choice)
+    if (identical(tolower(choice), "spikein")) {
       updateSelectInput(session, "cutrun_seacr_norm", selected = "non")
     }
-  }, ignoreInit = TRUE)
+  }, ignoreInit = FALSE)
 
   output$project_card <- renderUI({
     p <- current_project()
@@ -6212,6 +6216,7 @@ server <- function(input, output, session) {
     r1_choices <- adapter_choices_r1()
     r2_choices <- adapter_choices_r2()
     if (is_cutrun_project(p)) {
+      normalization_choice <- isolate(cutrun_normalization_choice())
       return(div(class = "run-grid",
         tool_panel("Cutadapt", status, "Trim adapters and short reads from raw CUT&RUN FASTQs.",
           tagList(
@@ -6234,9 +6239,8 @@ server <- function(input, output, session) {
             tags$p(class = "read-source-note", "Checked = use FASTQs produced by Cutadapt. Unchecked = align the original raw FASTQs from the project folder."),
             textInput("cutrun_mapq", "Minimum alignment MAPQ", value = input$cutrun_mapq %||% "30"),
             textInput("cutrun_max_fragment", "Maximum fragment length", value = input$cutrun_max_fragment %||% "1000"),
-            selectInput("cutrun_normalization_mode", "Signal normalization", choices = c("CPM", "spikein", "none"), selected = selected_choice(input$cutrun_normalization_mode, c("CPM", "spikein", "none"), "CPM"), selectize = FALSE),
-            textInput("cutrun_spikein_index", "Spike-in Bowtie2 index prefix", value = input$cutrun_spikein_index %||% CUTRUN_DEFAULT_SPIKEIN_INDEX, placeholder = CUTRUN_DEFAULT_SPIKEIN_INDEX),
-            textInput("cutrun_spikein_name", "Spike-in label", value = input$cutrun_spikein_name %||% CUTRUN_DEFAULT_SPIKEIN_NAME),
+            selectInput("cutrun_normalization_mode", "Signal normalization", choices = c("CPM" = "CPM", "E. coli spike-in" = "spikein", "None" = "none"), selected = normalization_choice, selectize = FALSE),
+            selectInput("cutrun_spikein_genome", "Spike-in genome", choices = CUTRUN_SPIKEIN_GENOME_CHOICES, selected = CUTRUN_DEFAULT_SPIKEIN_INDEX, selectize = FALSE),
             textInput("cutrun_spikein_min_reads", "Minimum spike-in reads warning", value = input$cutrun_spikein_min_reads %||% "1000"),
             checkboxInput("cutrun_dedup_targets", "Deduplicate target reads", value = isTRUE(input$cutrun_dedup_targets)),
             checkboxInput("cutrun_dedup_controls", "Deduplicate IgG/input controls", value = if (is.null(input$cutrun_dedup_controls)) TRUE else isTRUE(input$cutrun_dedup_controls)),
@@ -6245,7 +6249,7 @@ server <- function(input, output, session) {
           ),
           "run_cutrun_bowtie2", "Submit Bowtie2"),
         {
-          seacr_norm_default <- if (identical(tolower(input$cutrun_normalization_mode %||% "CPM"), "spikein")) "non" else "norm"
+          seacr_norm_default <- if (identical(tolower(normalization_choice), "spikein")) "non" else "norm"
           tool_panel("SEACR", status, "Recommended sparse CUT&RUN peak calling from fragment bedGraphs.",
           tagList(
             selectInput("cutrun_seacr_norm", "SEACR normalization", choices = c("norm", "non"), selected = selected_choice(input$cutrun_seacr_norm, c("norm", "non"), seacr_norm_default), selectize = FALSE),
@@ -6381,6 +6385,7 @@ server <- function(input, output, session) {
   })
   observeEvent(input$run_cutrun_bowtie2, {
     trimmed <- isTRUE(input$cutrun_bowtie2_use_trimmed)
+    normalization_choice <- isolate(cutrun_normalization_choice())
     run_submission(
       "Bowtie2",
       submit_cutrun_bowtie2_jobs(
@@ -6391,12 +6396,12 @@ server <- function(input, output, session) {
         dedup_target = isTRUE(input$cutrun_dedup_targets),
         dedup_control = if (is.null(input$cutrun_dedup_controls)) TRUE else isTRUE(input$cutrun_dedup_controls),
         remove_mito = if (is.null(input$cutrun_remove_mito)) TRUE else isTRUE(input$cutrun_remove_mito),
-        normalization_mode = input$cutrun_normalization_mode %||% "CPM",
-        spikein_index_path = input$cutrun_spikein_index %||% CUTRUN_DEFAULT_SPIKEIN_INDEX,
-        spikein_name = input$cutrun_spikein_name %||% CUTRUN_DEFAULT_SPIKEIN_NAME,
+        normalization_mode = normalization_choice,
+        spikein_index_path = input$cutrun_spikein_genome %||% CUTRUN_DEFAULT_SPIKEIN_INDEX,
+        spikein_name = CUTRUN_DEFAULT_SPIKEIN_NAME,
         spikein_min_reads = input$cutrun_spikein_min_reads %||% "1000"
       ),
-      paste(if (trimmed) "trimmed reads" else "raw reads", input$cutrun_normalization_mode %||% "CPM")
+      paste(if (trimmed) "trimmed reads" else "raw reads", normalization_choice)
     )
   })
   observeEvent(input$run_cutrun_seacr, {
