@@ -2344,6 +2344,40 @@ cutrun_peak_qc_summary_table <- function(project) {
   read_key_value_table(path)
 }
 
+cutrun_metric_card <- function(label, value, note = "", tone = "blue") {
+  div(
+    class = paste("cutrun-metric-card", paste0("tone-", tone)),
+    div(class = "cutrun-metric-label", label),
+    div(class = "cutrun-metric-value", value %||% "—"),
+    if (nzchar(note %||% "")) div(class = "cutrun-metric-note", note)
+  )
+}
+
+cutrun_summary_cards_ui <- function(project) {
+  design <- project_design_df(project)
+  alignment <- cutrun_alignment_summary_table(project)
+  frip <- cutrun_seacr_frip_table(project)
+  mapped <- if (NROW(alignment) && "mapped_reads" %in% names(alignment)) clean_metric_number(alignment$mapped_reads) else numeric(0)
+  spikein <- if (NROW(alignment) && "spikein_mapped_reads" %in% names(alignment)) clean_metric_number(alignment$spikein_mapped_reads) else numeric(0)
+  frip_values <- if (NROW(frip) && "frip" %in% names(frip)) clean_metric_number(frip$frip) else numeric(0)
+  mapped <- mapped[is.finite(mapped)]
+  spikein <- spikein[is.finite(spikein)]
+  frip_values <- frip_values[is.finite(frip_values)]
+  frip_pct <- if (length(frip_values)) ifelse(frip_values <= 1, frip_values * 100, frip_values) else numeric(0)
+  modes <- if (NROW(alignment) && "normalization_mode" %in% names(alignment)) unique(toupper(trimws(as.character(alignment$normalization_mode)))) else character(0)
+  modes <- modes[nzchar(modes)]
+  trimmed_fastqc <- count_files(file.path(project$data_dir, "fastqc_cutadapt"), "\\.html$")
+  div(
+    class = "cutrun-metric-grid",
+    cutrun_metric_card("Samples", format_metric_value(NROW(design)), "Included in the saved design matrix", "blue"),
+    cutrun_metric_card("Median mapped reads", if (length(mapped)) format_metric_value(stats::median(mapped)) else "—", paste(length(mapped), "alignment summaries"), "green"),
+    cutrun_metric_card("Median E. coli reads", if (length(spikein)) format_metric_value(stats::median(spikein)) else "—", if (length(spikein)) "Spike-in alignment" else "No spike-in summary yet", "gold"),
+    cutrun_metric_card("Median FRiP", if (length(frip_pct)) format_metric_value(stats::median(frip_pct), "%") else "—", "SEACR peaks", "purple"),
+    cutrun_metric_card("Normalization", if (length(modes)) paste(modes, collapse = ", ") else "—", "From completed Bowtie2 jobs", "blue"),
+    cutrun_metric_card("Trimmed FastQC", format_metric_value(trimmed_fastqc), "Reports from Cutadapt reads", "green")
+  )
+}
+
 clean_metric_number <- function(x) {
   x <- gsub(",", "", as.character(x %||% ""))
   x <- gsub("%", "", x, fixed = TRUE)
@@ -4583,6 +4617,16 @@ body { background:#eef3f8; color:#17202f; }
 .csl-header .muted { color:#dceaf4; }
 .muted { color:#657084; }
 .empty-box { background:white; border:1px solid #d8dde8; border-radius:8px; padding:18px; color:#657084; }
+.cutrun-metric-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; margin:16px 0 20px 0; }
+.cutrun-metric-card { background:white; border:1px solid #d8dde8; border-top:4px solid #2f6fed; border-radius:10px; padding:15px 16px; min-height:116px; box-shadow:0 2px 8px rgba(15,39,66,0.05); }
+.cutrun-metric-card.tone-green { border-top-color:#15936f; }
+.cutrun-metric-card.tone-gold { border-top-color:#d39116; }
+.cutrun-metric-card.tone-purple { border-top-color:#805ad5; }
+.cutrun-metric-label { color:#657084; font-size:12px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; }
+.cutrun-metric-value { color:#143150; font-size:26px; line-height:1.15; font-weight:800; margin:7px 0 5px 0; overflow-wrap:anywhere; }
+.cutrun-metric-note { color:#657084; font-size:12px; line-height:1.35; }
+.cutrun-chart-card { background:white; border:1px solid #d8dde8; border-radius:10px; padding:14px 16px 8px 16px; margin:12px 0 18px 0; }
+.read-source-note { background:#f5f9ff; border-left:4px solid #2f6fed; border-radius:6px; padding:10px 12px; margin:8px 0 12px 0; color:#48627d; }
 .btn-primary { background:#1f5eff; border-color:#1f5eff; }
 .status-toolbar { display:flex; gap:12px; align-items:flex-end; flex-wrap:wrap; margin-bottom:16px; }
 .status-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(250px, 1fr)); gap:12px; margin-bottom:18px; }
@@ -5951,11 +5995,15 @@ server <- function(input, output, session) {
           ),
           "run_cutadapt", "Submit cutadapt"),
         tool_panel("FastQC", status, "Quality reports for raw or trimmed CUT&RUN reads.",
-          tagList(checkboxInput("fastqc_use_trimmed", "Use trimmed reads", value = trimmed_checkbox_default(p, isolate(input$fastqc_use_trimmed)))),
+          tagList(
+            checkboxInput("fastqc_use_trimmed", "Analyze trimmed reads from Cutadapt", value = trimmed_checkbox_default(p, isolate(input$fastqc_use_trimmed))),
+            tags$p(class = "muted small-note", "Turn this off to inspect the original raw FASTQs instead.")
+          ),
           "run_fastqc", "Submit FastQC"),
         tool_panel("Bowtie2", status, "Align CUT&RUN fragments with Bowtie2 and generate fragment bedGraph/bigWig tracks.",
           tagList(
-            checkboxInput("cutrun_bowtie2_use_trimmed", "Use trimmed reads", value = trimmed_checkbox_default(p, isolate(input$cutrun_bowtie2_use_trimmed))),
+            checkboxInput("cutrun_bowtie2_use_trimmed", "Align trimmed reads from Cutadapt", value = trimmed_checkbox_default(p, isolate(input$cutrun_bowtie2_use_trimmed))),
+            tags$p(class = "read-source-note", "Checked = use FASTQs produced by Cutadapt. Unchecked = align the original raw FASTQs from the project folder."),
             textInput("cutrun_mapq", "Minimum alignment MAPQ", value = input$cutrun_mapq %||% "30"),
             textInput("cutrun_max_fragment", "Maximum fragment length", value = input$cutrun_max_fragment %||% "1000"),
             selectInput("cutrun_normalization_mode", "Signal normalization", choices = c("CPM", "spikein", "none"), selected = selected_choice(input$cutrun_normalization_mode, c("CPM", "spikein", "none"), "CPM"), selectize = FALSE),
@@ -5964,7 +6012,8 @@ server <- function(input, output, session) {
             textInput("cutrun_spikein_min_reads", "Minimum spike-in reads warning", value = input$cutrun_spikein_min_reads %||% "1000"),
             checkboxInput("cutrun_dedup_targets", "Deduplicate target reads", value = isTRUE(input$cutrun_dedup_targets)),
             checkboxInput("cutrun_dedup_controls", "Deduplicate IgG/input controls", value = if (is.null(input$cutrun_dedup_controls)) TRUE else isTRUE(input$cutrun_dedup_controls)),
-            checkboxInput("cutrun_remove_mito", "Remove mitochondrial fragments from peak-calling bedGraph", value = if (is.null(input$cutrun_remove_mito)) TRUE else isTRUE(input$cutrun_remove_mito))
+            checkboxInput("cutrun_remove_mito", "Remove mitochondrial fragments from peak-calling bedGraph", value = if (is.null(input$cutrun_remove_mito)) TRUE else isTRUE(input$cutrun_remove_mito)),
+            tags$p(class = "muted small-note", "Choose spikein only when E. coli DNA was intentionally added. The alignment summary will report spike-in reads and the applied scale factor.")
           ),
           "run_cutrun_bowtie2", "Submit Bowtie2"),
         {
@@ -6326,6 +6375,8 @@ server <- function(input, output, session) {
         tabsetPanel(
           tabPanel("Overview",
             br(),
+            uiOutput("cutrun_summary_cards"),
+            tags$h4("Pipeline status"),
             table_output("results_overview"),
             br(),
             tags$h4("Design matrix"),
@@ -6338,6 +6389,7 @@ server <- function(input, output, session) {
           ),
           tabPanel("Alignment",
             br(),
+            div(class = "cutrun-chart-card", plotOutput("cutrun_alignment_plot", height = "360px")),
             tags$h4("Bowtie2 alignment summary"),
             table_output("cutrun_alignment_summary")
           ),
@@ -6349,6 +6401,7 @@ server <- function(input, output, session) {
           ),
           tabPanel("Peak QC",
             br(),
+            div(class = "cutrun-chart-card", plotOutput("cutrun_frip_plot", height = "340px")),
             tags$h4("SEACR FRiP summary"),
             table_output("cutrun_frip_summary"),
             br(),
@@ -6399,12 +6452,47 @@ server <- function(input, output, session) {
 
   output$results_overview <- render_csl_table(project_status(current_project()), page_length = 20)
   output$design_table <- render_csl_table(safe_read_table(current_project()$design_matrix_path), page_length = 50)
+  output$cutrun_summary_cards <- renderUI({
+    progress_refresh()
+    cutrun_summary_cards_ui(current_project())
+  })
   output$cutrun_alignment_summary <- render_csl_table({
     cutrun_alignment_summary_table(current_project())
   }, page_length = 50)
+  output$cutrun_alignment_plot <- renderPlot({
+    progress_refresh()
+    df <- cutrun_alignment_summary_table(current_project())
+    validate(need(NROW(df), "No Bowtie2 alignment summaries were found yet."))
+    sample <- if ("sample" %in% names(df)) as.character(df$sample) else paste0("sample_", seq_len(NROW(df)))
+    mapped <- if ("mapped_reads" %in% names(df)) clean_metric_number(df$mapped_reads) else rep(NA_real_, NROW(df))
+    spikein <- if ("spikein_mapped_reads" %in% names(df)) clean_metric_number(df$spikein_mapped_reads) else rep(NA_real_, NROW(df))
+    mapped[!is.finite(mapped)] <- 0
+    spikein[!is.finite(spikein)] <- 0
+    values <- rbind(`Genome mapped` = log10(mapped + 1), `E. coli spike-in` = log10(spikein + 1))
+    old <- par(mar = c(8, 4.4, 2.5, 1), xpd = FALSE)
+    on.exit(par(old), add = TRUE)
+    barplot(values, beside = TRUE, names.arg = sample, las = 2, col = c("#2f6fed", "#d39116"), border = NA,
+            ylab = "log10(reads + 1)", main = "Bowtie2 mapped and spike-in reads")
+    legend("topright", legend = rownames(values), fill = c("#2f6fed", "#d39116"), bty = "n", cex = 0.85)
+  }, res = 110)
   output$cutrun_frip_summary <- render_csl_table({
     cutrun_seacr_frip_table(current_project())
   }, page_length = 50)
+  output$cutrun_frip_plot <- renderPlot({
+    progress_refresh()
+    df <- cutrun_seacr_frip_table(current_project())
+    validate(need(NROW(df) && "frip" %in% names(df), "No SEACR FRiP results were found yet."))
+    sample <- if ("sample" %in% names(df)) as.character(df$sample) else paste0("sample_", seq_len(NROW(df)))
+    frip <- clean_metric_number(df$frip)
+    frip <- ifelse(frip <= 1, frip * 100, frip)
+    keep <- is.finite(frip)
+    validate(need(any(keep), "No numeric FRiP values were found yet."))
+    old <- par(mar = c(8, 4.4, 2.5, 1))
+    on.exit(par(old), add = TRUE)
+    barplot(frip[keep], names.arg = sample[keep], las = 2, col = "#15936f", border = NA,
+            ylab = "FRiP (%)", main = "Fraction of reads in SEACR peaks")
+    abline(h = 1, col = "#94a3b8", lty = 3)
+  }, res = 110)
   output$cutrun_peak_qc_summary <- render_csl_table({
     cutrun_peak_qc_summary_table(current_project())
   }, page_length = 50)
@@ -6458,10 +6546,25 @@ server <- function(input, output, session) {
     req(identical(input$web_main_tabs %||% "", "Results Explorer"))
     progress_refresh()
     p <- current_project()
-    files <- c(list.files(file.path(p$data_dir, "fastqc_cutadapt"), pattern = "\\.html$", full.names = TRUE),
-               list.files(file.path(p$data_dir, "fastqc"), pattern = "\\.html$", full.names = TRUE))
-    if (!length(files)) return(div(class = "empty-box", "No FastQC HTML reports were found yet."))
-    selectInput("fastqc_file", "FastQC report", choices = files, selected = files[[1]], selectize = FALSE)
+    trimmed <- if (dir.exists(file.path(p$data_dir, "fastqc_cutadapt"))) list.files(file.path(p$data_dir, "fastqc_cutadapt"), pattern = "\\.html$", full.names = TRUE) else character(0)
+    raw <- if (dir.exists(file.path(p$data_dir, "fastqc"))) list.files(file.path(p$data_dir, "fastqc"), pattern = "\\.html$", full.names = TRUE) else character(0)
+    available <- c(if (length(trimmed)) "trimmed", if (length(raw)) "raw")
+    source_choices <- c("Trimmed reads (after Cutadapt)" = "trimmed", "Raw reads" = "raw", "All reports" = "all")
+    default_source <- if (length(trimmed)) "trimmed" else if (length(raw)) "raw" else "all"
+    source <- selected_choice(input$cutrun_fastqc_source, unname(source_choices), default_source)
+    files <- switch(source, trimmed = trimmed, raw = raw, all = c(trimmed, raw), c(trimmed, raw))
+    source_control <- radioButtons("cutrun_fastqc_source", "Read source", choices = source_choices, selected = source, inline = TRUE)
+    if (!length(files)) {
+      note <- if (!length(available)) "No FastQC HTML reports were found yet." else paste("No", source, "FastQC reports were found. Available:", paste(available, collapse = ", "))
+      return(tagList(source_control, div(class = "empty-box", note)))
+    }
+    labels <- paste0(ifelse(files %in% trimmed, "[trimmed] ", "[raw] "), basename(files))
+    choices <- stats::setNames(files, labels)
+    tagList(
+      source_control,
+      tags$p(class = "read-source-note", if (identical(source, "trimmed")) "Showing FastQC reports generated from Cutadapt outputs." else if (identical(source, "raw")) "Showing FastQC reports generated from the original FASTQs." else "Showing both raw and trimmed FastQC reports."),
+      selectInput("fastqc_file", "FastQC report", choices = choices, selected = selected_choice(input$fastqc_file, unname(choices), unname(choices)[[1]]), selectize = FALSE)
+    )
   })
   output$fastqc_view <- renderUI({ req(input$fastqc_file); image_or_file_ui(input$fastqc_file, "1050px") })
   output$star_summary <- render_csl_table(safe_read_table(file.path(current_project()$data_dir, "star_summary", "summary_matrix.txt")), page_length = 50)
