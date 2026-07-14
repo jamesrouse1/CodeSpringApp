@@ -1966,7 +1966,7 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
         if (file.exists(design)) "Complete" else "Not started",
         if (count_files(file.path(data_dir, "cutadapt"), fastq_suffix_regex) > 0) "Complete" else "Not started",
         if (count_files(file.path(data_dir, "fastqc"), "\\.html$") + count_files(file.path(data_dir, "fastqc_cutadapt"), "\\.html$") > 0) "Complete" else "Not started",
-        if (count_files(file.path(data_dir, "bowtie2"), "Aligned\\.sortedByCoord\\.out\\.bam$") > 0) "Complete" else "Not started",
+        if (count_files(file.path(data_dir, "bowtie2"), "_alignment_summary\\.txt$") > 0) "Complete" else "Not started",
         if (count_files(file.path(data_dir, "seacr"), "\\.bed$") + count_files(file.path(data_dir, "seacr"), "\\.bedgraph$") > 0) "Complete" else "Not started",
         if (file.exists(file.path(data_dir, "cutrun_peak_qc", "seacr_consensus_peaks.bed"))) "Complete" else "Not started",
         if (count_files(file.path(data_dir, "macs2"), "(narrowPeak|broadPeak|peaks\\.xls)$") > 0) "Complete" else "Not started"
@@ -2200,7 +2200,7 @@ sample_step_targets <- function(project, sample, step) {
         if (length(hits) >= needed) return(sort(hits))
         if (length(expected)) expected else file.path(cutadapt_dir, paste0(sample, ".fastq.gz"))
       },
-      "Bowtie2" = file.path(data_dir, "bowtie2", sample, paste0(sample, "Aligned.sortedByCoord.out.bam")),
+      "Bowtie2" = file.path(data_dir, "bowtie2", sample, paste0(sample, "_alignment_summary.txt")),
       "SEACR" = {
         hits <- if (dir.exists(file.path(data_dir, "seacr", sample))) {
           list.files(file.path(data_dir, "seacr", sample), pattern = "\\.bed$", full.names = TRUE)
@@ -2247,7 +2247,7 @@ minimum_expected_bytes <- function(step) {
     "FastQC" = 1000,
     "Cutadapt" = 100,
     "STAR" = 1000,
-    "Bowtie2" = 1000,
+    "Bowtie2" = 100,
     "SEACR" = 10,
     "MACS2 (optional)" = 10,
     "RSEM (optional)" = 100,
@@ -2375,6 +2375,86 @@ cutrun_summary_cards_ui <- function(project) {
     cutrun_metric_card("Median FRiP", if (length(frip_pct)) format_metric_value(stats::median(frip_pct), "%") else "—", "SEACR peaks", "purple"),
     cutrun_metric_card("Normalization", if (length(modes)) paste(modes, collapse = ", ") else "—", "From completed Bowtie2 jobs", "blue"),
     cutrun_metric_card("Trimmed FastQC", format_metric_value(trimmed_fastqc), "Reports from Cutadapt reads", "green")
+  )
+}
+
+cutrun_results_explorer_ui <- function() {
+  div(
+    class = "native-results-host cutrun-results-host",
+    div(
+      class = "app-shell cutrun-results-shell",
+      div(
+        class = "hero cutrun-results-hero",
+        div(
+          class = "hero-topbar",
+          div(
+            class = "hero-copy",
+            h1(class = "hero-title", "CUT&RUN Results Explorer"),
+            div(class = "hero-kicker", "CodeSpringLab peak, signal, and quality-control results")
+          ),
+          actionButton("refresh_cutrun_results", "Refresh results", class = "btn-primary")
+        )
+      ),
+      div(
+        class = "main-tabs",
+        tabsetPanel(
+          id = "cutrun_results_tabs",
+          tabPanel("Overview",
+            br(),
+            uiOutput("cutrun_summary_cards"),
+            tags$h4("Pipeline status"),
+            table_output("results_overview"),
+            br(),
+            tags$h4("Design matrix"),
+            table_output("design_table")
+          ),
+          tabPanel("QC",
+            br(),
+            uiOutput("fastqc_select_ui"),
+            uiOutput("fastqc_view")
+          ),
+          tabPanel("Alignment",
+            br(),
+            div(class = "cutrun-chart-card", plotOutput("cutrun_alignment_plot", height = "360px")),
+            tags$h4("Bowtie2 alignment summary"),
+            table_output("cutrun_alignment_summary")
+          ),
+          tabPanel("Peaks",
+            br(),
+            tabsetPanel(
+              tabPanel("SEACR",
+                br(),
+                uiOutput("cutrun_seacr_peak_ui"),
+                table_output("cutrun_seacr_peak_table")
+              ),
+              tabPanel("Peak QC",
+                br(),
+                div(class = "cutrun-chart-card", plotOutput("cutrun_frip_plot", height = "340px")),
+                tags$h4("SEACR FRiP summary"),
+                table_output("cutrun_frip_summary"),
+                br(),
+                tags$h4("Consensus peak summary"),
+                table_output("cutrun_peak_qc_summary")
+              ),
+              tabPanel("MACS2 (optional)",
+                br(),
+                uiOutput("cutrun_macs2_peak_ui"),
+                table_output("cutrun_macs2_peak_table")
+              )
+            )
+          ),
+          tabPanel("Peak Counts",
+            br(),
+            table_output("cutrun_peak_counts")
+          ),
+          tabPanel("Files",
+            br(),
+            uiOutput("cutrun_file_ui"),
+            uiOutput("cutrun_file_view")
+          )
+        )
+      )
+    )
   )
 }
 
@@ -3607,6 +3687,10 @@ cutrun_bowtie2_bam <- function(project, sample) {
   file.path(project$data_dir, "bowtie2", sample, paste0(sample, "Aligned.sortedByCoord.out.bam"))
 }
 
+cutrun_bowtie2_complete_marker <- function(project, sample) {
+  file.path(project$data_dir, "bowtie2", sample, paste0(sample, "_alignment_summary.txt"))
+}
+
 cutrun_bowtie2_bedgraph <- function(project, sample) {
   sample_dir <- file.path(project$data_dir, "bowtie2", sample)
   summary_path <- file.path(sample_dir, paste0(sample, "_alignment_summary.txt"))
@@ -3701,7 +3785,7 @@ submit_cutrun_bowtie2_jobs <- function(project, trimmed = TRUE, mapq = 30, max_f
   if (nzchar(msg)) return(record_preflight_failure(project, "Bowtie2", msg, "bowtie2"))
   target_list <- lapply(split(seq_len(NROW(pairs)), pairs$sample), function(idx) {
     sample <- pairs$sample[idx[[1]]]
-    cutrun_bowtie2_bam(project, sample)
+    cutrun_bowtie2_complete_marker(project, sample)
   })
   plan <- sample_submission_plan(project, "Bowtie2", target_list)
   if (!length(plan$samples)) return(plan$message)
@@ -3713,7 +3797,7 @@ submit_cutrun_bowtie2_jobs <- function(project, trimmed = TRUE, mapq = 30, max_f
     sample <- row[["sample"]]
     sample_dir <- file.path(outdir, sample)
     dir.create(sample_dir, recursive = TRUE, showWarnings = FALSE)
-    target <- cutrun_bowtie2_bam(project, sample)
+    target <- cutrun_bowtie2_complete_marker(project, sample)
     target_row <- design[design$sample == sample, , drop = FALSE]
     is_control <- NROW(target_row) && cutrun_control_like(target_row$target[1])
     dedup_mode <- if ((is_control && isTRUE(dedup_control)) || (!is_control && isTRUE(dedup_target))) "dedup" else "keepdup"
@@ -4627,6 +4711,13 @@ body { background:#eef3f8; color:#17202f; }
 .cutrun-metric-note { color:#657084; font-size:12px; line-height:1.35; }
 .cutrun-chart-card { background:white; border:1px solid #d8dde8; border-radius:10px; padding:14px 16px 8px 16px; margin:12px 0 18px 0; }
 .read-source-note { background:#f5f9ff; border-left:4px solid #2f6fed; border-radius:6px; padding:10px 12px; margin:8px 0 12px 0; color:#48627d; }
+.cutrun-results-host { overflow:visible !important; }
+.cutrun-results-shell { border-radius:10px !important; }
+.cutrun-results-hero { background:linear-gradient(135deg,#123a68 0%,#176b83 55%,#15936f 100%); color:white; padding:18px 22px; }
+.cutrun-results-hero .hero-topbar { display:flex; align-items:center; justify-content:space-between; gap:18px; flex-wrap:wrap; }
+.cutrun-results-hero .hero-title { color:white; margin:0 0 4px 0; }
+.cutrun-results-hero .hero-kicker { color:#dff7f0; }
+.cutrun-results-hero .btn-primary { background:white; color:#155d70; border-color:white; font-weight:800; }
 .btn-primary { background:#1f5eff; border-color:#1f5eff; }
 .status-toolbar { display:flex; gap:12px; align-items:flex-end; flex-wrap:wrap; margin-bottom:16px; }
 .status-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(250px, 1fr)); gap:12px; margin-bottom:18px; }
@@ -5303,6 +5394,7 @@ server <- function(input, output, session) {
   sample_size_cache <- reactiveVal(data.frame(path = character(), size = numeric(), checked = character(), stringsAsFactors = FALSE))
   sample_progress_state <- reactiveVal(data.frame())
   path_browser <- reactiveValues(target = "", mode = "dir", path = path.expand("~"))
+  project_selection <- reactiveValues(rna = "", cutrun = "", atac = "", chip = "")
 
   carry_forward_job_elapsed <- function(jobs, previous_jobs) {
     if (!NROW(jobs) || !NROW(previous_jobs) || !"job_id" %in% names(jobs) || !"job_id" %in% names(previous_jobs)) return(jobs)
@@ -5540,8 +5632,13 @@ server <- function(input, output, session) {
   output$project_ui <- renderUI({
     p <- filtered_projects()
     choices <- project_select_choices(p, input$analysis %||% "RNA-seq")
+    key <- analysis_key(input$analysis %||% "RNA-seq")
     selected <- isolate(input$project_id)
-    if (is.null(selected) || !selected %in% unname(choices)) selected <- "__new__"
+    remembered <- isolate(project_selection[[key]]) %||% ""
+    last <- read_last_project_id()
+    if (is.null(selected) || !selected %in% unname(choices)) {
+      selected <- if (remembered %in% unname(choices)) remembered else if (last %in% unname(choices)) last else "__new__"
+    }
     selectInput("project_id", "Project Name", choices = choices, selected = selected, selectize = FALSE)
   })
 
@@ -5618,7 +5715,11 @@ server <- function(input, output, session) {
   })
 
   observeEvent(input$project_id, {
-    write_last_project_id(input$project_id %||% "__new__")
+    selected <- input$project_id %||% "__new__"
+    if (!identical(selected, "__new__")) {
+      project_selection[[analysis_key(input$analysis %||% "RNA-seq")]] <- selected
+      write_last_project_id(selected)
+    }
     native_registered_id("")
     native_results_loaded_project("")
     p <- current_project()
@@ -6344,6 +6445,7 @@ server <- function(input, output, session) {
 
   native_results_app <- reactive({
     native_results_refresh()
+    if (is_cutrun_project(current_project())) return(NULL)
     load_native_rnaseq_viewer(current_project())
   })
 
@@ -6370,61 +6472,11 @@ server <- function(input, output, session) {
   }, ignoreInit = TRUE)
 
   output$native_results_ui <- renderUI({
+    if (!isTRUE(existing_project_selected())) {
+      return(div(class = "empty-box", "Create or select a project to open its Results Explorer."))
+    }
     if (is_cutrun_project(current_project())) {
-      return(div(class = "native-results-wrap",
-        tabsetPanel(
-          tabPanel("Overview",
-            br(),
-            uiOutput("cutrun_summary_cards"),
-            tags$h4("Pipeline status"),
-            table_output("results_overview"),
-            br(),
-            tags$h4("Design matrix"),
-            table_output("design_table")
-          ),
-          tabPanel("QC",
-            br(),
-            uiOutput("fastqc_select_ui"),
-            uiOutput("fastqc_view")
-          ),
-          tabPanel("Alignment",
-            br(),
-            div(class = "cutrun-chart-card", plotOutput("cutrun_alignment_plot", height = "360px")),
-            tags$h4("Bowtie2 alignment summary"),
-            table_output("cutrun_alignment_summary")
-          ),
-          tabPanel("SEACR Peaks",
-            br(),
-            tags$h4("SEACR peak calls"),
-            uiOutput("cutrun_seacr_peak_ui"),
-            table_output("cutrun_seacr_peak_table")
-          ),
-          tabPanel("Peak QC",
-            br(),
-            div(class = "cutrun-chart-card", plotOutput("cutrun_frip_plot", height = "340px")),
-            tags$h4("SEACR FRiP summary"),
-            table_output("cutrun_frip_summary"),
-            br(),
-            tags$h4("Peak QC summary"),
-            table_output("cutrun_peak_qc_summary")
-          ),
-          tabPanel("Peak Counts",
-            br(),
-            table_output("cutrun_peak_counts")
-          ),
-          tabPanel("MACS2 Peaks",
-            br(),
-            tags$h4("MACS2 optional peak calls"),
-            uiOutput("cutrun_macs2_peak_ui"),
-            table_output("cutrun_macs2_peak_table")
-          ),
-          tabPanel("Tracks & Files",
-            br(),
-            uiOutput("cutrun_file_ui"),
-            uiOutput("cutrun_file_view")
-          )
-        )
-      ))
+      return(cutrun_results_explorer_ui())
     }
     err <- native_results_error()
     if (nzchar(err)) {
@@ -6436,6 +6488,7 @@ server <- function(input, output, session) {
 
   observeEvent(native_results_app(), {
     app <- native_results_app()
+    if (is.null(app)) return()
     if (!identical(native_registered_id(), app$id)) {
       native_results_error("")
       server_result <- tryCatch({
@@ -6449,6 +6502,11 @@ server <- function(input, output, session) {
       }
     }
   }, ignoreInit = FALSE)
+
+  observeEvent(input$refresh_cutrun_results, {
+    if (!is_cutrun_project(current_project())) return()
+    safe_refresh_progress_now("CUT&RUN results refresh")
+  }, ignoreInit = TRUE)
 
   output$results_overview <- render_csl_table(project_status(current_project()), page_length = 20)
   output$design_table <- render_csl_table(safe_read_table(current_project()$design_matrix_path), page_length = 50)
