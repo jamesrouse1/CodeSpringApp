@@ -825,57 +825,11 @@ as_design_bool <- function(x) {
   tolower(as.character(x %||% "")) %in% c("true", "t", "1", "yes", "y")
 }
 
-design_input_id <- function(row, col) {
-  paste0("design_", col, "_", row)
-}
-
-collect_design_inputs <- function(input, df) {
-  if (!NROW(df)) return(df)
-  cols <- design_matrix_columns(df)
-  for (i in seq_len(NROW(df))) {
-    for (col in cols) {
-      id <- design_input_id(i, col)
-      val <- input[[id]]
-      if (is.null(val)) next
-      if (identical(col, "include")) {
-        df[[col]][i] <- isTRUE(val)
-      } else {
-        df[[col]][i] <- as.character(val)
-      }
-    }
-  }
-  df
-}
-
 design_matrix_ui <- function(df) {
   if (!NROW(df)) return(div(class = "empty-box", "Scan a FASTQ folder or select a project with an existing design_matrix.txt."))
-  cols <- design_matrix_columns(df)
-  df <- df[, cols, drop = FALSE]
-  tags$div(
-    class = "design-table-scroll",
-    tags$table(
-      class = "design-matrix-table",
-      tags$thead(tags$tr(lapply(cols, tags$th))),
-      tags$tbody(lapply(seq_len(NROW(df)), function(i) {
-        tags$tr(lapply(cols, function(col) {
-          value <- df[[col]][i]
-          tags$td(
-            if (identical(col, "include")) {
-              checkboxInput(design_input_id(i, col), NULL, value = as_design_bool(value), width = "70px")
-            } else if (identical(col, "status")) {
-              tags$span(class = "status-path", as.character(value %||% ""))
-            } else {
-              textInput(
-                design_input_id(i, col),
-                NULL,
-                value = as.character(value %||% ""),
-                width = if (identical(col, "filename")) "420px" else "180px"
-              )
-            }
-          )
-        }))
-      }))
-    )
+  tagList(
+    tags$p(class = "muted small-note", "Click a cell to edit. Use TRUE/FALSE in include. The table is paged so large projects do not freeze the app."),
+    table_output("design_editor_table")
   )
 }
 
@@ -5764,7 +5718,7 @@ server <- function(input, output, session) {
   })
 
   observeEvent(input$add_metadata_col, {
-    df <- collect_design_inputs(input, design_state())
+    df <- design_state()
     design_state(sync_metadata_columns(df, metadata_cols_from_input()))
   })
 
@@ -5789,6 +5743,61 @@ server <- function(input, output, session) {
     design_matrix_ui(df)
   })
 
+  output$design_editor_table <- if (DT_AVAILABLE) {
+    DT::renderDataTable({
+      df <- design_state()
+      if (!NROW(df)) return(data.frame())
+      df <- df[, design_matrix_columns(df), drop = FALSE]
+      df$include <- ifelse(vapply(df$include, as_design_bool, logical(1)), "TRUE", "FALSE")
+      DT::datatable(
+        df,
+        rownames = FALSE,
+        editable = list(target = "cell"),
+        class = "compact stripe hover",
+        options = list(
+          pageLength = 25,
+          lengthMenu = list(c(10, 25, 50, 100, -1), c("10", "25", "50", "100", "All")),
+          scrollX = TRUE,
+          scrollY = "520px",
+          paging = TRUE,
+          pagingType = "full_numbers",
+          autoWidth = FALSE,
+          dom = "lfrtip",
+          columnDefs = list(
+            list(width = "90px", targets = 0),
+            list(width = "170px", targets = 1),
+            list(width = "420px", targets = which(names(df) == "filename") - 1)
+          )
+        )
+      )
+    }, server = FALSE)
+  } else {
+    renderTable({
+      df <- design_state()
+      if (!NROW(df)) return(data.frame())
+      df[, design_matrix_columns(df), drop = FALSE]
+    }, striped = TRUE, bordered = TRUE, spacing = "s")
+  }
+
+  observeEvent(input$design_editor_table_cell_edit, {
+    info <- input$design_editor_table_cell_edit
+    df <- design_state()
+    if (!NROW(df) || is.null(info$row) || is.null(info$col)) return()
+    cols <- design_matrix_columns(df)
+    df <- df[, cols, drop = FALSE]
+    row <- as.integer(info$row)
+    col <- as.integer(info$col) + 1L
+    if (is.na(row) || is.na(col) || row < 1 || row > NROW(df) || col < 1 || col > NCOL(df)) return()
+    col_name <- names(df)[[col]]
+    value <- as.character(info$value %||% "")
+    if (identical(col_name, "include")) {
+      df[[col_name]][row] <- if (as_design_bool(value)) TRUE else FALSE
+    } else {
+      df[[col_name]][row] <- value
+    }
+    design_state(df)
+  }, ignoreInit = TRUE)
+
   output$design_save_status <- renderText("")
   observeEvent(input$save_design, {
     p <- current_project()
@@ -5796,7 +5805,7 @@ server <- function(input, output, session) {
       output$design_save_status <- renderText("ERROR: Enter a project name before saving a new project design matrix.")
       return()
     }
-    df <- collect_design_inputs(input, design_state())
+    df <- design_state()
     design_state(df)
     metadata <- metadata_cols_from_input()
     msg <- tryCatch({
