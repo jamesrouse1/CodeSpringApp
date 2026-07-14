@@ -576,6 +576,12 @@ write_project_config <- function(project) {
       "seacr_stringency = 'stringent'",
       "minimum_alignment_q_score = '30'",
       "max_fragment_length = '1000'",
+      "normalization_mode = 'CPM'",
+      "normalisation_mode = 'CPM'",
+      "spikein_index_path = 'none'",
+      "spikein_genome = 'none'",
+      "spikein_name = 'spikein'",
+      "spikein_min_reads = '1000'",
       "dedup_target_reads = 'n'",
       "dedup_control_reads = 'y'",
       "remove_mitochondrial_reads = 'y'"
@@ -1288,6 +1294,7 @@ step_data_paths <- function(project, step, samples = NULL) {
     "STAR" = file.path(data_dir, "star"),
     "Bowtie2" = file.path(data_dir, "bowtie2"),
     "SEACR" = file.path(data_dir, "seacr"),
+    "Peak QC" = file.path(data_dir, "cutrun_peak_qc"),
     "MACS2 (optional)" = file.path(data_dir, "macs2"),
     "featureCounts" = c(
       file.path(data_dir, "featurecounts"),
@@ -1584,8 +1591,9 @@ tool_reference_summary <- function(project) {
       c("Reference", "CUT&RUN genome reference", ref$label, paste0(genome_species(project), " / ", genome_reference_key(project)), "Bowtie2, SEACR, MACS2", paste("Bowtie2 index:", ref$bowtie2_index, "| Chrom sizes:", ref$chrom_sizes)),
       c("Tool", "FastQC", fastqc_modules, "Read quality control", "Raw or trimmed FASTQ", "Input mode selected per run; reruns skip completed samples and submit failed/deleted samples only."),
       c("Tool", "cutadapt", cutadapt_modules, "Adapter trimming", "Raw FASTQ", "Adapter presets or custom adapters from Run Pipeline; minimum length from Run Pipeline."),
-      c("Tool", "Bowtie2", bowtie2_modules, "CUT&RUN fragment alignment", ref$label, "Defaults: MAPQ 30, max fragment 1000 bp, keep target duplicates, deduplicate IgG/input controls, remove mitochondrial fragments from peak-calling bedGraphs."),
-      c("Tool", "SEACR", seacr_modules, "Recommended sparse CUT&RUN peak calling", "Bowtie2 fragment bedGraphs and optional IgG/input control bedGraph", "Default norm/stringent; controls are selected from control_sample or inferred IgG/input rows."),
+      c("Tool", "Bowtie2", bowtie2_modules, "CUT&RUN fragment alignment and normalization", ref$label, "Defaults: MAPQ 30, max fragment 1000 bp, CPM normalization, keep target duplicates, deduplicate IgG/input controls, remove mitochondrial fragments from peak-calling bedGraphs. Optional spike-in alignment/normalization is available when a spike-in Bowtie2 index is supplied."),
+      c("Tool", "SEACR", seacr_modules, "Recommended sparse CUT&RUN peak calling and FRiP QC", "Bowtie2 normalized fragment bedGraphs and optional IgG/input control bedGraph", "Default norm/stringent; controls are selected from control_sample or inferred IgG/input rows. FRiP is written from fragments overlapping SEACR peaks."),
+      c("Tool", "Peak QC", "BEDTools module listed in CodeSpringLab script", "Consensus peaks, peak count matrix, and FRiP summary", "SEACR peak BED files and Bowtie2 BAM files", "Merges SEACR peaks across samples and counts fragments over consensus peaks."),
       c("Tool", "MACS2", macs2_modules, "Optional peak calling comparison", "Bowtie2 BAM and optional IgG/input control BAM", "Default q-value 0.01 and narrow peaks; broad mode available for broad histone marks.")
     )
     out <- as.data.frame(do.call(rbind, rows), stringsAsFactors = FALSE)
@@ -1906,6 +1914,7 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
         if (count_files(file.path(data_dir, "fastqc"), "\\.html$") + count_files(file.path(data_dir, "fastqc_cutadapt"), "\\.html$") > 0) "Complete" else "Not started",
         if (count_files(file.path(data_dir, "bowtie2"), "Aligned\\.sortedByCoord\\.out\\.bam$") > 0) "Complete" else "Not started",
         if (count_files(file.path(data_dir, "seacr"), "\\.bed$") + count_files(file.path(data_dir, "seacr"), "\\.bedgraph$") > 0) "Complete" else "Not started",
+        if (file.exists(file.path(data_dir, "cutrun_peak_qc", "seacr_consensus_peaks.bed"))) "Complete" else "Not started",
         if (count_files(file.path(data_dir, "macs2"), "(narrowPeak|broadPeak|peaks\\.xls)$") > 0) "Complete" else "Not started"
       ),
       path = c(
@@ -1914,6 +1923,7 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
         file.path(data_dir, "fastqc"),
         file.path(data_dir, "bowtie2"),
         file.path(data_dir, "seacr"),
+        file.path(data_dir, "cutrun_peak_qc"),
         file.path(data_dir, "macs2")
       ),
       stringsAsFactors = FALSE
@@ -2042,7 +2052,7 @@ rna_pipeline_order <- function() {
 }
 
 cutrun_pipeline_order <- function() {
-  c("Design matrix", "Cutadapt", "FastQC", "Bowtie2", "SEACR", "MACS2 (optional)")
+  c("Design matrix", "Cutadapt", "FastQC", "Bowtie2", "SEACR", "Peak QC", "MACS2 (optional)")
 }
 
 all_pipeline_steps <- function() {
@@ -3439,7 +3449,25 @@ cutrun_bowtie2_bam <- function(project, sample) {
 }
 
 cutrun_bowtie2_bedgraph <- function(project, sample) {
-  file.path(project$data_dir, "bowtie2", sample, paste0(sample, "_fragments.raw.bedgraph"))
+  sample_dir <- file.path(project$data_dir, "bowtie2", sample)
+  summary_path <- file.path(sample_dir, paste0(sample, "_alignment_summary.txt"))
+  if (file.exists(summary_path)) {
+    lines <- read_metric_lines(summary_path)
+    hit <- grep("^normalized_bedgraph\\t", lines, value = TRUE)
+    if (length(hit)) {
+      path <- strsplit(hit[[1]], "\t", fixed = TRUE)[[1]][2] %||% ""
+      if (nzchar(path) && file.exists(path)) return(path)
+    }
+  }
+  for (suffix in c("_fragments.spikein.bedgraph", "_fragments.CPM.bedgraph", "_fragments.raw.bedgraph")) {
+    path <- file.path(sample_dir, paste0(sample, suffix))
+    if (file.exists(path)) return(path)
+  }
+  file.path(sample_dir, paste0(sample, "_fragments.raw.bedgraph"))
+}
+
+cutrun_bowtie2_fragments <- function(project, sample) {
+  file.path(project$data_dir, "bowtie2", sample, paste0(sample, "_fragments.bed"))
 }
 
 cutrun_missing_bowtie2_message <- function(project, step = "this step") {
@@ -3460,22 +3488,39 @@ cutrun_missing_bowtie2_message <- function(project, step = "this step") {
 }
 
 extract_bowtie2_metrics <- function(project, sample) {
-  summary_path <- file.path(project$data_dir, "bowtie2", sample, paste0(sample, "_cutrun_alignment_summary.txt"))
+  summary_path <- file.path(project$data_dir, "bowtie2", sample, paste0(sample, "_alignment_summary.txt"))
   lines <- read_metric_lines(summary_path)
-  if (!length(lines)) return(c(`Mapped reads` = "", `Alignment rate` = ""))
+  if (!length(lines)) return(c(`Mapped reads` = "", `Spike-in reads` = "", `Duplicate %` = ""))
   one <- function(key) {
     hit <- grep(paste0("^", key, "\\t"), lines, value = TRUE)
     if (!length(hit)) return("")
     strsplit(hit[[1]], "\t", fixed = TRUE)[[1]][2] %||% ""
   }
-  c(`Mapped reads` = one("mapped_reads"), `Alignment rate` = one("overall_alignment_rate"))
+  dup <- suppressWarnings(as.numeric(one("duplicate_fraction")))
+  dup_text <- if (is.finite(dup)) sprintf("%.1f%%", dup * 100) else ""
+  c(
+    `Mapped reads` = one("mapped_reads"),
+    `Spike-in reads` = one("spikein_mapped_reads"),
+    `Duplicate %` = dup_text
+  )
 }
 
 submit_cutrun_bowtie2_jobs <- function(project, trimmed = TRUE, mapq = 30, max_fragment = 1000,
-                                       dedup_target = FALSE, dedup_control = TRUE, remove_mito = TRUE) {
+                                       dedup_target = FALSE, dedup_control = TRUE, remove_mito = TRUE,
+                                       normalization_mode = "CPM", spikein_index_path = "none",
+                                       spikein_name = "spikein", spikein_min_reads = "1000") {
   res <- cutrun_reference_resources(project)
   outdir <- file.path(project$data_dir, "bowtie2")
   dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+  normalization_mode <- selected_choice(normalization_mode, c("CPM", "spikein", "none"), "CPM")
+  spikein_index_path <- trimws(as.character(spikein_index_path %||% "none"))
+  if (!nzchar(spikein_index_path)) spikein_index_path <- "none"
+  if (identical(tolower(normalization_mode), "spikein") && !file.exists(paste0(spikein_index_path, ".1.bt2"))) {
+    return(record_preflight_failure(project, "Bowtie2", paste(
+      "Spike-in normalization was selected, but the spike-in Bowtie2 index was not found.",
+      "Provide the Bowtie2 index prefix, not a .bt2 file. Example: /path/to/ecoli_index/ecoli"
+    ), "bowtie2"))
+  }
   pairs <- sample_fastq_pairs(project, trimmed)
   msg <- missing_read_message(project, pairs, trimmed)
   if (nzchar(msg)) return(record_preflight_failure(project, "Bowtie2", msg, "bowtie2"))
@@ -3500,8 +3545,8 @@ submit_cutrun_bowtie2_jobs <- function(project, trimmed = TRUE, mapq = 30, max_f
     remove_mito_arg <- if (isTRUE(remove_mito)) "y" else "n"
     submit_sbatch(
       project, "Bowtie2", script,
-      c(file.path(sample_dir, sample), res$bowtie2_index, row[["r1"]], row[["r2"]], res$chrom_sizes, project$name, mapq, max_fragment, dedup_mode, remove_mito_arg),
-      "bowtie2", input_mode, sample = sample, target = target, reference = res$label
+      c(file.path(sample_dir, sample), res$bowtie2_index, row[["r1"]], row[["r2"]], res$chrom_sizes, project$name, mapq, max_fragment, dedup_mode, remove_mito_arg, normalization_mode, spikein_index_path, spikein_name, spikein_min_reads),
+      "bowtie2", paste(input_mode, normalization_mode), sample = sample, target = target, reference = res$label
     )
   })
   paste(append_plan_message(messages, plan), collapse = "\n")
@@ -3530,11 +3575,37 @@ submit_cutrun_seacr_jobs <- function(project, norm = "norm", stringency = "strin
     target <- file.path(sample_dir, paste0(sample, ".", stringency, ".bed"))
     submit_sbatch(
       project, "SEACR", script,
-      c(cutrun_bowtie2_bedgraph(project, sample), control_bdg, norm, stringency, file.path(sample_dir, sample), project$name),
+      c(cutrun_bowtie2_bedgraph(project, sample), control_bdg, norm, stringency, file.path(sample_dir, sample), project$name, cutrun_bowtie2_fragments(project, sample)),
       "seacr", paste(norm, stringency), sample = sample, target = target, reference = "SEACR local script"
     )
   }, character(1))
   paste(append_plan_message(messages, plan), collapse = "\n")
+}
+
+submit_cutrun_peakqc_job <- function(project) {
+  data_dir <- project$data_dir
+  seacr_dir <- file.path(data_dir, "seacr")
+  bowtie2_dir <- file.path(data_dir, "bowtie2")
+  if (count_files(seacr_dir, "\\.bed$") == 0) {
+    return(record_preflight_failure(project, "Peak QC", "Run SEACR successfully before building consensus peaks and FRiP summaries.", "cutrun_peak_qc"))
+  }
+  outdir <- file.path(data_dir, "cutrun_peak_qc")
+  dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+  target <- file.path(outdir, "seacr_consensus_peaks.bed")
+  jobs <- job_history(project)
+  active_jobs <- if (NROW(jobs) && all(c("step", "slurm_state") %in% names(jobs))) {
+    jobs[canonical_job_step(jobs$step) == "Peak QC" & jobs$slurm_state %in% active_slurm_states(), , drop = FALSE]
+  } else data.frame()
+  if (NROW(active_jobs)) return("Peak QC is already active for this project.")
+  if (file.exists(target) && file_size_for(target) >= minimum_expected_bytes("Peak QC")) {
+    return("Peak QC is already complete. Delete Peak QC data first if you want to force a rerun.")
+  }
+  script <- file.path(SCRIPTS_DIR, "CUTRUN", "qsub_cutrun_peak_qc.sh")
+  submit_sbatch(
+    project, "Peak QC", script,
+    c(seacr_dir, bowtie2_dir, outdir, project$name),
+    "cutrun_peak_qc", "consensus peaks + FRiP", sample = "", target = target, reference = "SEACR peaks and Bowtie2 BAMs"
+  )
 }
 
 submit_cutrun_macs2_jobs <- function(project, qvalue = "0.01", peak_type = "narrow") {
@@ -4081,6 +4152,7 @@ run_step_meta <- function(project = NULL) {
       "Generate per-read quality reports.",
       "Align fragments with Bowtie2 and create BAM/bedGraph/bigWig outputs.",
       "Call sparse CUT&RUN peaks with SEACR.",
+      "Build consensus SEACR peaks, peak counts, and FRiP summaries.",
       "Optional MACS2 peak calling for comparison or broad histone marks."
     )
   } else {
@@ -5631,6 +5703,10 @@ server <- function(input, output, session) {
             checkboxInput("cutrun_bowtie2_use_trimmed", "Use trimmed reads", value = trimmed_checkbox_default(p, isolate(input$cutrun_bowtie2_use_trimmed))),
             textInput("cutrun_mapq", "Minimum alignment MAPQ", value = input$cutrun_mapq %||% "30"),
             textInput("cutrun_max_fragment", "Maximum fragment length", value = input$cutrun_max_fragment %||% "1000"),
+            selectInput("cutrun_normalization_mode", "Signal normalization", choices = c("CPM", "spikein", "none"), selected = selected_choice(input$cutrun_normalization_mode, c("CPM", "spikein", "none"), "CPM"), selectize = FALSE),
+            textInput("cutrun_spikein_index", "Spike-in Bowtie2 index prefix", value = input$cutrun_spikein_index %||% "none", placeholder = "/path/to/spikein_index/prefix"),
+            textInput("cutrun_spikein_name", "Spike-in label", value = input$cutrun_spikein_name %||% "spikein"),
+            textInput("cutrun_spikein_min_reads", "Minimum spike-in reads warning", value = input$cutrun_spikein_min_reads %||% "1000"),
             checkboxInput("cutrun_dedup_targets", "Deduplicate target reads", value = isTRUE(input$cutrun_dedup_targets)),
             checkboxInput("cutrun_dedup_controls", "Deduplicate IgG/input controls", value = if (is.null(input$cutrun_dedup_controls)) TRUE else isTRUE(input$cutrun_dedup_controls)),
             checkboxInput("cutrun_remove_mito", "Remove mitochondrial fragments from peak-calling bedGraph", value = if (is.null(input$cutrun_remove_mito)) TRUE else isTRUE(input$cutrun_remove_mito))
@@ -5643,6 +5719,9 @@ server <- function(input, output, session) {
             tags$p(class = "muted small-note", "Controls are read from the design matrix control_sample column. If blank, the app tries an IgG/input/control row from the same condition.")
           ),
           "run_cutrun_seacr", "Submit SEACR"),
+        tool_panel("Peak QC", status, "Build SEACR consensus peaks, a consensus peak count matrix, and FRiP summaries.",
+          tags$p(class = "muted small-note", "Run after SEACR. This mirrors nf-core-style peak-level summaries in a lightweight CodeSpringLab format."),
+          "run_cutrun_peakqc", "Submit Peak QC"),
         tool_panel("MACS2 (optional)", status, "Optional MACS2 peak calling for comparison or broad histone-mark peaks.",
           tagList(
             textInput("cutrun_macs2_qvalue", "MACS2 q-value cutoff", value = input$cutrun_macs2_qvalue %||% "0.01"),
@@ -5776,9 +5855,13 @@ server <- function(input, output, session) {
         max_fragment = input$cutrun_max_fragment %||% "1000",
         dedup_target = isTRUE(input$cutrun_dedup_targets),
         dedup_control = if (is.null(input$cutrun_dedup_controls)) TRUE else isTRUE(input$cutrun_dedup_controls),
-        remove_mito = if (is.null(input$cutrun_remove_mito)) TRUE else isTRUE(input$cutrun_remove_mito)
+        remove_mito = if (is.null(input$cutrun_remove_mito)) TRUE else isTRUE(input$cutrun_remove_mito),
+        normalization_mode = input$cutrun_normalization_mode %||% "CPM",
+        spikein_index_path = input$cutrun_spikein_index %||% "none",
+        spikein_name = input$cutrun_spikein_name %||% "spikein",
+        spikein_min_reads = input$cutrun_spikein_min_reads %||% "1000"
       ),
-      if (trimmed) "trimmed reads" else "raw reads"
+      paste(if (trimmed) "trimmed reads" else "raw reads", input$cutrun_normalization_mode %||% "CPM")
     )
   })
   observeEvent(input$run_cutrun_seacr, {
@@ -5786,6 +5869,13 @@ server <- function(input, output, session) {
       "SEACR",
       submit_cutrun_seacr_jobs(current_project(), input$cutrun_seacr_norm %||% "norm", input$cutrun_seacr_stringency %||% "stringent"),
       paste(input$cutrun_seacr_norm %||% "norm", input$cutrun_seacr_stringency %||% "stringent")
+    )
+  })
+  observeEvent(input$run_cutrun_peakqc, {
+    run_submission(
+      "Peak QC",
+      submit_cutrun_peakqc_job(current_project()),
+      "consensus peaks + FRiP"
     )
   })
   observeEvent(input$run_cutrun_macs2, {
