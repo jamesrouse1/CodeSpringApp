@@ -809,13 +809,14 @@ ensure_design_metadata_columns <- function(df, metadata_cols) {
     df <- data.frame(include = logical(), sample = character(), filename = character(), status = character())
   }
   metadata_cols <- unique(metadata_cols[nzchar(metadata_cols)])
+  n <- NROW(df)
   for (base_col in c("include", "sample", "filename", "status")) {
     if (!base_col %in% names(df)) {
-      df[[base_col]] <- if (identical(base_col, "include")) TRUE else ""
+      df[[base_col]] <- if (identical(base_col, "include")) rep(TRUE, n) else rep("", n)
     }
   }
   for (col in metadata_cols) {
-    if (!col %in% names(df)) df[[col]] <- ""
+    if (!col %in% names(df)) df[[col]] <- rep("", n)
   }
   df[, c("include", "sample", metadata_cols, "filename", "status"), drop = FALSE]
 }
