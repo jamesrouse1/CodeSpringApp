@@ -149,6 +149,8 @@ JOBS_PATH <- file.path(APP_HOME, "jobs.tsv")
 LAST_PROJECT_PATH <- file.path(APP_HOME, "last_project_id.txt")
 PROGRESS_REFRESH_MS <- 1000
 SAMPLE_PROGRESS_NICE_LIMIT <- 30
+CUTRUN_DEFAULT_SPIKEIN_INDEX <- "/grid/bsr/data/data/utama/genome/ecoli_k12/bowtie2_index/ecoli_k12_mg1655"
+CUTRUN_DEFAULT_SPIKEIN_NAME <- "ecoli"
 GSEAPY_GENESET_OPTIONS <- c(
   "MSigDB_Hallmark_2020",
   "KEGG_2021_Human",
@@ -578,9 +580,9 @@ write_project_config <- function(project) {
       "max_fragment_length = '1000'",
       "normalization_mode = 'CPM'",
       "normalisation_mode = 'CPM'",
-      "spikein_index_path = 'none'",
-      "spikein_genome = 'none'",
-      "spikein_name = 'spikein'",
+      sprintf("spikein_index_path = %s", deparse(CUTRUN_DEFAULT_SPIKEIN_INDEX)),
+      sprintf("spikein_genome = %s", deparse(CUTRUN_DEFAULT_SPIKEIN_INDEX)),
+      sprintf("spikein_name = %s", deparse(CUTRUN_DEFAULT_SPIKEIN_NAME)),
       "spikein_min_reads = '1000'",
       "dedup_target_reads = 'n'",
       "dedup_control_reads = 'y'",
@@ -3507,14 +3509,14 @@ extract_bowtie2_metrics <- function(project, sample) {
 
 submit_cutrun_bowtie2_jobs <- function(project, trimmed = TRUE, mapq = 30, max_fragment = 1000,
                                        dedup_target = FALSE, dedup_control = TRUE, remove_mito = TRUE,
-                                       normalization_mode = "CPM", spikein_index_path = "none",
-                                       spikein_name = "spikein", spikein_min_reads = "1000") {
+                                       normalization_mode = "CPM", spikein_index_path = CUTRUN_DEFAULT_SPIKEIN_INDEX,
+                                       spikein_name = CUTRUN_DEFAULT_SPIKEIN_NAME, spikein_min_reads = "1000") {
   res <- cutrun_reference_resources(project)
   outdir <- file.path(project$data_dir, "bowtie2")
   dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
   normalization_mode <- selected_choice(normalization_mode, c("CPM", "spikein", "none"), "CPM")
   spikein_index_path <- trimws(as.character(spikein_index_path %||% "none"))
-  if (!nzchar(spikein_index_path)) spikein_index_path <- "none"
+  if (!nzchar(spikein_index_path) || identical(tolower(spikein_index_path), "none")) spikein_index_path <- CUTRUN_DEFAULT_SPIKEIN_INDEX
   if (identical(tolower(normalization_mode), "spikein") && !file.exists(paste0(spikein_index_path, ".1.bt2"))) {
     return(record_preflight_failure(project, "Bowtie2", paste(
       "Spike-in normalization was selected, but the spike-in Bowtie2 index was not found.",
@@ -5704,8 +5706,8 @@ server <- function(input, output, session) {
             textInput("cutrun_mapq", "Minimum alignment MAPQ", value = input$cutrun_mapq %||% "30"),
             textInput("cutrun_max_fragment", "Maximum fragment length", value = input$cutrun_max_fragment %||% "1000"),
             selectInput("cutrun_normalization_mode", "Signal normalization", choices = c("CPM", "spikein", "none"), selected = selected_choice(input$cutrun_normalization_mode, c("CPM", "spikein", "none"), "CPM"), selectize = FALSE),
-            textInput("cutrun_spikein_index", "Spike-in Bowtie2 index prefix", value = input$cutrun_spikein_index %||% "none", placeholder = "/path/to/spikein_index/prefix"),
-            textInput("cutrun_spikein_name", "Spike-in label", value = input$cutrun_spikein_name %||% "spikein"),
+            textInput("cutrun_spikein_index", "Spike-in Bowtie2 index prefix", value = input$cutrun_spikein_index %||% CUTRUN_DEFAULT_SPIKEIN_INDEX, placeholder = CUTRUN_DEFAULT_SPIKEIN_INDEX),
+            textInput("cutrun_spikein_name", "Spike-in label", value = input$cutrun_spikein_name %||% CUTRUN_DEFAULT_SPIKEIN_NAME),
             textInput("cutrun_spikein_min_reads", "Minimum spike-in reads warning", value = input$cutrun_spikein_min_reads %||% "1000"),
             checkboxInput("cutrun_dedup_targets", "Deduplicate target reads", value = isTRUE(input$cutrun_dedup_targets)),
             checkboxInput("cutrun_dedup_controls", "Deduplicate IgG/input controls", value = if (is.null(input$cutrun_dedup_controls)) TRUE else isTRUE(input$cutrun_dedup_controls)),
@@ -5857,8 +5859,8 @@ server <- function(input, output, session) {
         dedup_control = if (is.null(input$cutrun_dedup_controls)) TRUE else isTRUE(input$cutrun_dedup_controls),
         remove_mito = if (is.null(input$cutrun_remove_mito)) TRUE else isTRUE(input$cutrun_remove_mito),
         normalization_mode = input$cutrun_normalization_mode %||% "CPM",
-        spikein_index_path = input$cutrun_spikein_index %||% "none",
-        spikein_name = input$cutrun_spikein_name %||% "spikein",
+        spikein_index_path = input$cutrun_spikein_index %||% CUTRUN_DEFAULT_SPIKEIN_INDEX,
+        spikein_name = input$cutrun_spikein_name %||% CUTRUN_DEFAULT_SPIKEIN_NAME,
         spikein_min_reads = input$cutrun_spikein_min_reads %||% "1000"
       ),
       paste(if (trimmed) "trimmed reads" else "raw reads", input$cutrun_normalization_mode %||% "CPM")
