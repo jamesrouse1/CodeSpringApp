@@ -3018,16 +3018,20 @@ sample_progress <- function(project, active_states = active_job_state_map(projec
           step_hits[nzchar(step_hits$sample) & step_hits$sample == sample, , drop = FALSE]
         } else step_hits
       } else data.frame()
-      active <- NROW(active_hit) > 0 || step %in% names(active_states)
       all_step_hits <- if (NROW(jobs)) {
         step_hits <- jobs[jobs$step == step, , drop = FALSE]
         if ("sample" %in% names(step_hits) && NROW(step_hits)) {
           sample_hits <- step_hits[nzchar(step_hits$sample) & step_hits$sample == sample, , drop = FALSE]
-          if (NROW(sample_hits)) sample_hits else step_hits
+          has_sample_tracking <- any(nzchar(step_hits$sample))
+          if (NROW(sample_hits)) sample_hits else if (has_sample_tracking) data.frame() else step_hits
         } else step_hits
       } else data.frame()
+      step_jobs <- if (NROW(jobs)) jobs[jobs$step == step, , drop = FALSE] else data.frame()
+      has_sample_tracking <- NROW(step_jobs) && "sample" %in% names(step_jobs) && any(nzchar(step_jobs$sample))
+      fallback_active <- !has_sample_tracking && step %in% names(active_states)
+      active <- NROW(active_hit) > 0 || fallback_active
       latest_hit <- if (NROW(active_hit)) tail(active_hit, 1) else if (NROW(all_step_hits)) tail(all_step_hits, 1) else data.frame()
-      slurm_state <- if (NROW(latest_hit) && "slurm_state" %in% names(latest_hit)) latest_hit$slurm_state[1] else if (active && step %in% names(active_states)) active_states[[step]] else ""
+      slurm_state <- if (NROW(latest_hit) && "slurm_state" %in% names(latest_hit)) latest_hit$slurm_state[1] else if (fallback_active) active_states[[step]] else ""
       elapsed <- if (NROW(latest_hit) && "elapsed" %in% names(latest_hit)) latest_hit$elapsed[1] else ""
       min_size <- minimum_expected_bytes(step)
       complete_outputs <- length(sizes) > 0 && all(sizes >= min_size)
@@ -3050,14 +3054,14 @@ sample_progress <- function(project, active_states = active_job_state_map(projec
         "Waiting"
       } else if (active && growing) {
         "Running"
-      } else if (active && size > 0) {
-        "Running, no growth yet"
       } else if (active) {
-        "Waiting"
+        if (slurm_running) "Running" else "Waiting"
       } else if (error_signal && !complete_outputs) {
         "Likely failed"
       } else if (complete_outputs || (slurm_complete && size > 0)) {
         "Completed"
+      } else if (slurm_complete) {
+        "Likely failed"
       } else if (size > 0 && size < min_size) {
         "Likely failed"
       } else if (optional) {
@@ -3065,14 +3069,14 @@ sample_progress <- function(project, active_states = active_job_state_map(projec
       } else {
         "Not started"
       }
-      note <- if (status == "Likely failed") {
+      note <- if (identical(status, "Likely failed") && slurm_complete && !complete_outputs) {
+        "SLURM completed, but the expected output is missing or too small."
+      } else if (status == "Likely failed") {
         if (error_signal) "A failed SLURM state or non-empty error log was detected for this sample/step." else paste0("Output exists but is smaller than expected (<", min_size, " bytes).")
       } else if (grepl(", Deleted$", status)) {
         "Data outputs for this step were deleted after the recorded status."
       } else if (identical(status, "Cancelled")) {
         "SLURM reports this job was cancelled or failed."
-      } else if (identical(status, "Running, no growth yet")) {
-        "File exists but size did not increase since the last refresh."
       } else if (identical(status, "Running") && growing) {
         "Output file size increased since the last refresh."
       } else if (identical(status, "Running") && size == 0) {
