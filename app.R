@@ -2255,7 +2255,7 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
         if (count_files(file.path(data_dir, "bowtie2"), "_alignment_summary\\.txt$") > 0) "Complete" else "Not started",
         if (count_files(file.path(data_dir, "seacr"), "\\.bed$") + count_files(file.path(data_dir, "seacr"), "\\.bedgraph$") > 0) "Complete" else "Not started",
         if (file.exists(file.path(data_dir, "cutrun_peak_qc", "seacr_consensus_peaks.bed"))) "Complete" else "Not started",
-        if (file.exists(file.path(data_dir, "cutrun_diffbind", "_COMPLETE"))) "Complete" else "Not started",
+        if (file.exists(file.path(data_dir, "cutrun_diffbind", "_COMPLETE")) || count_files(file.path(data_dir, "cutrun_diffbind"), "^_COMPLETE$") > 0) "Complete" else "Not started",
         if (count_files(file.path(data_dir, "macs2"), "(narrowPeak|broadPeak|peaks\\.xls)$") > 0) "Complete" else "Not started"
       ),
       path = c(
@@ -2673,7 +2673,13 @@ cutrun_peak_qc_summary_table <- function(project) {
 }
 
 cutrun_diffbind_summary_table <- function(project) {
-  safe_read_table(file.path(project$data_dir, "cutrun_diffbind", "cutrun_diffbind_summary.tsv"), 5000)
+  root <- file.path(project$data_dir, "cutrun_diffbind")
+  legacy <- file.path(root, "cutrun_diffbind_summary.tsv")
+  paths <- if (dir.exists(root)) list.files(root, pattern = "^cutrun_diffbind_summary\\.tsv$", recursive = TRUE, full.names = TRUE) else character(0)
+  paths <- unique(c(if (file.exists(legacy)) legacy else character(0), paths))
+  rows <- lapply(paths, safe_read_table, n = 5000)
+  rows <- Filter(NROW, rows)
+  if (length(rows)) do.call(rbind, rows) else data.frame()
 }
 
 cutrun_diffbind_result_dirs <- function(project) {
@@ -3831,15 +3837,42 @@ sample_fastq_pairs <- function(project, trimmed = FALSE) {
   if (!NROW(design) || !"sample" %in% names(design) || !"filename" %in% names(design)) return(data.frame())
   base <- if (trimmed) file.path(project$data_dir, "cutadapt") else project$fastq_dir
   rows <- lapply(seq_len(NROW(design)), function(i) {
-    parts <- trimws(unlist(strsplit(as.character(design$filename[i]), ",")))
-    parts <- parts[nzchar(parts)]
-    if (!length(parts)) return(NULL)
-    r1 <- resolve_read_path(base, parts[1], allow_absolute = !isTRUE(trimmed))
-    r2 <- if (project$paired_end && length(parts) >= 2) resolve_read_path(base, parts[2], allow_absolute = !isTRUE(trimmed)) else r1
-    data.frame(sample = as.character(design$sample[i]), r1 = r1, r2 = r2, stringsAsFactors = FALSE)
+    sample <- as.character(design$sample[i])
+    lanes <- trimws(unlist(strsplit(as.character(design$filename[i]), ";", fixed = TRUE)))
+    lanes <- lanes[nzchar(lanes)]
+    lane_parts <- lapply(lanes, function(lane) {
+      parts <- trimws(unlist(strsplit(lane, ",", fixed = TRUE)))
+      parts[nzchar(parts)]
+    })
+    lane_parts <- Filter(length, lane_parts)
+    if (!length(lane_parts)) return(NULL)
+    if (isTRUE(project$paired_end) && any(lengths(lane_parts) < 2L)) {
+      stop("Every paired-end lane in filename must contain R1,R2. Separate pooled lanes with semicolons. Sample: ", sample)
+    }
+    lane_count <- length(lane_parts)
+    if (isTRUE(trimmed) && lane_count > 1L) {
+      r1 <- file.path(base, paste0(sample, "_R1.fastq.gz"))
+      r2 <- if (project$paired_end) file.path(base, paste0(sample, "_R2.fastq.gz")) else r1
+    } else if (isTRUE(trimmed)) {
+      r1 <- resolve_read_path(base, lane_parts[[1]][1], allow_absolute = FALSE)
+      r2 <- if (project$paired_end) resolve_read_path(base, lane_parts[[1]][2], allow_absolute = FALSE) else r1
+    } else {
+      r1 <- paste(vapply(lane_parts, function(parts) resolve_read_path(base, parts[1], allow_absolute = TRUE), character(1)), collapse = ",")
+      r2 <- if (project$paired_end) paste(vapply(lane_parts, function(parts) resolve_read_path(base, parts[2], allow_absolute = TRUE), character(1)), collapse = ",") else r1
+    }
+    trimmed_r1 <- if (lane_count > 1L) file.path(project$data_dir, "cutadapt", paste0(sample, "_R1.fastq.gz")) else file.path(project$data_dir, "cutadapt", basename(lane_parts[[1]][1]))
+    trimmed_r2 <- if (project$paired_end) {
+      if (lane_count > 1L) file.path(project$data_dir, "cutadapt", paste0(sample, "_R2.fastq.gz")) else file.path(project$data_dir, "cutadapt", basename(lane_parts[[1]][2]))
+    } else trimmed_r1
+    data.frame(sample = sample, r1 = r1, r2 = r2, lane_count = lane_count, trimmed_r1 = trimmed_r1, trimmed_r2 = trimmed_r2, stringsAsFactors = FALSE)
   })
   out <- do.call(rbind, Filter(Negate(is.null), rows))
   if (is.null(out)) data.frame() else out
+}
+
+split_fastq_path_list <- function(value) {
+  paths <- trimws(unlist(strsplit(as.character(value %||% ""), ",", fixed = TRUE)))
+  paths[nzchar(paths)]
 }
 
 parse_sbatch_job_id <- function(output) {
@@ -4220,7 +4253,7 @@ missing_read_message <- function(project, pairs, trimmed = FALSE) {
     ))
   }
   if (!NROW(pairs)) return("No samples/read files found in design_matrix.txt.")
-  reads <- unique(c(pairs$r1, if (isTRUE(project$paired_end)) pairs$r2 else character(0)))
+  reads <- unique(unlist(lapply(c(pairs$r1, if (isTRUE(project$paired_end)) pairs$r2 else character(0)), split_fastq_path_list), use.names = FALSE))
   missing <- reads[nzchar(reads) & !file.exists(reads)]
   if (length(missing)) {
     return(paste(c("These read files do not exist. Check the FASTQ folder and design_matrix.txt filenames:", missing), collapse = "\n"))
@@ -4290,7 +4323,7 @@ submit_fastqc_jobs <- function(project, trimmed = FALSE) {
   targets <- split(seq_len(NROW(pairs)), pairs$sample)
   target_list <- lapply(targets, function(idx) {
     row <- pairs[idx[[1]], , drop = FALSE]
-    reads <- unique(c(row$r1[1], if (project$paired_end) row$r2[1] else character(0)))
+    reads <- unique(unlist(lapply(c(row$r1[1], if (project$paired_end) row$r2[1] else character(0)), split_fastq_path_list), use.names = FALSE))
     file.path(outdir, sub(fastq_suffix_regex, "_fastqc.html", basename(reads), ignore.case = TRUE))
   })
   plan <- sample_submission_plan(project, "FastQC", target_list)
@@ -4300,7 +4333,7 @@ submit_fastqc_jobs <- function(project, trimmed = FALSE) {
   input_mode <- if (trimmed) "trimmed reads" else "raw reads"
   commands <- character(0)
   for (i in seq_len(NROW(pairs))) {
-    reads <- unique(c(pairs$r1[i], if (project$paired_end) pairs$r2[i] else character(0)))
+    reads <- unique(unlist(lapply(c(pairs$r1[i], if (project$paired_end) pairs$r2[i] else character(0)), split_fastq_path_list), use.names = FALSE))
     for (read in reads[nzchar(reads)]) {
       target <- file.path(outdir, sub(fastq_suffix_regex, "_fastqc.html", basename(read), ignore.case = TRUE))
       commands <- c(commands, submit_sbatch(project, "FastQC", script, c(read, outdir, project$name), "fastQC", input_mode, sample = pairs$sample[i], target = target))
@@ -4317,18 +4350,24 @@ submit_cutadapt_jobs <- function(project, adapter1, adapter2, min_length) {
   if (nzchar(msg)) return(record_preflight_failure(project, "Cutadapt", msg, "cutadapt"))
   target_list <- lapply(split(seq_len(NROW(pairs)), pairs$sample), function(idx) {
     row <- pairs[idx[[1]], , drop = FALSE]
-    unique(c(file.path(outdir, basename(row$r1[1])), if (project$paired_end) file.path(outdir, basename(row$r2[1])) else character(0)))
+    unique(c(row$trimmed_r1[1], if (project$paired_end) row$trimmed_r2[1] else character(0)))
   })
   plan <- sample_submission_plan(project, "Cutadapt", target_list)
   if (!length(plan$samples)) return(plan$message)
   pairs <- pairs[pairs$sample %in% plan$samples, , drop = FALSE]
   script <- file.path(SCRIPTS_DIR, if (project$paired_end) "cutadapt_PE/qsub_cutadapt_PE.sh" else "cutadapt_SE/qsub_cutadapt_SE.sh")
+  runner <- if (project$paired_end) file.path(SCRIPTS_DIR, "cutadapt_PE/cutadapt_PE.sh") else ""
+  missing_scripts <- c(script, if (project$paired_end) runner else character(0))
+  missing_scripts <- missing_scripts[!file.exists(missing_scripts)]
+  if (length(missing_scripts)) return(record_preflight_failure(project, "Cutadapt", paste("Required Cutadapt scripts are missing:", paste(missing_scripts, collapse = ", ")), "cutadapt"))
   input_mode <- "raw reads"
   messages <- apply(pairs, 1, function(row) {
-    trimmed1 <- file.path(outdir, basename(row[["r1"]]))
-    trimmed2 <- if (project$paired_end) file.path(outdir, basename(row[["r2"]])) else trimmed1
+    trimmed1 <- row[["trimmed_r1"]]
+    trimmed2 <- if (project$paired_end) row[["trimmed_r2"]] else trimmed1
     read2 <- if (project$paired_end) row[["r2"]] else row[["r1"]]
-    submit_sbatch(project, "Cutadapt", script, c(min_length, adapter1, adapter2, trimmed1, trimmed2, row[["r1"]], read2, project$name), "cutadapt", input_mode, sample = row[["sample"]], target = trimmed1)
+    args <- c(min_length, adapter1, adapter2, trimmed1, trimmed2, row[["r1"]], read2, project$name)
+    if (project$paired_end) args <- c(args, runner)
+    submit_sbatch(project, "Cutadapt", script, args, "cutadapt", input_mode, sample = row[["sample"]], target = trimmed1)
   })
   paste(append_plan_message(messages, plan), collapse = "\n")
 }
@@ -4780,7 +4819,42 @@ cutrun_diffbind_conditions <- function(project) {
   c(preferred, setdiff(sort(values), preferred))
 }
 
-cutrun_diffbind_sample_sheet <- function(project, reference_condition, min_replicates = 1L) {
+cutrun_diffbind_comparison_plan <- function(project, reference_condition, min_replicates = 1L) {
+  design <- cutrun_target_design(project, include_controls = FALSE)
+  reference_condition <- trimws(as.character(reference_condition %||% ""))
+  required <- max(2L, suppressWarnings(as.integer(min_replicates)))
+  if (!NROW(design) || !nzchar(reference_condition)) return(data.frame())
+  design$cell_type <- trimws(as.character(design$cell_type)); design$cell_type[!nzchar(design$cell_type)] <- "all"
+  design$mark <- trimws(as.character(design$mark))
+  design$condition <- trimws(as.character(design$condition))
+  groups <- split(seq_len(NROW(design)), paste(design$cell_type, design$mark, sep = "\r"))
+  rows <- list()
+  for (idx in groups) {
+    group <- design[idx, , drop = FALSE]
+    cell_type <- group$cell_type[[1]]; mark <- group$mark[[1]]
+    tab <- table(group$condition)
+    comparisons <- setdiff(names(tab), reference_condition)
+    for (comparison in comparisons) {
+      n_reference <- if (reference_condition %in% names(tab)) as.integer(tab[[reference_condition]]) else 0L
+      n_comparison <- as.integer(tab[[comparison]])
+      eligible <- n_reference >= required && n_comparison >= required
+      id <- paste(cell_type, mark, comparison, sep = "|||")
+      rows[[length(rows) + 1L]] <- data.frame(
+        id = id,
+        label = sprintf("%s — %s — %s vs %s (%s + %s reps)", cell_type, mark, comparison, reference_condition, n_comparison, n_reference),
+        cell_type = cell_type, mark = mark, comparison = comparison, reference = reference_condition,
+        comparison_replicates = n_comparison, reference_replicates = n_reference, eligible = eligible,
+        reason = if (eligible) "Ready" else sprintf("Needs at least %s replicates in both conditions", required),
+        stringsAsFactors = FALSE
+      )
+    }
+  }
+  if (!length(rows)) return(data.frame())
+  out <- do.call(rbind, rows)
+  out[order(!out$eligible, out$cell_type, out$mark, out$comparison), , drop = FALSE]
+}
+
+cutrun_diffbind_sample_sheet <- function(project, reference_condition, min_replicates = 1L, cell_type = "", mark = "", comparison = "") {
   design <- cutrun_target_design(project, include_controls = FALSE)
   if (!NROW(design)) stop("No non-control CUT&RUN samples were found in design_matrix.txt.")
   reference_condition <- trimws(as.character(reference_condition %||% ""))
@@ -4793,6 +4867,13 @@ cutrun_diffbind_sample_sheet <- function(project, reference_condition, min_repli
   if (any(blank_condition)) stop("Every non-control sample needs a condition value. Missing: ", paste(design$sample[blank_condition], collapse = ", "))
   if (any(blank_replicate)) stop("Every non-control sample needs a biological replicate value. Missing: ", paste(design$sample[blank_replicate], collapse = ", "))
   if (anyDuplicated(design$sample)) stop("Sample names must be unique before differential peak analysis.")
+
+  if (nzchar(cell_type) || nzchar(mark) || nzchar(comparison)) {
+    design_cell <- trimws(as.character(design$cell_type)); design_cell[!nzchar(design_cell)] <- "all"
+    keep <- design_cell == cell_type & trimws(as.character(design$mark)) == mark & trimws(as.character(design$condition)) %in% c(reference_condition, comparison)
+    design <- design[keep, , drop = FALSE]
+    if (!NROW(design)) stop("The selected CUT&RUN comparison has no samples in design_matrix.txt.")
+  }
 
   rows <- lapply(seq_len(NROW(design)), function(i) {
     sample <- as.character(design$sample[[i]])
@@ -4835,31 +4916,19 @@ cutrun_diffbind_sample_sheet <- function(project, reference_condition, min_repli
 
   out_dir <- file.path(project$data_dir, "manifest", "cutrun_diffbind")
   dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
-  path <- file.path(out_dir, "resolved_samples.tsv")
+  sheet_name <- if (nzchar(cell_type) || nzchar(mark) || nzchar(comparison)) clean_name(paste(cell_type, mark, comparison, "vs", reference_condition, sep = "_"), "comparison") else "resolved_samples"
+  path <- file.path(out_dir, paste0(sheet_name, ".tsv"))
   utils::write.table(sheet, path, sep = "\t", row.names = FALSE, quote = FALSE)
   path
 }
 
-submit_cutrun_diffbind_job <- function(project, reference_condition, min_replicates = 1L) {
+submit_cutrun_diffbind_jobs <- function(project, reference_condition, comparison_ids, min_replicates = 1L) {
   min_replicates <- suppressWarnings(as.integer(min_replicates))
   if (!is.finite(min_replicates) || min_replicates < 1L) min_replicates <- 1L
-  sample_sheet <- tryCatch(
-    cutrun_diffbind_sample_sheet(project, reference_condition, min_replicates),
-    error = function(e) e
-  )
-  if (inherits(sample_sheet, "error")) {
-    return(record_preflight_failure(project, "Differential Peaks", conditionMessage(sample_sheet), "cutrun_diffbind"))
-  }
-
-  outdir <- file.path(project$data_dir, "cutrun_diffbind")
-  dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
-  target <- file.path(outdir, "_COMPLETE")
-  if (file.exists(target)) return("Differential Peaks is already complete. Delete its data first to force a rerun.")
-  jobs <- job_history(project)
-  active <- if (NROW(jobs) && all(c("step", "slurm_state") %in% names(jobs))) {
-    jobs[canonical_job_step(jobs$step) == "Differential Peaks" & jobs$slurm_state %in% active_slurm_states(), , drop = FALSE]
-  } else data.frame()
-  if (NROW(active)) return("Differential Peaks is already active for this project.")
+  plan <- cutrun_diffbind_comparison_plan(project, reference_condition, min_replicates)
+  comparison_ids <- unique(as.character(comparison_ids %||% character(0)))
+  selected <- plan[plan$id %in% comparison_ids & plan$eligible, , drop = FALSE]
+  if (!NROW(selected)) return(record_preflight_failure(project, "Differential Peaks", "Select at least one eligible cell type/mark comparison.", "cutrun_diffbind"))
 
   qsub <- file.path(SCRIPTS_DIR, "DiffBind", "qsub_cutrun_diffbind.sh")
   runner <- file.path(SCRIPTS_DIR, "DiffBind", "cutrun_diffbind.sh")
@@ -4871,12 +4940,35 @@ submit_cutrun_diffbind_job <- function(project, reference_condition, min_replica
   if (length(missing_scripts)) {
     return(record_preflight_failure(project, "Differential Peaks", paste("CodeSpringLab CUT&RUN DiffBind scripts are missing:", paste(missing_scripts, collapse = ", ")), "cutrun_diffbind"))
   }
-  submit_sbatch(
-    project, "Differential Peaks", qsub,
-    c(r_script, sample_sheet, outdir, reference_condition, min_replicates, genome_species(project), if (nzchar(blacklist)) blacklist else "none", runner),
-    "cutrun_diffbind", paste("mark-aware; reference", reference_condition, "; replicate support", min_replicates),
-    target = target, reference = paste("SEACR + DiffBind/DESeq2;", genome_species(project))
-  )
+  root <- file.path(project$data_dir, "cutrun_diffbind"); dir.create(root, recursive = TRUE, showWarnings = FALSE)
+  jobs <- job_history(project)
+  messages <- character(0)
+  for (i in seq_len(NROW(selected))) {
+    spec <- selected[i, , drop = FALSE]
+    run_slug <- paste(clean_name(spec$cell_type), clean_name(spec$mark), paste0(clean_name(spec$comparison), "_vs_", clean_name(reference_condition)), sep = "__")
+    outdir <- file.path(root, run_slug); dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+    target <- file.path(outdir, "_COMPLETE")
+    if (file.exists(target)) {
+      messages <- c(messages, paste(spec$label, "is already complete; skipped.")); next
+    }
+    active <- if (NROW(jobs) && all(c("step", "slurm_state", "sample") %in% names(jobs))) {
+      jobs[canonical_job_step(jobs$step) == "Differential Peaks" & jobs$sample == run_slug & jobs$slurm_state %in% active_slurm_states(), , drop = FALSE]
+    } else data.frame()
+    if (NROW(active)) {
+      messages <- c(messages, paste(spec$label, "is already active; skipped.")); next
+    }
+    sample_sheet <- tryCatch(cutrun_diffbind_sample_sheet(project, reference_condition, min_replicates, spec$cell_type, spec$mark, spec$comparison), error = function(e) e)
+    if (inherits(sample_sheet, "error")) {
+      messages <- c(messages, record_preflight_failure(project, "Differential Peaks", paste(spec$label, conditionMessage(sample_sheet), sep = ": "), "cutrun_diffbind")); next
+    }
+    messages <- c(messages, submit_sbatch(
+      project, "Differential Peaks", qsub,
+      c(r_script, sample_sheet, outdir, reference_condition, min_replicates, genome_species(project), if (nzchar(blacklist)) blacklist else "none", spec$comparison, spec$cell_type, spec$mark, runner),
+      "cutrun_diffbind", paste(spec$label, "; consensus support", min_replicates), sample = run_slug,
+      target = target, reference = paste("SEACR + DiffBind/DESeq2;", genome_species(project))
+    ))
+  }
+  paste(messages, collapse = "\n")
 }
 
 submit_cutrun_macs2_jobs <- function(project, qvalue = "0.01", peak_type = "auto") {
@@ -7247,15 +7339,16 @@ server <- function(input, output, session) {
         tool_panel("Differential Peaks", status, "Build mark-specific reproducible consensus peaks and test differential binding with DiffBind/DESeq2.",
           tagList(
             uiOutput("cutrun_diffbind_reference_ui"),
+            uiOutput("cutrun_diffbind_jobs_ui"),
             tags$p(class = "muted small-note", "Default behavior matches the ATAC analysis: at least two biological replicates are required per condition, while the consensus includes peaks found in one or more replicates."),
             tags$details(
               tags$summary("Advanced consensus setting"),
               numericInput("cutrun_diffbind_min_replicates", "Replicates that must support a peak", value = 1, min = 1, step = 1),
               tags$p(class = "muted small-note", "Use 2 only when you want every retained condition-consensus peak to occur in at least two replicates. This can be too restrictive for shallow subset tests.")
             ),
-            tags$p(class = "muted small-note", "The design matrix specifies cell_type, mark, target_class, seacr_stringency, condition, replicate, and control_sample. Every non-reference condition is compared separately with the selected reference for each cell type/mark. Native SEACR widths are preserved; E. coli BAMs are reused automatically when spike-in normalization was selected for Bowtie2.")
+            tags$p(class = "muted small-note", "Each selected cell type/mark comparison is submitted as its own SLURM job and writes to its own results folder. Native SEACR widths are preserved; E. coli BAMs are reused automatically when spike-in normalization was selected for Bowtie2.")
           ),
-          "run_cutrun_diffbind", "Submit Differential Peaks"),
+          "run_cutrun_diffbind", "Submit selected comparison jobs"),
         tool_panel("MACS2 (optional)", status, "Optional MACS2 peak calling for comparison or broad histone-mark peaks.",
           tagList(
             textInput("cutrun_macs2_qvalue", "MACS2 q-value cutoff", value = input$cutrun_macs2_qvalue %||% "0.01"),
@@ -7334,6 +7427,28 @@ server <- function(input, output, session) {
       choices = conditions,
       selected = selected_choice(current, conditions, conditions[[1]]),
       selectize = FALSE
+    )
+  })
+
+  output$cutrun_diffbind_jobs_ui <- renderUI({
+    p <- current_project()
+    if (!is_cutrun_project(p)) return(NULL)
+    reference <- input$cutrun_diffbind_reference %||% ""
+    support <- input$cutrun_diffbind_min_replicates %||% 1
+    plan <- cutrun_diffbind_comparison_plan(p, reference, support)
+    if (!NROW(plan)) return(div(class = "empty-box", "No non-reference comparisons were found for this reference condition."))
+    eligible <- plan[plan$eligible, , drop = FALSE]
+    unavailable <- plan[!plan$eligible, , drop = FALSE]
+    if (!NROW(eligible)) return(div(class = "empty-box", paste(unique(unavailable$reason), collapse = "; ")))
+    choices <- stats::setNames(eligible$id, eligible$label)
+    current <- intersect(input$cutrun_diffbind_jobs %||% character(0), eligible$id)
+    if (!length(current)) current <- eligible$id
+    tagList(
+      selectInput("cutrun_diffbind_jobs", "Comparisons (one SLURM job each)", choices = choices, selected = current, multiple = TRUE),
+      if (NROW(unavailable)) tags$details(
+        tags$summary(sprintf("%s under-replicated group%s not selectable", NROW(unavailable), ifelse(NROW(unavailable) == 1L, " is", "s are"))),
+        tags$ul(lapply(seq_len(NROW(unavailable)), function(i) tags$li(paste(unavailable$label[[i]], "—", unavailable$reason[[i]]))))
+      )
     )
   })
 
@@ -7529,10 +7644,11 @@ server <- function(input, output, session) {
   observeEvent(input$run_cutrun_diffbind, {
     reference <- input$cutrun_diffbind_reference %||% ""
     support <- input$cutrun_diffbind_min_replicates %||% 1
+    comparisons <- input$cutrun_diffbind_jobs %||% character(0)
     run_submission(
       "Differential Peaks",
-      submit_cutrun_diffbind_job(current_project(), reference, support),
-      paste("mark-aware; reference", reference, "; replicate support", support)
+      submit_cutrun_diffbind_jobs(current_project(), reference, comparisons, support),
+      paste(length(comparisons), "comparison job(s); reference", reference, "; consensus support", support)
     )
   })
   observeEvent(input$run_cutrun_macs2, {
