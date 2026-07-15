@@ -1978,6 +1978,13 @@ log_entries <- function(project) {
     }
   }
 
+  if (is_atac_project(project) && length(design_samples)) {
+    for (sample in design_samples) {
+      alignment_log <- file.path(project$data_dir, "bowtie2", sample, paste0(sample, "Log.final.out"))
+      add_row("Bowtie2", "output", sample, alignment_log, paste("Bowtie2", sample, "alignment report"))
+    }
+  }
+
   project_log_dir <- file.path(dirname(project$data_dir), "log")
   if (dir.exists(project_log_dir)) {
     files <- list.files(project_log_dir, pattern = "^(output|error)_.*\\.txt$", full.names = TRUE)
