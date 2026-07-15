@@ -6194,7 +6194,7 @@ server <- function(input, output, session) {
 
   finish_submit_refresh <- function() {
     session$onFlushed(function() {
-      safe_refresh_progress_now("refresh")
+      isolate(safe_refresh_progress_now("refresh"))
     }, once = TRUE)
   }
 
@@ -6749,7 +6749,9 @@ server <- function(input, output, session) {
   })
 
   session$onFlushed(function() {
-    if (isTRUE(existing_project_selected())) safe_refresh_progress_now("session restore")
+    isolate({
+      if (isTRUE(existing_project_selected())) safe_refresh_progress_now("session restore")
+    })
   }, once = TRUE)
 
   observeEvent(input$web_main_tabs, {
