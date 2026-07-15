@@ -846,7 +846,7 @@ scan_fastq_dirs <- function(folders, paired = TRUE, metadata_cols = "treatment",
 
 infer_cutrun_metadata <- function(df) {
   if (!NROW(df) || !"sample" %in% names(df)) return(df)
-  for (col in c("cell_type", "mark", "condition", "replicate", "control_sample")) {
+  for (col in c("cell_type", "mark", "target_class", "seacr_stringency", "condition", "replicate", "control_sample")) {
     if (!col %in% names(df)) df[[col]] <- ""
   }
   for (i in seq_len(NROW(df))) {
@@ -865,6 +865,17 @@ infer_cutrun_metadata <- function(df) {
     }
   }
   control_rows <- grepl("igg|input|control", tolower(as.character(df$mark)))
+  inferred_class <- vapply(as.character(df$mark), function(mark) {
+    value <- tolower(trimws(mark))
+    if (grepl("igg|input|control", value)) return("control")
+    if (grepl("h3k27me3|h3k9me3|h3k36me3|h4k20me3", value)) return("histone_broad")
+    if (grepl("^(h[1-4]|histone)", value)) return("histone_narrow")
+    "tf_or_other"
+  }, character(1))
+  blank_class <- !nzchar(trimws(as.character(df$target_class)))
+  df$target_class[blank_class] <- inferred_class[blank_class]
+  blank_stringency <- !nzchar(trimws(as.character(df$seacr_stringency)))
+  df$seacr_stringency[blank_stringency] <- "auto"
   for (i in which(!control_rows)) {
     if (nzchar(trimws(as.character(df$control_sample[[i]] %||% "")))) next
     exact <- which(
@@ -915,7 +926,7 @@ design_matrix_columns <- function(df) {
 
 default_metadata_cols <- function(project = NULL, analysis = NULL) {
   key <- if (!is.null(project)) analysis_key(project$analysis_key %||% project$analysis) else analysis_key(analysis %||% "rna")
-  if (identical(key, "cutrun")) return(c("cell_type", "mark", "condition", "replicate", "control_sample"))
+  if (identical(key, "cutrun")) return(c("cell_type", "mark", "target_class", "seacr_stringency", "condition", "replicate", "control_sample"))
   if (identical(key, "atac")) return(c("cell_type", "condition", "replicate"))
   "treatment"
 }
@@ -934,6 +945,7 @@ parse_metadata_cols <- function(x, project = NULL) {
   cols <- cols[nzchar(cols) & !cols %in% c("sample", "filename", "include", "status")]
   cols <- unique(cols)
   if (!length(cols)) cols <- default_metadata_cols(project)
+  if (!is.null(project) && is_cutrun_project(project)) cols <- unique(c(default_metadata_cols(project), cols))
   cols
 }
 
@@ -959,10 +971,14 @@ as_design_bool <- function(x) {
   tolower(as.character(x %||% "")) %in% c("true", "t", "1", "yes", "y")
 }
 
-design_matrix_ui <- function(df) {
+design_matrix_ui <- function(df, project = NULL) {
   if (!NROW(df)) return(div(class = "empty-box", "Scan a FASTQ folder or select a project with an existing design_matrix.txt."))
   tagList(
     tags$p(class = "muted small-note", "Click a cell to edit. Use TRUE/FALSE in include. The table is paged so large projects do not freeze the app."),
+    if (!is.null(project) && is_cutrun_project(project)) tags$p(
+      class = "muted small-note",
+      "CUT&RUN target_class values: tf_or_other, histone_narrow, histone_broad, or control. seacr_stringency may be auto, stringent, or relaxed. Auto uses the SEACR panel default. Target class documents peak biology but does not silently change SEACR stringency."
+    ),
     table_output("design_editor_table")
   )
 }
@@ -975,6 +991,7 @@ write_design_matrix <- function(project, df, metadata_cols) {
   if (!"include" %in% names(df)) df$include <- TRUE
   metadata_cols <- unique(metadata_cols[nzchar(metadata_cols)])
   metadata_cols <- metadata_cols[!metadata_cols %in% c("sample", "filename", "include", "status")]
+  if (is_cutrun_project(project)) metadata_cols <- unique(c(default_metadata_cols(project), metadata_cols))
   if (!length(metadata_cols)) metadata_cols <- default_metadata_cols(project)
   df <- ensure_design_metadata_columns(df, metadata_cols)
   keep <- df[vapply(df$include, as_design_bool, logical(1)), , drop = FALSE]
@@ -987,6 +1004,17 @@ write_design_matrix <- function(project, df, metadata_cols) {
     }, character(1))
   }
   keep$sample <- clean_name(keep$sample)
+  if (is_cutrun_project(project)) {
+    keep <- infer_cutrun_metadata(keep)
+    allowed_classes <- c("tf_or_other", "histone_narrow", "histone_broad", "control")
+    allowed_stringency <- c("auto", "stringent", "relaxed")
+    invalid_class <- !tolower(trimws(as.character(keep$target_class))) %in% allowed_classes
+    invalid_stringency <- !tolower(trimws(as.character(keep$seacr_stringency))) %in% allowed_stringency
+    if (any(invalid_class)) stop("Invalid CUT&RUN target_class for: ", paste(keep$sample[invalid_class], collapse = ", "), ". Use tf_or_other, histone_narrow, histone_broad, or control.")
+    if (any(invalid_stringency)) stop("Invalid CUT&RUN seacr_stringency for: ", paste(keep$sample[invalid_stringency], collapse = ", "), ". Use auto, stringent, or relaxed.")
+    keep$target_class <- tolower(trimws(as.character(keep$target_class)))
+    keep$seacr_stringency <- tolower(trimws(as.character(keep$seacr_stringency)))
+  }
   out <- results_design_matrix_path(project)
   dir.create(dirname(out), recursive = TRUE, showWarnings = FALSE)
   keep <- keep[, c("sample", metadata_cols, "filename"), drop = FALSE]
@@ -1849,10 +1877,10 @@ tool_reference_summary <- function(project) {
       c("Tool", "FastQC", fastqc_modules, "Read quality control", "Raw or trimmed FASTQ", "Input mode selected per run; reruns skip completed samples and submit failed/deleted samples only."),
       c("Tool", "cutadapt", cutadapt_modules, "Adapter trimming", "Raw FASTQ", "Adapter presets or custom adapters from Run Pipeline; minimum length from Run Pipeline."),
       c("Tool", "Bowtie2", bowtie2_modules, "CUT&RUN fragment alignment and normalization", ref$label, "Defaults: MAPQ 30, max fragment 1000 bp, E. coli K-12 MG1655 spike-in normalization, keep target duplicates, deduplicate IgG/input controls, and remove mitochondrial fragments from peak-calling bedGraphs. CPM and no normalization remain available as explicit alternatives."),
-      c("Tool", "SEACR", seacr_modules, "Recommended sparse CUT&RUN peak calling and FRiP QC", "Bowtie2 normalized fragment bedGraphs and optional IgG/input control bedGraph", "Default stringent with non selected for the default spike-in-normalized tracks; norm is used for CPM/raw tracks. Controls are selected from control_sample or inferred IgG/input rows. FRiP is written from fragments overlapping SEACR peaks."),
+      c("Tool", "SEACR", seacr_modules, "Recommended sparse CUT&RUN peak calling and FRiP QC", "Bowtie2 normalized fragment bedGraphs and optional IgG/input control bedGraph", "Stringent is the primary default; relaxed is available globally or per sample through seacr_stringency in design_matrix.txt. target_class records TF/focal versus narrow- or broad-histone biology but does not silently change SEACR stringency. non is used for spike-in-normalized tracks and norm for CPM/raw tracks. Controls are selected from control_sample or inferred IgG/input rows."),
       c("Tool", "Peak QC", "BEDTools module listed in CodeSpringLab script", "Consensus peaks, peak count matrix, and FRiP summary", "SEACR peak BED files and Bowtie2 BAM files", "Merges SEACR peaks across samples and counts fragments over consensus peaks."),
       c("Tool", "DiffBind/DESeq2", diffbind_modules, "Mark-specific CUT&RUN differential binding", "SEACR peaks, target BAMs, and automatically resolved E. coli spike-in BAMs", "Analyzes each cell type/mark separately; condition consensus requires the selected replicate support; native SEACR widths are preserved with summits=FALSE; IgG BAMs are not subtracted again."),
-      c("Tool", "MACS2", macs2_modules, "Optional peak calling comparison", "Bowtie2 BAM and optional IgG/input control BAM", "Default q-value 0.01 and narrow peaks; broad mode available for broad histone marks.")
+      c("Tool", "MACS2", macs2_modules, "Optional peak calling comparison", "Bowtie2 BAM and optional IgG/input control BAM", "Default q-value 0.01. Auto mode uses broad peaks for histone_broad targets and narrow peaks for histone_narrow or tf_or_other targets; a run-wide narrow or broad override remains available.")
     )
     out <- as.data.frame(do.call(rbind, rows), stringsAsFactors = FALSE)
     colnames(out) <- c("Type", "Name", "Version/reference", "Used for", "Input/reference", "Parameters/settings")
@@ -1885,7 +1913,7 @@ methods_sentence_for_step <- function(step, manifest_rows, project) {
     "FastQC" = paste0("Read quality control was performed with FastQC.", mode_text),
     "Cutadapt" = paste0("Adapter trimming was performed with cutadapt.", mode_text),
     "Bowtie2" = paste0(if (is_atac_project(project)) "ATAC-seq fragments were aligned with Bowtie2 and duplicate-removed CPM bigWigs scaled to one million mapped reads were generated." else "CUT&RUN fragments were aligned with Bowtie2.", ref_text, mode_text),
-    "SEACR" = paste0("CUT&RUN peaks were called with SEACR from fragment bedGraphs.", ref_text, mode_text),
+    "SEACR" = paste0("CUT&RUN peaks were called with SEACR from fragment bedGraphs using the selected global default and any per-sample seacr_stringency overrides. Target class was recorded separately and did not automatically change stringency.", ref_text, mode_text),
     "Differential Peaks" = paste0(if (is_atac_project(project)) "Differential accessibility was tested on a MACS2 consensus peakset using DiffBind with DESeq2." else "Differential CUT&RUN binding was tested separately by cell type and mark using DiffBind with DESeq2. Native SEACR intervals were preserved and spike-in BAMs were reused automatically when available.", ref_text, mode_text),
     "MACS2 Peaks" = paste0("ATAC-seq peaks were called with MACS2 using Tn5-aware shifting and annotated with Homer.", ref_text, mode_text),
     "MACS2 (optional)" = paste0("Optional CUT&RUN peaks were called with MACS2.", ref_text, mode_text),
@@ -4311,7 +4339,7 @@ cutrun_design <- function(project) {
   if ("include" %in% names(design)) {
     design <- design[vapply(design$include, as_design_bool, logical(1)), , drop = FALSE]
   }
-  for (col in c("cell_type", "mark", "target", "condition", "replicate", "control_sample")) {
+  for (col in c("cell_type", "mark", "target", "target_class", "seacr_stringency", "condition", "replicate", "control_sample")) {
     if (!col %in% names(design)) design[[col]] <- ""
   }
   design <- infer_cutrun_metadata(design)
@@ -4321,6 +4349,24 @@ cutrun_design <- function(project) {
   design$target[missing_target] <- as.character(design$mark[missing_target])
   design$cell_type[!nzchar(trimws(as.character(design$cell_type)))] <- "all"
   design
+}
+
+cutrun_seacr_stringency_for <- function(project, sample, default = "stringent") {
+  default <- tolower(trimws(as.character(default %||% "stringent")))
+  if (!default %in% c("stringent", "relaxed")) default <- "stringent"
+  design <- cutrun_design(project)
+  if (!NROW(design) || !sample %in% design$sample) return(default)
+  value <- tolower(trimws(as.character(design$seacr_stringency[match(sample, design$sample)] %||% "auto")))
+  if (value %in% c("stringent", "relaxed")) value else default
+}
+
+cutrun_macs2_peak_type_for <- function(project, sample, default = "auto") {
+  default <- tolower(trimws(as.character(default %||% "auto")))
+  if (default %in% c("narrow", "broad")) return(default)
+  design <- cutrun_design(project)
+  if (!NROW(design) || !sample %in% design$sample) return("narrow")
+  target_class <- tolower(trimws(as.character(design$target_class[match(sample, design$sample)] %||% "tf_or_other")))
+  if (identical(target_class, "histone_broad")) "broad" else "narrow"
 }
 
 cutrun_control_like <- function(x) {
@@ -4624,8 +4670,8 @@ submit_cutrun_seacr_jobs <- function(project, norm = "norm", stringency = "strin
     }
   }
   target_list <- stats::setNames(lapply(as.character(design$sample), function(sample) {
-    hits <- if (dir.exists(file.path(outdir, sample))) list.files(file.path(outdir, sample), pattern = "\\.bed$", full.names = TRUE) else character(0)
-    if (length(hits)) hits else file.path(outdir, sample, paste0(sample, ".", stringency, ".bed"))
+    sample_stringency <- cutrun_seacr_stringency_for(project, sample, stringency)
+    file.path(outdir, sample, paste0(sample, ".", sample_stringency, ".bed"))
   }), as.character(design$sample))
   plan <- sample_submission_plan(project, "SEACR", target_list)
   if (!length(plan$samples)) return(plan$message)
@@ -4634,13 +4680,14 @@ submit_cutrun_seacr_jobs <- function(project, norm = "norm", stringency = "strin
   messages <- vapply(as.character(design$sample), function(sample) {
     sample_dir <- file.path(outdir, sample)
     dir.create(sample_dir, recursive = TRUE, showWarnings = FALSE)
+    sample_stringency <- cutrun_seacr_stringency_for(project, sample, stringency)
     control <- cutrun_control_sample_for(project, sample)
     control_bdg <- if (nzchar(control)) cutrun_bowtie2_bedgraph(project, control) else "none"
-    target <- file.path(sample_dir, paste0(sample, ".", stringency, ".bed"))
+    target <- file.path(sample_dir, paste0(sample, ".", sample_stringency, ".bed"))
     submit_sbatch(
       project, "SEACR", script,
-      c(cutrun_bowtie2_bedgraph(project, sample), control_bdg, norm, stringency, file.path(sample_dir, sample), project$name, cutrun_bowtie2_fragments(project, sample), file.path(SCRIPTS_DIR, "SEACR", "seacr_cutrun.sh")),
-      "seacr", paste(norm, stringency), sample = sample, target = target, reference = "SEACR local script"
+      c(cutrun_bowtie2_bedgraph(project, sample), control_bdg, norm, sample_stringency, file.path(sample_dir, sample), project$name, cutrun_bowtie2_fragments(project, sample), file.path(SCRIPTS_DIR, "SEACR", "seacr_cutrun.sh")),
+      "seacr", paste(norm, sample_stringency), sample = sample, target = target, reference = "SEACR local script"
     )
   }, character(1))
   paste(append_plan_message(messages, plan), collapse = "\n")
@@ -4702,18 +4749,25 @@ cutrun_spikein_bam <- function(project, sample) {
 
 cutrun_seacr_peak_path <- function(project, sample) {
   sample_dir <- file.path(project$data_dir, "seacr", sample)
-  preferred <- c(
+  candidates <- c(
     file.path(sample_dir, paste0(sample, ".stringent.bed")),
     file.path(sample_dir, paste0(sample, ".relaxed.bed"))
   )
-  hit <- preferred[file.exists(preferred) & vapply(preferred, file_size_for, numeric(1)) > 0]
-  if (length(hit)) return(hit[[1]])
+  hit <- candidates[file.exists(candidates) & vapply(candidates, file_size_for, numeric(1)) > 0]
+  design <- cutrun_design(project)
+  row <- if (NROW(design) && sample %in% design$sample) design[match(sample, design$sample), , drop = FALSE] else data.frame()
+  requested <- if (NROW(row)) tolower(trimws(as.character(row$seacr_stringency[[1]] %||% "auto"))) else "auto"
+  if (requested %in% c("stringent", "relaxed")) {
+    preferred <- file.path(sample_dir, paste0(sample, ".", requested, ".bed"))
+    if (preferred %in% hit) return(preferred)
+  }
+  if (length(hit)) return(hit[[which.max(file.info(hit)$mtime)]])
   if (dir.exists(sample_dir)) {
     hit <- list.files(sample_dir, pattern = "\\.(stringent|relaxed)\\.bed$", full.names = TRUE)
     hit <- hit[vapply(hit, file_size_for, numeric(1)) > 0]
-    if (length(hit)) return(sort(hit)[[1]])
+    if (length(hit)) return(hit[[which.max(file.info(hit)$mtime)]])
   }
-  preferred[[1]]
+  candidates[[1]]
 }
 
 cutrun_diffbind_conditions <- function(project) {
@@ -4824,7 +4878,7 @@ submit_cutrun_diffbind_job <- function(project, reference_condition, min_replica
   )
 }
 
-submit_cutrun_macs2_jobs <- function(project, qvalue = "0.01", peak_type = "narrow") {
+submit_cutrun_macs2_jobs <- function(project, qvalue = "0.01", peak_type = "auto") {
   msg <- cutrun_missing_bowtie2_message(project, "MACS2")
   if (nzchar(msg)) return(record_preflight_failure(project, "MACS2 (optional)", msg, "macs2"))
   res <- cutrun_reference_resources(project)
@@ -4832,8 +4886,11 @@ submit_cutrun_macs2_jobs <- function(project, qvalue = "0.01", peak_type = "narr
   dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
   design <- cutrun_target_design(project, include_controls = FALSE)
   if (!NROW(design)) return(record_preflight_failure(project, "MACS2 (optional)", "No non-control CUT&RUN target samples were found. Fill the target column and avoid labeling every row as IgG/input/control.", "macs2"))
-  target_suffix <- if (identical(tolower(peak_type), "broad")) "_peaks.broadPeak" else "_peaks.narrowPeak"
-  target_list <- stats::setNames(lapply(as.character(design$sample), function(sample) file.path(outdir, sample, paste0(sample, target_suffix))), as.character(design$sample))
+  target_list <- stats::setNames(lapply(as.character(design$sample), function(sample) {
+    sample_peak_type <- cutrun_macs2_peak_type_for(project, sample, peak_type)
+    target_suffix <- if (identical(sample_peak_type, "broad")) "_peaks.broadPeak" else "_peaks.narrowPeak"
+    file.path(outdir, sample, paste0(sample, target_suffix))
+  }), as.character(design$sample))
   plan <- sample_submission_plan(project, "MACS2 (optional)", target_list)
   if (!length(plan$samples)) return(plan$message)
   design <- design[design$sample %in% plan$samples, , drop = FALSE]
@@ -4841,13 +4898,15 @@ submit_cutrun_macs2_jobs <- function(project, qvalue = "0.01", peak_type = "narr
   messages <- vapply(as.character(design$sample), function(sample) {
     sample_dir <- file.path(outdir, sample)
     dir.create(sample_dir, recursive = TRUE, showWarnings = FALSE)
+    sample_peak_type <- cutrun_macs2_peak_type_for(project, sample, peak_type)
+    target_suffix <- if (identical(sample_peak_type, "broad")) "_peaks.broadPeak" else "_peaks.narrowPeak"
     control <- cutrun_control_sample_for(project, sample)
     control_bam <- if (nzchar(control)) cutrun_bowtie2_bam(project, control) else "none"
     target <- file.path(sample_dir, paste0(sample, target_suffix))
     submit_sbatch(
       project, "MACS2 (optional)", script,
-      c(sample, cutrun_bowtie2_bam(project, sample), control_bam, res$macs2_genome, qvalue, tolower(peak_type), sample_dir, project$name),
-      "macs2", paste(tolower(peak_type), "q", qvalue), sample = sample, target = target, reference = res$macs2_genome
+      c(sample, cutrun_bowtie2_bam(project, sample), control_bam, res$macs2_genome, qvalue, sample_peak_type, sample_dir, project$name),
+      "macs2", paste(sample_peak_type, "q", qvalue), sample = sample, target = target, reference = res$macs2_genome
     )
   }, character(1))
   paste(append_plan_message(messages, plan), collapse = "\n")
@@ -6936,13 +6995,19 @@ server <- function(input, output, session) {
 
   observeEvent(current_project(), {
     p <- current_project()
-    design_state(design_editor_from_project(p, default_metadata_cols(p)))
+    df <- design_editor_from_project(p, default_metadata_cols(p))
+    if (is_cutrun_project(p)) df <- infer_cutrun_metadata(df)
+    design_state(df)
   }, ignoreInit = FALSE)
 
   observeEvent(list(input$new_design_matrix_path, input$new_project_analysis), {
     if (!identical(input$project_id, "__new__")) return()
     p <- current_project()
-    design_state(design_editor_from_project(p, metadata_cols_from_input()))
+    metadata <- default_metadata_cols(p)
+    updateTextInput(session, "metadata_cols", value = paste(metadata, collapse = ", "))
+    df <- design_editor_from_project(p, metadata)
+    if (is_cutrun_project(p)) df <- infer_cutrun_metadata(df)
+    design_state(df)
   }, ignoreInit = TRUE)
 
   output$design_editor_ui <- renderUI({
@@ -6952,7 +7017,7 @@ server <- function(input, output, session) {
       for (col in default_metadata_cols(current_project())) df[[col]] <- character()
       df <- df[, design_matrix_columns(df), drop = FALSE]
     }
-    design_matrix_ui(df)
+    design_matrix_ui(df, current_project())
   })
 
   output$design_editor_table <- if (DT_AVAILABLE) {
@@ -7168,8 +7233,9 @@ server <- function(input, output, session) {
           tool_panel("SEACR", status, "Recommended sparse CUT&RUN peak calling from fragment bedGraphs.",
           tagList(
             selectInput("cutrun_seacr_norm", "SEACR normalization", choices = c("norm", "non"), selected = selected_choice(input$cutrun_seacr_norm, c("norm", "non"), seacr_norm_default), selectize = FALSE),
-            selectInput("cutrun_seacr_stringency", "SEACR stringency", choices = c("stringent", "relaxed"), selected = selected_choice(input$cutrun_seacr_stringency, c("stringent", "relaxed"), "stringent"), selectize = FALSE),
-            tags$p(class = "muted small-note", "SEACR normalization follows the Bowtie signal automatically: non for E. coli spike-in, norm for CPM or raw signal. Controls are read from control_sample; if blank, the app tries an IgG/input/control row from the same condition.")
+            selectInput("cutrun_seacr_stringency", "Default SEACR stringency", choices = c("Stringent (recommended default)" = "stringent", "Relaxed" = "relaxed"), selected = selected_choice(input$cutrun_seacr_stringency, c("stringent", "relaxed"), "stringent"), selectize = FALSE),
+            tags$p(class = "muted small-note", "SEACR normalization follows the Bowtie signal automatically: non for E. coli spike-in, norm for CPM or raw signal. A sample-level stringent/relaxed value in design_matrix.txt overrides this default; auto uses this setting. TF versus histone class does not automatically change SEACR stringency."),
+            tags$p(class = "muted small-note", "Use stringent for the primary analysis. Relaxed is an optional sensitivity analysis and is not automatically required for histone marks.")
           ),
           "run_cutrun_seacr", "Submit SEACR")
         },
@@ -7180,13 +7246,14 @@ server <- function(input, output, session) {
           tagList(
             uiOutput("cutrun_diffbind_reference_ui"),
             numericInput("cutrun_diffbind_min_replicates", "Replicates supporting each condition consensus", value = 2, min = 1, step = 1),
-            tags$p(class = "muted small-note", "The design matrix must specify cell_type, mark, condition, replicate, and control_sample. Each cell type/mark is analyzed separately. Native SEACR widths are preserved; E. coli BAMs are reused automatically when spike-in normalization was selected for Bowtie2.")
+            tags$p(class = "muted small-note", "The design matrix specifies cell_type, mark, target_class, seacr_stringency, condition, replicate, and control_sample. Each cell type/mark is analyzed separately. Native SEACR widths are preserved; E. coli BAMs are reused automatically when spike-in normalization was selected for Bowtie2.")
           ),
           "run_cutrun_diffbind", "Submit Differential Peaks"),
         tool_panel("MACS2 (optional)", status, "Optional MACS2 peak calling for comparison or broad histone-mark peaks.",
           tagList(
             textInput("cutrun_macs2_qvalue", "MACS2 q-value cutoff", value = input$cutrun_macs2_qvalue %||% "0.01"),
-            selectInput("cutrun_macs2_peak_type", "Peak type", choices = c("narrow", "broad"), selected = selected_choice(input$cutrun_macs2_peak_type, c("narrow", "broad"), "narrow"), selectize = FALSE)
+            selectInput("cutrun_macs2_peak_type", "Peak type", choices = c("Automatic from target_class" = "auto", "Narrow for every target" = "narrow", "Broad for every target" = "broad"), selected = selected_choice(input$cutrun_macs2_peak_type, c("auto", "narrow", "broad"), "auto"), selectize = FALSE),
+            tags$p(class = "muted small-note", "Automatic uses broad for histone_broad and narrow for histone_narrow or tf_or_other. This setting affects only optional MACS2; SEACR retains native enriched-region widths.")
           ),
           "run_cutrun_macs2", "Submit MACS2")
       ))
@@ -7464,8 +7531,8 @@ server <- function(input, output, session) {
   observeEvent(input$run_cutrun_macs2, {
     run_submission(
       "MACS2",
-      submit_cutrun_macs2_jobs(current_project(), input$cutrun_macs2_qvalue %||% "0.01", input$cutrun_macs2_peak_type %||% "narrow"),
-      paste(input$cutrun_macs2_peak_type %||% "narrow", "q", input$cutrun_macs2_qvalue %||% "0.01")
+      submit_cutrun_macs2_jobs(current_project(), input$cutrun_macs2_qvalue %||% "0.01", input$cutrun_macs2_peak_type %||% "auto"),
+      paste(input$cutrun_macs2_peak_type %||% "auto", "q", input$cutrun_macs2_qvalue %||% "0.01")
     )
   })
   observeEvent(input$run_star, {
