@@ -2456,6 +2456,17 @@ sample_output_target <- function(project, sample, step) {
   if (length(targets)) targets[[1]] else ""
 }
 
+fastqc_expected_targets <- function(reads, outdir) {
+  reads <- unique(unlist(lapply(as.character(reads), split_fastq_path_list), use.names = FALSE))
+  reads <- reads[nzchar(reads)]
+  if (!length(reads)) return(character(0))
+  stems <- sub(fastq_suffix_regex, "", basename(reads), ignore.case = TRUE)
+  unique(c(
+    file.path(outdir, paste0(stems, "_fastqc.html")),
+    file.path(outdir, paste0(stems, "_screen.html"))
+  ))
+}
+
 sample_step_targets <- function(project, sample, step, raw_pairs = NULL, trimmed_pairs = NULL) {
   data_dir <- project$data_dir
   if (identical(step, "FastQC")) {
@@ -2464,9 +2475,9 @@ sample_step_targets <- function(project, sample, step, raw_pairs = NULL, trimmed
       if (is.null(pairs)) pairs <- sample_fastq_pairs(project, trimmed)
       hit <- pairs[pairs$sample == sample, , drop = FALSE]
       if (!NROW(hit)) return(character(0))
-      reads <- unique(c(hit$r1[1], if (project$paired_end) hit$r2[1] else character(0)))
+      reads <- c(hit$r1[1], if (project$paired_end) hit$r2[1] else character(0))
       outdir <- file.path(data_dir, if (trimmed) "fastqc_cutadapt" else "fastqc")
-      file.path(outdir, sub(fastq_suffix_regex, "_fastqc.html", basename(reads), ignore.case = TRUE))
+      fastqc_expected_targets(reads, outdir)
     }
     raw <- expected_for(FALSE)
     trimmed <- expected_for(TRUE)
@@ -4361,7 +4372,7 @@ submit_fastqc_jobs <- function(project, trimmed = FALSE) {
   target_list <- lapply(targets, function(idx) {
     row <- pairs[idx[[1]], , drop = FALSE]
     reads <- unique(unlist(lapply(c(row$r1[1], if (project$paired_end) row$r2[1] else character(0)), split_fastq_path_list), use.names = FALSE))
-    file.path(outdir, sub(fastq_suffix_regex, "_fastqc.html", basename(reads), ignore.case = TRUE))
+    fastqc_expected_targets(reads, outdir)
   })
   plan <- sample_submission_plan(project, "FastQC", target_list)
   if (!length(plan$samples)) return(plan$message)
