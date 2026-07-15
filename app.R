@@ -1879,7 +1879,7 @@ tool_reference_summary <- function(project) {
       c("Tool", "Bowtie2", bowtie2_modules, "CUT&RUN fragment alignment and normalization", ref$label, "Defaults: MAPQ 30, max fragment 1000 bp, E. coli K-12 MG1655 spike-in normalization, keep target duplicates, deduplicate IgG/input controls, and remove mitochondrial fragments from peak-calling bedGraphs. CPM and no normalization remain available as explicit alternatives."),
       c("Tool", "SEACR", seacr_modules, "Recommended sparse CUT&RUN peak calling and FRiP QC", "Bowtie2 normalized fragment bedGraphs and optional IgG/input control bedGraph", "Stringent is the primary default; relaxed is available globally or per sample through seacr_stringency in design_matrix.txt. target_class records TF/focal versus narrow- or broad-histone biology but does not silently change SEACR stringency. non is used for spike-in-normalized tracks and norm for CPM/raw tracks. Controls are selected from control_sample or inferred IgG/input rows."),
       c("Tool", "Peak QC", "BEDTools module listed in CodeSpringLab script", "Consensus peaks, peak count matrix, and FRiP summary", "SEACR peak BED files and Bowtie2 BAM files", "Merges SEACR peaks across samples and counts fragments over consensus peaks."),
-      c("Tool", "DiffBind/DESeq2", diffbind_modules, "Mark-specific CUT&RUN differential binding", "SEACR peaks, target BAMs, and automatically resolved E. coli spike-in BAMs", "Analyzes each cell type/mark separately; condition consensus requires the selected replicate support; native SEACR widths are preserved with summits=FALSE; IgG BAMs are not subtracted again."),
+      c("Tool", "DiffBind/DESeq2", diffbind_modules, "Mark-specific CUT&RUN differential binding", "SEACR peaks, target BAMs, and automatically resolved E. coli spike-in BAMs", "Analyzes each cell type/mark separately and compares every non-reference condition with the selected reference. At least two biological replicates are required in each condition. The ATAC-like default admits a peak supported by one or more replicates; stricter consensus support is available under Advanced. Native SEACR widths are preserved with summits=FALSE; IgG BAMs are not subtracted again."),
       c("Tool", "MACS2", macs2_modules, "Optional peak calling comparison", "Bowtie2 BAM and optional IgG/input control BAM", "Default q-value 0.01. Auto mode uses broad peaks for histone_broad targets and narrow peaks for histone_narrow or tf_or_other targets; a run-wide narrow or broad override remains available.")
     )
     out <- as.data.frame(do.call(rbind, rows), stringsAsFactors = FALSE)
@@ -4780,7 +4780,7 @@ cutrun_diffbind_conditions <- function(project) {
   c(preferred, setdiff(sort(values), preferred))
 }
 
-cutrun_diffbind_sample_sheet <- function(project, reference_condition, min_replicates = 2L) {
+cutrun_diffbind_sample_sheet <- function(project, reference_condition, min_replicates = 1L) {
   design <- cutrun_target_design(project, include_controls = FALSE)
   if (!NROW(design)) stop("No non-control CUT&RUN samples were found in design_matrix.txt.")
   reference_condition <- trimws(as.character(reference_condition %||% ""))
@@ -4840,9 +4840,9 @@ cutrun_diffbind_sample_sheet <- function(project, reference_condition, min_repli
   path
 }
 
-submit_cutrun_diffbind_job <- function(project, reference_condition, min_replicates = 2L) {
+submit_cutrun_diffbind_job <- function(project, reference_condition, min_replicates = 1L) {
   min_replicates <- suppressWarnings(as.integer(min_replicates))
-  if (!is.finite(min_replicates) || min_replicates < 1L) min_replicates <- 2L
+  if (!is.finite(min_replicates) || min_replicates < 1L) min_replicates <- 1L
   sample_sheet <- tryCatch(
     cutrun_diffbind_sample_sheet(project, reference_condition, min_replicates),
     error = function(e) e
@@ -7247,8 +7247,13 @@ server <- function(input, output, session) {
         tool_panel("Differential Peaks", status, "Build mark-specific reproducible consensus peaks and test differential binding with DiffBind/DESeq2.",
           tagList(
             uiOutput("cutrun_diffbind_reference_ui"),
-            numericInput("cutrun_diffbind_min_replicates", "Replicates supporting each condition consensus", value = 2, min = 1, step = 1),
-            tags$p(class = "muted small-note", "The design matrix specifies cell_type, mark, target_class, seacr_stringency, condition, replicate, and control_sample. Each cell type/mark is analyzed separately. Native SEACR widths are preserved; E. coli BAMs are reused automatically when spike-in normalization was selected for Bowtie2.")
+            tags$p(class = "muted small-note", "Default behavior matches the ATAC analysis: at least two biological replicates are required per condition, while the consensus includes peaks found in one or more replicates."),
+            tags$details(
+              tags$summary("Advanced consensus setting"),
+              numericInput("cutrun_diffbind_min_replicates", "Replicates that must support a peak", value = 1, min = 1, step = 1),
+              tags$p(class = "muted small-note", "Use 2 only when you want every retained condition-consensus peak to occur in at least two replicates. This can be too restrictive for shallow subset tests.")
+            ),
+            tags$p(class = "muted small-note", "The design matrix specifies cell_type, mark, target_class, seacr_stringency, condition, replicate, and control_sample. Every non-reference condition is compared separately with the selected reference for each cell type/mark. Native SEACR widths are preserved; E. coli BAMs are reused automatically when spike-in normalization was selected for Bowtie2.")
           ),
           "run_cutrun_diffbind", "Submit Differential Peaks"),
         tool_panel("MACS2 (optional)", status, "Optional MACS2 peak calling for comparison or broad histone-mark peaks.",
@@ -7523,7 +7528,7 @@ server <- function(input, output, session) {
   })
   observeEvent(input$run_cutrun_diffbind, {
     reference <- input$cutrun_diffbind_reference %||% ""
-    support <- input$cutrun_diffbind_min_replicates %||% 2
+    support <- input$cutrun_diffbind_min_replicates %||% 1
     run_submission(
       "Differential Peaks",
       submit_cutrun_diffbind_job(current_project(), reference, support),
