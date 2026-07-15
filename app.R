@@ -2635,9 +2635,34 @@ atac_results_explorer_ui <- function() {
     div(class = "hero cutrun-results-hero", div(class = "hero-copy", h1(class = "hero-title", "ATAC-seq Results Explorer"), div(class = "hero-kicker", "GRCm39/GENCODE M39 accessibility analysis"))),
     div(class = "main-tabs", tabsetPanel(id = "atac_results_tabs",
       tabPanel("Overview", br(), actionButton("refresh_atac_results", "Refresh results", class = "btn-primary"), tags$h4("Pipeline status"), table_output("results_overview"), tags$h4("Design matrix"), table_output("design_table")),
-      tabPanel("Alignment", br(), tags$h4("Alignment summary"), table_output("atac_alignment_summary"), tags$hr(), tags$h4("Post-alignment output checks"), table_output("atac_postprocess_status"), tags$hr(), uiOutput("atac_insert_size_ui")),
-      tabPanel("MACS2 Peaks", br(), uiOutput("atac_peak_file_ui"), table_output("atac_peak_table"), tags$hr(), uiOutput("atac_peak_heatmap_ui")),
-      tabPanel("Differential Peaks", br(), uiOutput("atac_diffbind_dir_ui"), table_output("atac_diffbind_table"), tags$hr(), fluidRow(column(6, uiOutput("atac_diffbind_pca_ui")), column(6, uiOutput("atac_diffbind_volcano_ui")))),
+      tabPanel("QC", br(), tabsetPanel(id = "atac_qc_tabs",
+        tabPanel("Initial QC", br(), sidebarLayout(
+          sidebarPanel(width = 2, uiOutput("atac_qc_sample_control"), uiOutput("atac_qc_mode_control"), tags$hr(), helpText("FastQC and FastQ Screen reports for raw or cutadapt-trimmed reads.")),
+          mainPanel(width = 10, uiOutput("atac_qc_status_ui"), tabsetPanel(
+            tabPanel("R1 FastQC", uiOutput("atac_r1_fastqc_ui")),
+            tabPanel("R1 Screen", uiOutput("atac_r1_screen_ui")),
+            tabPanel("R2 FastQC", uiOutput("atac_r2_fastqc_ui")),
+            tabPanel("R2 Screen", uiOutput("atac_r2_screen_ui"))
+          ))
+        )),
+        tabPanel("Alignment", br(), tags$h4("Alignment summary across samples"), table_output("atac_alignment_summary"), tags$hr(), tags$h4("Post-alignment output checks"), table_output("atac_postprocess_status")),
+        tabPanel("Fragment Size", br(), tags$p(class = "muted small-note", "Inspect the paired-end insert-size distribution produced after duplicate removal."), uiOutput("atac_insert_size_ui"))
+      )),
+      tabPanel("Peaks", br(), sidebarLayout(
+        sidebarPanel(width = 2, uiOutput("atac_peak_file_ui"), tags$hr(), helpText("Inspect MACS2 ATAC peak calls and the corresponding TSS-centered signal heatmap.")),
+        mainPanel(width = 10, tabsetPanel(
+          tabPanel("Peak Table", br(), table_output("atac_peak_table")),
+          tabPanel("TSS Heatmap", br(), uiOutput("atac_peak_heatmap_ui"))
+        ))
+      )),
+      tabPanel("Differential Accessibility", br(), sidebarLayout(
+        sidebarPanel(width = 2, uiOutput("atac_diffbind_dir_ui"), tags$hr(), helpText("Each comparison is stored and displayed independently.")),
+        mainPanel(width = 10, tabsetPanel(
+          tabPanel("Results", br(), table_output("atac_diffbind_table")),
+          tabPanel("PCA", br(), uiOutput("atac_diffbind_pca_ui")),
+          tabPanel("Volcano", br(), uiOutput("atac_diffbind_volcano_ui"))
+        ))
+      )),
       tabPanel("Files", br(), uiOutput("atac_file_ui"), uiOutput("atac_file_view"))
     ))
   ))
@@ -7426,6 +7451,44 @@ server <- function(input, output, session) {
 
   output$results_overview <- render_csl_table(project_status(current_project()), page_length = 20)
   output$design_table <- render_csl_table(safe_read_table(current_project()$design_matrix_path), page_length = 50)
+  output$atac_qc_sample_control <- renderUI({
+    req(identical(input$web_main_tabs %||% "", "Results Explorer"))
+    progress_refresh()
+    samples <- cutrun_qc_samples(current_project())
+    if (!length(samples)) return(NULL)
+    selectInput("atac_qc_sample", "Sample", choices = samples,
+                selected = selected_choice(input$atac_qc_sample, samples, samples[[1]]), selectize = FALSE)
+  })
+  output$atac_qc_mode_control <- renderUI({
+    progress_refresh()
+    p <- current_project()
+    raw_dir <- file.path(p$data_dir, "fastqc")
+    trim_dir <- file.path(p$data_dir, "fastqc_cutadapt")
+    raw_available <- dir.exists(raw_dir) && length(list.files(raw_dir, pattern = "_(fastqc|screen)\\.html$", ignore.case = TRUE)) > 0
+    trim_available <- dir.exists(trim_dir) && length(list.files(trim_dir, pattern = "_(fastqc|screen)\\.html$", ignore.case = TRUE)) > 0
+    selected <- if (trim_available && !raw_available) TRUE else if (raw_available && !trim_available) FALSE else if (is.null(input$atac_qc_show_trimmed)) trim_available else isTRUE(input$atac_qc_show_trimmed)
+    checkboxInput("atac_qc_show_trimmed", "Show cutadapt-trimmed QC", value = selected)
+  })
+  output$atac_qc_status_ui <- renderUI({
+    progress_refresh()
+    p <- current_project()
+    raw_available <- dir.exists(file.path(p$data_dir, "fastqc")) && length(list.files(file.path(p$data_dir, "fastqc"), pattern = "_(fastqc|screen)\\.html$", ignore.case = TRUE)) > 0
+    trim_available <- dir.exists(file.path(p$data_dir, "fastqc_cutadapt")) && length(list.files(file.path(p$data_dir, "fastqc_cutadapt"), pattern = "_(fastqc|screen)\\.html$", ignore.case = TRUE)) > 0
+    if (!raw_available && !trim_available) return(div(class = "empty-box", "FastQC has not been run yet."))
+    if (isTRUE(input$atac_qc_show_trimmed) && !trim_available) return(div(class = "empty-box", "QC has not been run on trimmed reads."))
+    if (!isTRUE(input$atac_qc_show_trimmed) && !raw_available) return(div(class = "empty-box", "QC has not been run on raw reads."))
+    NULL
+  })
+  output$atac_r1_fastqc_ui <- renderUI({ cutrun_qc_report_ui(current_project(), input$atac_qc_sample %||% "", "R1", "fastqc", isTRUE(input$atac_qc_show_trimmed)) })
+  output$atac_r1_screen_ui <- renderUI({ cutrun_qc_report_ui(current_project(), input$atac_qc_sample %||% "", "R1", "screen", isTRUE(input$atac_qc_show_trimmed)) })
+  output$atac_r2_fastqc_ui <- renderUI({
+    if (!isTRUE(current_project()$paired_end)) return(div(class = "empty-box", "This is a single-end project; there is no R2 report."))
+    cutrun_qc_report_ui(current_project(), input$atac_qc_sample %||% "", "R2", "fastqc", isTRUE(input$atac_qc_show_trimmed))
+  })
+  output$atac_r2_screen_ui <- renderUI({
+    if (!isTRUE(current_project()$paired_end)) return(div(class = "empty-box", "This is a single-end project; there is no R2 report."))
+    cutrun_qc_report_ui(current_project(), input$atac_qc_sample %||% "", "R2", "screen", isTRUE(input$atac_qc_show_trimmed))
+  })
   output$atac_alignment_summary <- render_csl_table(atac_alignment_summary_table(current_project()), page_length = 50)
   output$atac_postprocess_status <- render_csl_table(atac_postprocess_status_table(current_project()), page_length = 50)
   output$atac_insert_size_ui <- renderUI({
