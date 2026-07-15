@@ -147,7 +147,9 @@ APP_HOME <- path.expand(Sys.getenv("CSL_WEB_HOME", unset = "~/.codespringweb"))
 dir.create(APP_HOME, recursive = TRUE, showWarnings = FALSE)
 JOBS_PATH <- file.path(APP_HOME, "jobs.tsv")
 LAST_PROJECT_PATH <- file.path(APP_HOME, "last_project_id.txt")
-PROGRESS_REFRESH_MS <- 1000
+PROGRESS_REFRESH_MS <- 3000
+JOB_HISTORY_CACHE_SECONDS <- 5
+JOB_HISTORY_CACHE <- new.env(parent = emptyenv())
 SAMPLE_PROGRESS_NICE_LIMIT <- 30
 CUTRUN_DEFAULT_SPIKEIN_INDEX <- "/grid/bsr/data/data/utama/genome/ecoli_k12/bowtie2_index/ecoli_k12_mg1655"
 CUTRUN_DEFAULT_SPIKEIN_NAME <- "ecoli"
@@ -839,8 +841,16 @@ design_matrix_columns <- function(df) {
 default_metadata_cols <- function(project = NULL, analysis = NULL) {
   key <- if (!is.null(project)) analysis_key(project$analysis_key %||% project$analysis) else analysis_key(analysis %||% "rna")
   if (identical(key, "cutrun")) return(c("cell_type", "mark", "condition", "replicate", "control_sample"))
-  if (identical(key, "atac")) return(c("condition", "replicate"))
+  if (identical(key, "atac")) return(c("cell_type", "condition", "replicate"))
   "treatment"
+}
+
+project_metadata_cols <- function(project) {
+  defaults <- default_metadata_cols(project)
+  path <- project$design_matrix_path %||% ""
+  if (!nzchar(path) || !file.exists(path) || dir.exists(path)) return(defaults)
+  existing <- safe_read_table(path)
+  unique(c(defaults, setdiff(names(existing), c("sample", "filename", "include", "status"))))
 }
 
 parse_metadata_cols <- function(x, project = NULL) {
@@ -996,7 +1006,26 @@ extract_job_id <- function(x) {
   ""
 }
 
-job_history <- function(project) {
+job_history_cache_key <- function(project) {
+  paste(project$id %||% project$name %||% "project", project$data_dir %||% "", sep = "\r")
+}
+
+job_history_file_signature <- function() {
+  if (!file.exists(JOBS_PATH)) return("missing")
+  info <- file.info(JOBS_PATH)
+  paste(info$size[[1]], as.numeric(info$mtime[[1]]), sep = ":")
+}
+
+job_history <- function(project, force_refresh = FALSE) {
+  cache_key <- job_history_cache_key(project)
+  file_signature <- job_history_file_signature()
+  if (!isTRUE(force_refresh) && exists(cache_key, envir = JOB_HISTORY_CACHE, inherits = FALSE)) {
+    cached <- get(cache_key, envir = JOB_HISTORY_CACHE, inherits = FALSE)
+    cache_age <- as.numeric(difftime(Sys.time(), cached$checked, units = "secs"))
+    if (identical(cached$file_signature, file_signature) && is.finite(cache_age) && cache_age < JOB_HISTORY_CACHE_SECONDS) {
+      return(cached$value)
+    }
+  }
   if (!file.exists(JOBS_PATH)) return(data.frame())
   jobs <- tryCatch(utils::read.delim(JOBS_PATH, check.names = FALSE, stringsAsFactors = FALSE, fill = TRUE), error = function(e) data.frame())
   if (!NROW(jobs) || !"project" %in% names(jobs) || !"step" %in% names(jobs) || !"output" %in% names(jobs)) return(data.frame())
@@ -1023,7 +1052,7 @@ job_history <- function(project) {
   jobs$slurm_job_name <- ""
   ids <- unique(jobs$job_id[nzchar(jobs$job_id)])
   if (length(ids) && nzchar(Sys.which("squeue"))) {
-    sq <- tryCatch(system2("squeue", c("-h", "-j", paste(ids, collapse = ","), "-o", "%A|%T|%M|%j"), stdout = TRUE, stderr = FALSE), error = function(e) character(0))
+    sq <- tryCatch(suppressWarnings(system2("squeue", c("-h", "-j", paste(ids, collapse = ","), "-o", "%A|%T|%M|%j"), stdout = TRUE, stderr = FALSE, timeout = 10)), error = function(e) character(0))
     sq <- sq[nzchar(sq)]
     if (length(sq)) {
       parts <- strsplit(sq, "|", fixed = TRUE)
@@ -1041,7 +1070,7 @@ job_history <- function(project) {
     }
   }
   if (length(ids) && nzchar(Sys.which("sacct"))) {
-    sac <- tryCatch(system2("sacct", c("-n", "-P", "-j", paste(ids, collapse = ","), "--format=JobIDRaw,State,Elapsed,Start,End,JobName"), stdout = TRUE, stderr = FALSE), error = function(e) character(0))
+    sac <- tryCatch(suppressWarnings(system2("sacct", c("-n", "-P", "-j", paste(ids, collapse = ","), "--format=JobIDRaw,State,Elapsed,Start,End,JobName"), stdout = TRUE, stderr = FALSE, timeout = 10)), error = function(e) character(0))
     sac <- sac[nzchar(sac)]
     if (length(sac)) {
       parts <- strsplit(sac, "|", fixed = TRUE)
@@ -1074,7 +1103,9 @@ job_history <- function(project) {
   jobs$slurm_state[grepl("^COMPLETED", jobs$slurm_state, ignore.case = TRUE)] <- "COMPLETED"
   jobs$slurm_state[app_cancelled] <- "CANCELLED"
   keep <- intersect(c("time", "step", "sample", "job_id", "slurm_state", "elapsed", "start_time", "end_time", "input_mode", "target", "stdout", "stderr"), names(jobs))
-  jobs[, keep, drop = FALSE]
+  result <- jobs[, keep, drop = FALSE]
+  assign(cache_key, list(checked = Sys.time(), file_signature = file_signature, value = result), envir = JOB_HISTORY_CACHE)
+  result
 }
 
 job_history_display <- function(project) {
@@ -6005,7 +6036,7 @@ ui <- fluidPage(
         tabPanel("Design Matrix", br(), h3("Design Matrix Builder"),
                  tags$p(class = "muted", "If no design_matrix.txt was provided during setup, build it here: scan the raw FASTQ folder, then edit include/sample/metadata cells directly. Filenames stay on the right so run steps know which reads belong to each sample."),
                  fluidRow(
-                   column(7, textInput("metadata_cols", "Metadata columns", value = "treatment", placeholder = "treatment, batch, replicate")),
+                   column(7, textInput("metadata_cols", "Metadata columns", value = "treatment", placeholder = "cell_type, condition, replicate")),
                    column(5, br(),
                           div(class = "button-row",
                               actionButton("scan_fastqs", "Scan FASTQ folder", class = "btn-primary"),
@@ -6067,6 +6098,7 @@ server <- function(input, output, session) {
   featurecounts_matrix_autosubmitted <- reactiveVal(character(0))
   sample_size_cache <- reactiveVal(data.frame(path = character(), size = numeric(), checked = character(), stringsAsFactors = FALSE))
   sample_progress_state <- reactiveVal(data.frame())
+  progress_refresh_busy <- reactiveVal(FALSE)
   cutrun_normalization_choice <- reactiveVal("spikein")
   path_browser <- reactiveValues(target = "", mode = "dir", path = path.expand("~"))
   project_selection <- reactiveValues(rna = "", cutrun = "", atac = "", chip = "")
@@ -6129,6 +6161,9 @@ server <- function(input, output, session) {
   }
 
   safe_refresh_progress_now <- function(context = "refresh") {
+    if (isTRUE(isolate(progress_refresh_busy()))) return(invisible(NULL))
+    progress_refresh_busy(TRUE)
+    on.exit(progress_refresh_busy(FALSE), add = TRUE)
     tryCatch(
       refresh_progress_now(),
       error = function(e) {
@@ -6398,7 +6433,7 @@ server <- function(input, output, session) {
     native_registered_id("")
     native_results_loaded_project("")
     p <- current_project()
-    updateTextInput(session, "metadata_cols", value = paste(default_metadata_cols(p), collapse = ", "))
+    updateTextInput(session, "metadata_cols", value = paste(project_metadata_cols(p), collapse = ", "))
     if (isTRUE(existing_project_selected()) && cutadapt_outputs_available(p)) {
       updateCheckboxInput(session, "fastqc_use_trimmed", value = TRUE)
       updateCheckboxInput(session, "star_use_trimmed", value = TRUE)
@@ -6690,6 +6725,10 @@ server <- function(input, output, session) {
     invalidateLater(PROGRESS_REFRESH_MS, session)
     if ((input$web_main_tabs %||% "") %in% c("Progress", "Run Pipeline")) safe_refresh_progress_now("auto refresh")
   })
+
+  session$onFlushed(function() {
+    if (isTRUE(existing_project_selected())) safe_refresh_progress_now("session restore")
+  }, once = TRUE)
 
   observeEvent(input$web_main_tabs, {
     if ((input$web_main_tabs %||% "") %in% c("Progress", "Run Pipeline")) safe_refresh_progress_now("tab refresh")
