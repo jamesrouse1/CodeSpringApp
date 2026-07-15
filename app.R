@@ -147,9 +147,10 @@ APP_HOME <- path.expand(Sys.getenv("CSL_WEB_HOME", unset = "~/.codespringweb"))
 dir.create(APP_HOME, recursive = TRUE, showWarnings = FALSE)
 JOBS_PATH <- file.path(APP_HOME, "jobs.tsv")
 LAST_PROJECT_PATH <- file.path(APP_HOME, "last_project_id.txt")
-PROGRESS_REFRESH_MS <- 3000
-JOB_HISTORY_CACHE_SECONDS <- 5
+PROGRESS_REFRESH_MS <- 5000
+JOB_HISTORY_CACHE_SECONDS <- 10
 JOB_HISTORY_CACHE <- new.env(parent = emptyenv())
+METRIC_LINES_CACHE <- new.env(parent = emptyenv())
 SAMPLE_PROGRESS_NICE_LIMIT <- 30
 CUTRUN_DEFAULT_SPIKEIN_INDEX <- "/grid/bsr/data/data/utama/genome/ecoli_k12/bowtie2_index/ecoli_k12_mg1655"
 CUTRUN_DEFAULT_SPIKEIN_NAME <- "ecoli"
@@ -1338,8 +1339,7 @@ deleted_step_records <- function(project) {
   jobs[, intersect(c("time", "step", "sample", "deleted_status", "previous_status", "previous_slurm_state", "previous_output_bytes", "deleted_at"), names(jobs)), drop = FALSE]
 }
 
-latest_deleted_status <- function(project, step, sample = "") {
-  rec <- deleted_step_records(project)
+latest_deleted_status_from_records <- function(rec, step, sample = "") {
   if (!NROW(rec) || !"step" %in% names(rec) || !"deleted_status" %in% names(rec)) return("")
   rec <- rec[canonical_job_step(rec$step) == canonical_job_step(step), , drop = FALSE]
   if (nzchar(sample %||% "") && "sample" %in% names(rec)) {
@@ -1348,6 +1348,10 @@ latest_deleted_status <- function(project, step, sample = "") {
   }
   if (!NROW(rec)) return("")
   tail(as.character(rec$deleted_status), 1)
+}
+
+latest_deleted_status <- function(project, step, sample = "") {
+  latest_deleted_status_from_records(deleted_step_records(project), step, sample)
 }
 
 job_error_signal <- function(jobs, step, sample = "") {
@@ -2322,11 +2326,12 @@ sample_output_target <- function(project, sample, step) {
   if (length(targets)) targets[[1]] else ""
 }
 
-sample_step_targets <- function(project, sample, step) {
+sample_step_targets <- function(project, sample, step, raw_pairs = NULL, trimmed_pairs = NULL) {
   data_dir <- project$data_dir
   if (identical(step, "FastQC")) {
     expected_for <- function(trimmed) {
-      pairs <- sample_fastq_pairs(project, trimmed)
+      pairs <- if (trimmed) trimmed_pairs else raw_pairs
+      if (is.null(pairs)) pairs <- sample_fastq_pairs(project, trimmed)
       hit <- pairs[pairs$sample == sample, , drop = FALSE]
       if (!NROW(hit)) return(character(0))
       reads <- unique(c(hit$r1[1], if (project$paired_end) hit$r2[1] else character(0)))
@@ -2343,7 +2348,8 @@ sample_step_targets <- function(project, sample, step) {
     return(switch(step,
       "Cutadapt" = {
         cutadapt_dir <- file.path(data_dir, "cutadapt")
-        pairs <- sample_fastq_pairs(project, FALSE)
+        pairs <- raw_pairs
+        if (is.null(pairs)) pairs <- sample_fastq_pairs(project, FALSE)
         hit <- pairs[pairs$sample == sample, , drop = FALSE]
         expected <- character(0)
         if (NROW(hit)) {
@@ -2378,7 +2384,8 @@ sample_step_targets <- function(project, sample, step) {
     return(switch(step,
       "Cutadapt" = {
         cutadapt_dir <- file.path(data_dir, "cutadapt")
-        pairs <- sample_fastq_pairs(project, FALSE)
+        pairs <- raw_pairs
+        if (is.null(pairs)) pairs <- sample_fastq_pairs(project, FALSE)
         hit <- pairs[pairs$sample == sample, , drop = FALSE]
         expected <- character(0)
         if (NROW(hit)) {
@@ -2399,7 +2406,8 @@ sample_step_targets <- function(project, sample, step) {
   switch(step,
     "Cutadapt" = {
       cutadapt_dir <- file.path(data_dir, "cutadapt")
-      pairs <- sample_fastq_pairs(project, FALSE)
+      pairs <- raw_pairs
+      if (is.null(pairs)) pairs <- sample_fastq_pairs(project, FALSE)
       hit <- pairs[pairs$sample == sample, , drop = FALSE]
       expected <- character(0)
       if (NROW(hit)) {
@@ -2453,7 +2461,15 @@ previous_size_for <- function(cache, path) {
 
 read_metric_lines <- function(path) {
   if (!nzchar(path %||% "") || !file.exists(path)) return(character(0))
-  tryCatch(readLines(path, warn = FALSE), error = function(e) character(0))
+  info <- file.info(path)
+  signature <- paste(info$size[[1]], as.numeric(info$mtime[[1]]), sep = ":")
+  if (exists(path, envir = METRIC_LINES_CACHE, inherits = FALSE)) {
+    cached <- get(path, envir = METRIC_LINES_CACHE, inherits = FALSE)
+    if (identical(cached$signature, signature)) return(cached$value)
+  }
+  value <- tryCatch(readLines(path, warn = FALSE), error = function(e) character(0))
+  assign(path, list(signature = signature, value = value), envir = METRIC_LINES_CACHE)
+  value
 }
 
 metric_file_to_named_list <- function(path) {
@@ -2947,6 +2963,9 @@ sample_progress <- function(project, active_states = active_job_state_map(projec
   if (!NROW(design) || !"sample" %in% names(design)) return(list(table = data.frame(), cache = previous_cache))
   sample_steps <- sample_level_steps_for_project(project)
   if (is.null(jobs)) jobs <- job_history(project)
+  deleted_records <- deleted_step_records(project)
+  raw_pairs <- if (any(sample_steps %in% c("Cutadapt", "FastQC"))) sample_fastq_pairs(project, FALSE) else NULL
+  trimmed_pairs <- if ("FastQC" %in% sample_steps) sample_fastq_pairs(project, TRUE) else NULL
   active_job_states <- c("PENDING", "CONFIGURING", "COMPLETING", "RUNNING", "SUSPENDED", "Submitted")
   completed_job_states <- c("COMPLETED", "COMPLETED+", "CD")
   cancelled_job_states <- c("CANCELLED", "CANCELLED+", "CA", "TIMEOUT", "FAILED", "NODE_FAIL", "PREEMPTED")
@@ -2957,7 +2976,7 @@ sample_progress <- function(project, active_states = active_job_state_map(projec
   for (sample in as.character(design$sample)) {
     for (step in sample_steps) {
       if (is_cutrun_project(project) && step %in% c("SEACR", "MACS2 (optional)") && cutrun_control_like(target_by_sample[[sample]] %||% "")) next
-      targets <- sample_step_targets(project, sample, step)
+      targets <- sample_step_targets(project, sample, step, raw_pairs = raw_pairs, trimmed_pairs = trimmed_pairs)
       target <- paste(targets, collapse = "; ")
       sizes <- vapply(targets, file_size_for, numeric(1))
       size <- sum(sizes, na.rm = TRUE)
@@ -2983,7 +3002,7 @@ sample_progress <- function(project, active_states = active_job_state_map(projec
       elapsed <- if (NROW(latest_hit) && "elapsed" %in% names(latest_hit)) latest_hit$elapsed[1] else ""
       min_size <- minimum_expected_bytes(step)
       complete_outputs <- length(sizes) > 0 && all(sizes >= min_size)
-      deleted_status <- latest_deleted_status(project, step, sample)
+      deleted_status <- latest_deleted_status_from_records(deleted_records, step, sample)
       deleted_outputs <- nzchar(deleted_status) && size == 0 && !active
       error_signal <- job_error_signal(jobs, step, sample)
       growing <- active && has_previous && size > previous_size
@@ -5143,9 +5162,9 @@ pipeline_stepper_ui <- function(project, status = NULL) {
   }))
 }
 
-tool_panel <- function(step, status, description, controls, button_id, button_label, progress_df = data.frame()) {
-  st <- status$status[match(step, status$step)] %||% "Not started"
-  mode <- status$input[match(step, status$step)] %||% ""
+tool_panel <- function(step, status, description, controls, button_id, button_label, progress_df = data.frame(), status_step = step, show_sample_progress = TRUE, show_job_actions = TRUE) {
+  st <- status$status[match(status_step, status$step)] %||% "Not started"
+  mode <- status$input[match(status_step, status$step)] %||% ""
   cls <- status_css_key(st)
   tags$details(
     class = paste("tool-panel", cls),
@@ -5160,13 +5179,13 @@ tool_panel <- function(step, status, description, controls, button_id, button_la
         controls,
         actionButton(button_id, button_label, class = "btn-primary"),
         uiOutput(tool_message_output_id(step)),
-        if (step %in% sample_level_pipeline_steps()) uiOutput(tool_progress_ui_output_id(step)) else NULL,
-        div(class = "tool-cancel-zone",
+        if (isTRUE(show_sample_progress) && status_step %in% sample_level_pipeline_steps()) uiOutput(tool_progress_ui_output_id(status_step)) else NULL,
+        if (isTRUE(show_job_actions)) div(class = "tool-cancel-zone",
             actionButton(tool_cancel_button_id(step), "Cancel active jobs", class = "btn-danger btn-sm")
-        ),
-        div(class = "tool-delete-zone",
+        ) else NULL,
+        if (isTRUE(show_job_actions)) div(class = "tool-delete-zone",
             actionButton(tool_delete_data_button_id(step), "Delete step data", class = "btn-danger btn-sm")
-        )
+        ) else NULL
     )
   )
 }
@@ -6723,7 +6742,10 @@ server <- function(input, output, session) {
 
   observe({
     invalidateLater(PROGRESS_REFRESH_MS, session)
-    if ((input$web_main_tabs %||% "") %in% c("Progress", "Run Pipeline")) safe_refresh_progress_now("auto refresh")
+    if ((input$web_main_tabs %||% "") %in% c("Progress", "Run Pipeline")) {
+      jobs <- isolate(job_history_state())
+      if (length(active_job_state_map_from_jobs(jobs))) safe_refresh_progress_now("auto refresh")
+    }
   })
 
   session$onFlushed(function() {
@@ -6735,7 +6757,7 @@ server <- function(input, output, session) {
   }, ignoreInit = TRUE)
 
   output$progress_updated <- renderText({
-    paste("Auto-refreshes every", PROGRESS_REFRESH_MS / 1000, "seconds. Last checked:", format(progress_refresh(), "%Y-%m-%d %H:%M:%S"))
+    paste("Auto-refreshes active jobs every", PROGRESS_REFRESH_MS / 1000, "seconds. Last checked:", format(progress_refresh(), "%Y-%m-%d %H:%M:%S"))
   })
 
   progress_status <- reactive({
@@ -6877,10 +6899,10 @@ server <- function(input, output, session) {
           checkboxInput("atac_bowtie2_use_trimmed", "Use trimmed reads", value = trimmed_checkbox_default(p, isolate(input$atac_bowtie2_use_trimmed))),
           tags$p(class = "muted small-note", atac_reference_resources(p)$bowtie2_index)
         ), "run_atac_bowtie2", "Submit Bowtie2"),
-        tool_panel("Bowtie2", status, "Repair incomplete ATAC post-alignment outputs without repeating read alignment.", tagList(
+        tool_panel("Post-alignment Repair", status, "Repair incomplete ATAC post-alignment outputs without repeating read alignment.", tagList(
           uiOutput("atac_postprocess_controls_ui"),
           tags$p(class = "muted small-note", "The app uses a lightweight 24 GB job when only the BAM index or CPM bigWig needs repair. Missing Picard, BED, or insert-size outputs trigger the full 96 GB post-alignment repair. Outputs are replaced only after validation succeeds.")
-        ), "run_atac_postprocess", "Repair selected samples"),
+        ), "run_atac_postprocess", "Repair selected samples", status_step = "Bowtie2", show_sample_progress = FALSE, show_job_actions = FALSE),
         tool_panel("MACS2 Peaks", status, "Call shifted ATAC-seq peaks and generate TSS heatmaps and Homer annotations.", tagList(textInput("atac_macs2_qvalue", "MACS2 q-value", value = input$atac_macs2_qvalue %||% "0.05")), "run_atac_macs2", "Submit MACS2"),
         tool_panel("Differential Peaks", status, "Build the DiffBind consensus peakset and test differential accessibility.", tagList(uiOutput("atac_diffbind_controls_ui"), tags$p(class = "muted small-note", "Requires at least two biological replicates per selected condition.")), "run_atac_diffbind", "Submit DiffBind", data.frame())
       ))
