@@ -25,10 +25,21 @@ pvalue_render_js <- function(digits = 3) {
   ))
 }
 
+format_pvalues_for_display <- function(df, digits = 3) {
+  for (column in pvalue_columns(df)) {
+    values <- suppressWarnings(as.numeric(df[[column]]))
+    if (!length(values) || all(is.na(values) & !is.na(df[[column]]))) next
+    df[[column]] <- ifelse(is.na(values), NA_character_, formatC(values, format = "e", digits = digits))
+  }
+  df
+}
+
 render_csl_table <- function(expr, page_length = 50, editable = FALSE, scroll_y = "520px", escape = TRUE) {
+  expr_call <- substitute(expr)
+  expr_env <- parent.frame()
   if (DT_AVAILABLE) {
     DT::renderDataTable({
-      df <- expr
+      df <- eval(expr_call, envir = expr_env)
       if (!NROW(df)) df <- data.frame()
       pvalue_cols_all <- pvalue_columns(df)
       pvalue_targets <- match(pvalue_cols_all, names(df), nomatch = 0) - 1
@@ -64,22 +75,26 @@ render_csl_table <- function(expr, page_length = 50, editable = FALSE, scroll_y 
         decimal_cols <- setdiff(numeric_cols, c(integer_cols, pvalue_cols))
         if (length(integer_cols)) widget <- DT::formatRound(widget, columns = integer_cols, digits = 0)
         if (length(decimal_cols)) widget <- DT::formatRound(widget, columns = decimal_cols, digits = 2)
+        if (length(pvalue_cols)) widget <- DT::formatSignif(widget, columns = pvalue_cols, digits = 3)
       }
       widget
     }, server = FALSE)
   } else {
     renderTable({
-      df <- expr
+      df <- eval(expr_call, envir = expr_env)
       if (!NROW(df)) return(data.frame())
+      df <- format_pvalues_for_display(df)
       utils::head(df, 50)
     }, striped = TRUE, bordered = TRUE, spacing = "s")
   }
 }
 
 render_methods_table <- function(expr, page_length = 25, scroll_y = "520px") {
+  expr_call <- substitute(expr)
+  expr_env <- parent.frame()
   if (DT_AVAILABLE) {
     DT::renderDataTable({
-      df <- expr
+      df <- eval(expr_call, envir = expr_env)
       if (!NROW(df)) df <- data.frame()
       widths <- c("90px", "190px", "360px", "260px", "320px", "420px")
       column_defs <- lapply(seq_len(min(NCOL(df), length(widths))), function(i) {
@@ -105,8 +120,9 @@ render_methods_table <- function(expr, page_length = 25, scroll_y = "520px") {
     }, server = FALSE)
   } else {
     renderTable({
-      df <- expr
+      df <- eval(expr_call, envir = expr_env)
       if (!NROW(df)) return(data.frame())
+      df <- format_pvalues_for_display(df)
       df
     }, striped = TRUE, bordered = TRUE, spacing = "s")
   }
@@ -2639,6 +2655,55 @@ cutrun_diffbind_result_dirs <- function(project) {
   dirs[file.exists(file.path(dirs, "all_differential_peaks.tsv"))]
 }
 
+cutrun_fragment_plot_files <- function(project) {
+  root <- file.path(project$data_dir, "bowtie2")
+  if (!dir.exists(root)) return(character(0))
+  sort(list.files(root, pattern = "_insert_size_histogram\\.(jpg|jpeg|png|pdf)$", recursive = TRUE, full.names = TRUE, ignore.case = TRUE))
+}
+
+human_file_size <- function(path) {
+  bytes <- file_size_for(path)
+  if (!is.finite(bytes) || bytes <= 0) return("0 B")
+  units <- c("B", "KB", "MB", "GB", "TB")
+  power <- min(floor(log(bytes, 1024)), length(units) - 1L)
+  paste0(format(round(bytes / (1024^power), if (power == 0) 0 else 1), nsmall = if (power == 0) 0 else 1, trim = TRUE), " ", units[[power + 1L]])
+}
+
+cutrun_signal_track_table <- function(project) {
+  root <- file.path(project$data_dir, "bowtie2")
+  files <- if (dir.exists(root)) list.files(root, pattern = "\\.(bw|bedgraph)$", recursive = TRUE, full.names = TRUE, ignore.case = TRUE) else character(0)
+  if (!length(files)) return(data.frame())
+  rows <- lapply(sort(files), function(path) {
+    name <- basename(path)
+    normalization <- if (grepl("spikein", name, ignore.case = TRUE)) "E. coli spike-in" else if (grepl("cpm", name, ignore.case = TRUE)) "CPM" else "Raw / none"
+    data.frame(
+      sample = basename(dirname(path)),
+      format = if (tolower(tools::file_ext(path)) == "bw") "bigWig" else "bedGraph",
+      normalization = normalization,
+      size = human_file_size(path),
+      file = path,
+      stringsAsFactors = FALSE,
+      check.names = FALSE
+    )
+  })
+  do.call(rbind, rows)
+}
+
+cutrun_files_by_category <- function(project, category = "all") {
+  category <- category %||% "all"
+  files <- switch(category,
+    qc = unlist(lapply(file.path(project$data_dir, c("fastqc", "fastqc_cutadapt")), function(path) if (dir.exists(path)) list.files(path, pattern = "\\.(html|zip)$", recursive = TRUE, full.names = TRUE, ignore.case = TRUE) else character(0)), use.names = FALSE),
+    alignment = result_file_choices(project, "bowtie2", "\\.(bam|bai|txt|jpg|jpeg|png|pdf)$"),
+    signal = result_file_choices(project, "bowtie2", "\\.(bw|bedgraph)$"),
+    peaks = result_file_choices(project, c("seacr", "macs2", "cutrun_peak_qc"), "\\.(bed|narrowPeak|broadPeak|xls|txt|tsv)$"),
+    differential = result_file_choices(project, "cutrun_diffbind", "\\.(bed|txt|tsv|csv|png|pdf|rds)$"),
+    result_file_choices(project, c("fastqc", "fastqc_cutadapt", "bowtie2", "seacr", "macs2", "cutrun_peak_qc", "cutrun_diffbind"), "\\.(html|zip|bam|bai|bw|bedgraph|bed|narrowPeak|broadPeak|xls|txt|tsv|csv|png|jpg|jpeg|pdf|rds)$")
+  )
+  files <- unname(files)
+  files <- sort(unique(files[file.exists(files)]))
+  stats::setNames(files, relative_result_labels(project, files))
+}
+
 atac_alignment_summary_table <- function(project) {
   root <- file.path(project$data_dir, "bowtie2")
   files <- if (dir.exists(root)) list.files(root, pattern = "_alignment_summary\\.txt$", recursive = TRUE, full.names = TRUE) else character(0)
@@ -2847,128 +2912,172 @@ cutrun_results_explorer_ui <- function() {
           id = "cutrun_results_tabs",
           tabPanel("Overview",
             br(),
-            div(class = "cutrun-results-actions", actionButton("refresh_cutrun_results", "Refresh results", class = "btn-primary")),
+            div(
+              class = "cutrun-results-actions",
+              span(class = "cutrun-updated-note", "Live summary of saved pipeline outputs"),
+              actionButton("refresh_cutrun_results", "Refresh results", class = "btn-primary")
+            ),
             uiOutput("cutrun_summary_cards"),
-            tags$h4("Pipeline status"),
+            div(class = "cutrun-section-heading", tags$h4("Pipeline status"), tags$p("Completion state for every CUT&RUN analysis stage.")),
             table_output("results_overview"),
             br(),
-            tags$h4("Design matrix"),
+            div(class = "cutrun-section-heading", tags$h4("Experimental design"), tags$p("Samples, marks, conditions, replicates, and matched controls used by the analysis.")),
             table_output("design_table")
           ),
           tabPanel("QC",
             br(),
-            sidebarLayout(
-              sidebarPanel(
-                width = 2,
-                uiOutput("cutrun_qc_sample_control"),
-                uiOutput("cutrun_qc_mode_control"),
-                tags$hr(),
-                helpText("This tab renders FastQC and FastQ Screen HTML reports for both reads.")
-              ),
-              mainPanel(
-                width = 10,
-                uiOutput("cutrun_qc_status_ui"),
-                tabsetPanel(
-                  tabPanel("R1 FastQC", uiOutput("cutrun_r1_fastqc_ui")),
-                  tabPanel("R1 Screen", uiOutput("cutrun_r1_screen_ui")),
-                  tabPanel("R2 FastQC", uiOutput("cutrun_r2_fastqc_ui")),
-                  tabPanel("R2 Screen", uiOutput("cutrun_r2_screen_ui"))
-                )
-              )
-            )
-          ),
-          tabPanel("Alignment",
-            br(),
-            sidebarLayout(
-              sidebarPanel(
-                width = 2,
-                uiOutput("cutrun_alignment_sample_control"),
-                tags$hr(),
-                helpText("Compact Bowtie2, duplicate, fragment, normalization, and spike-in metrics.")
-              ),
-              mainPanel(
-                width = 10,
-                uiOutput("cutrun_alignment_status_ui"),
-                div(class = "cutrun-chart-card", plotOutput("cutrun_alignment_plot", height = "360px")),
-                tags$h4("Alignment summary across samples"),
-                table_output("cutrun_alignment_summary"),
-                tags$hr(),
-                tags$h4("Selected sample"),
-                table_output("cutrun_alignment_sample_table")
-              )
-            )
-          ),
-          tabPanel("Peaks",
-            br(),
             tabsetPanel(
-              tabPanel("SEACR",
+              id = "cutrun_qc_tabs",
+              tabPanel("Initial QC",
                 br(),
                 sidebarLayout(
                   sidebarPanel(
-                    width = 2,
-                    uiOutput("cutrun_seacr_peak_ui"),
+                    width = 3,
+                    uiOutput("cutrun_qc_sample_control"),
+                    uiOutput("cutrun_qc_mode_control"),
                     tags$hr(),
-                    helpText("Inspect the selected sample's SEACR peak calls.")
+                    helpText("FastQC and FastQ Screen reports for raw or cutadapt-trimmed R1/R2 reads.")
                   ),
-                  mainPanel(width = 10, table_output("cutrun_seacr_peak_table"))
+                  mainPanel(
+                    width = 9,
+                    uiOutput("cutrun_qc_status_ui"),
+                    tabsetPanel(
+                      tabPanel("R1 FastQC", uiOutput("cutrun_r1_fastqc_ui")),
+                      tabPanel("R1 Screen", uiOutput("cutrun_r1_screen_ui")),
+                      tabPanel("R2 FastQC", uiOutput("cutrun_r2_fastqc_ui")),
+                      tabPanel("R2 Screen", uiOutput("cutrun_r2_screen_ui"))
+                    )
+                  )
+                )
+              ),
+              tabPanel("Alignment",
+                br(),
+                sidebarLayout(
+                  sidebarPanel(
+                    width = 3,
+                    uiOutput("cutrun_alignment_sample_control"),
+                    tags$hr(),
+                    helpText("Bowtie2 mapping, duplication, fragment, normalization, and E. coli spike-in metrics.")
+                  ),
+                  mainPanel(
+                    width = 9,
+                    uiOutput("cutrun_alignment_status_ui"),
+                    div(class = "cutrun-chart-card", plotOutput("cutrun_alignment_plot", height = "360px")),
+                    div(class = "cutrun-section-heading", tags$h4("Alignment summary across samples"), downloadButton("download_cutrun_alignment", "Download summary")),
+                    table_output("cutrun_alignment_summary"),
+                    tags$hr(),
+                    tags$h4("Selected sample"),
+                    table_output("cutrun_alignment_sample_table")
+                  )
+                )
+              ),
+              tabPanel("Fragment Size",
+                br(),
+                sidebarLayout(
+                  sidebarPanel(width = 3, uiOutput("cutrun_fragment_sample_ui"), tags$hr(), helpText("Picard insert-size distribution for the selected paired-end library.")),
+                  mainPanel(width = 9, uiOutput("cutrun_fragment_size_ui"))
                 )
               ),
               tabPanel("Peak QC",
                 br(),
+                uiOutput("cutrun_peak_qc_cards"),
                 div(class = "cutrun-chart-card", plotOutput("cutrun_frip_plot", height = "340px")),
-                tags$h4("SEACR FRiP summary"),
+                div(class = "cutrun-section-heading", tags$h4("SEACR FRiP summary"), downloadButton("download_cutrun_frip", "Download FRiP")),
                 table_output("cutrun_frip_summary"),
                 br(),
-                tags$h4("Consensus peak summary"),
-                table_output("cutrun_peak_qc_summary"),
-                tags$p(class = "muted small-note", "This is a project-wide QC union only. Differential Peaks builds independent reproducible consensus sets for each cell type and mark.")
+                div(class = "cutrun-section-heading", tags$h4("Project peak-union QC"), tags$p("Differential binding uses independent replicate-supported consensus sets for each cell type and mark.")),
+                table_output("cutrun_peak_qc_summary")
+              )
+            )
+          ),
+          tabPanel("Signal & Peaks",
+            br(),
+            tabsetPanel(
+              id = "cutrun_peak_tabs",
+              tabPanel("SEACR Peaks",
+                br(),
+                sidebarLayout(
+                  sidebarPanel(
+                    width = 3,
+                    uiOutput("cutrun_seacr_peak_ui"),
+                    tags$hr(),
+                    helpText("Inspect native-width SEACR stringent or relaxed peaks for one target sample.")
+                  ),
+                  mainPanel(
+                    width = 9,
+                    uiOutput("cutrun_seacr_peak_cards"),
+                    div(class = "cutrun-section-heading", tags$h4("Selected SEACR peaks"), downloadButton("download_cutrun_seacr", "Download BED")),
+                    table_output("cutrun_seacr_peak_table")
+                  )
+                )
+              ),
+              tabPanel("Signal Tracks",
+                br(),
+                div(class = "cutrun-section-heading", tags$h4("Genome-browser tracks"), tags$p("BigWig and bedGraph signals, including spike-in, CPM, or raw normalization.")),
+                table_output("cutrun_signal_tracks")
+              ),
+              tabPanel("Peak Counts",
+                br(),
+                tags$p(class = "muted small-note", "Project-wide union counts are intended for QC. Use Differential Binding for mark-specific statistical comparisons."),
+                table_output("cutrun_peak_counts")
               ),
               tabPanel("MACS2 (optional)",
                 br(),
                 sidebarLayout(
                   sidebarPanel(
-                    width = 2,
+                    width = 3,
                     uiOutput("cutrun_macs2_peak_ui"),
                     tags$hr(),
                     helpText("Optional comparison or broad-mark peak calls.")
                   ),
-                  mainPanel(width = 10, table_output("cutrun_macs2_peak_table"))
+                  mainPanel(width = 9, table_output("cutrun_macs2_peak_table"))
                 )
               )
             )
           ),
-          tabPanel("Differential Peaks",
+          tabPanel("Differential Binding",
             br(),
             sidebarLayout(
               sidebarPanel(
-                width = 2,
+                width = 3,
                 uiOutput("cutrun_diffbind_comparison_ui"),
+                numericInput("cutrun_diffbind_fdr", "FDR cutoff", value = 0.05, min = 0, max = 1, step = 0.001),
+                numericInput("cutrun_diffbind_fold", "Absolute log2 fold cutoff", value = 0, min = 0, step = 0.1),
                 tags$hr(),
-                helpText("Each cell type and mark is analyzed independently. Tables contain DiffBind/DESeq2 results from raw BAM fragment counts with automatic spike-in or background normalization.")
+                helpText("Each cell type and mark is analyzed independently from raw BAM fragment counts with spike-in or genomic-background normalization.")
               ),
               mainPanel(
-                width = 10,
-                tags$h4("Analysis summary"),
+                width = 9,
+                uiOutput("cutrun_diffbind_cards"),
+                div(class = "cutrun-section-heading", tags$h4("Analysis summary"), tags$p("Completed, skipped, and failed comparisons.")),
                 table_output("cutrun_diffbind_summary"),
                 tags$hr(),
                 tabsetPanel(
-                  tabPanel("Results", br(), table_output("cutrun_diffbind_results")),
+                  id = "cutrun_diffbind_tabs",
+                  tabPanel("Results", br(), downloadButton("download_cutrun_diffbind_results", "Download filtered results"), br(), br(), table_output("cutrun_diffbind_results")),
+                  tabPanel("Significant Peaks", br(), downloadButton("download_cutrun_diffbind_significant", "Download significant peaks"), br(), br(), table_output("cutrun_diffbind_significant")),
                   tabPanel("PCA", br(), uiOutput("cutrun_diffbind_pca_ui")),
                   tabPanel("Volcano", br(), uiOutput("cutrun_diffbind_volcano_ui")),
-                  tabPanel("Heatmap", br(), uiOutput("cutrun_diffbind_heatmap_ui"))
+                  tabPanel("MA Plot", br(), uiOutput("cutrun_diffbind_ma_ui")),
+                  tabPanel("Heatmap", br(), uiOutput("cutrun_diffbind_heatmap_ui")),
+                  tabPanel("Normalization", br(), table_output("cutrun_diffbind_normalization")),
+                  tabPanel("Consensus Counts", br(), table_output("cutrun_diffbind_consensus"))
                 )
               )
             )
           ),
-          tabPanel("Peak Counts",
-            br(),
-            tags$p(class = "muted small-note", "Project-wide QC counts. Use Differential Peaks for mark-specific statistical comparisons."),
-            table_output("cutrun_peak_counts")
-          ),
           tabPanel("Files",
             br(),
-            uiOutput("cutrun_file_ui"),
-            uiOutput("cutrun_file_view")
+            sidebarLayout(
+              sidebarPanel(
+                width = 3,
+                selectInput("cutrun_file_category", "Category", choices = c("QC reports" = "qc", "Alignment" = "alignment", "Signal tracks" = "signal", "Peaks" = "peaks", "Differential binding" = "differential", "All files" = "all"), selected = "qc", selectize = FALSE),
+                uiOutput("cutrun_file_ui"),
+                tags$hr(),
+                uiOutput("cutrun_file_metadata_ui")
+              ),
+              mainPanel(width = 9, uiOutput("cutrun_file_view"))
+            )
           )
         )
       )
@@ -5560,6 +5669,7 @@ body { background:#eef3f8; color:#17202f; }
 .muted { color:#657084; }
 .empty-box { background:white; border:1px solid #d8dde8; border-radius:8px; padding:18px; color:#657084; }
 .cutrun-metric-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; margin:16px 0 20px 0; }
+.cutrun-metric-grid.compact { grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); }
 .cutrun-metric-card { background:white; border:1px solid #d8dde8; border-top:4px solid #2f6fed; border-radius:10px; padding:15px 16px; min-height:116px; box-shadow:0 2px 8px rgba(15,39,66,0.05); }
 .cutrun-metric-card.tone-green { border-top-color:#15936f; }
 .cutrun-metric-card.tone-gold { border-top-color:#d39116; }
@@ -5585,13 +5695,31 @@ body { background:#eef3f8; color:#17202f; }
 .cutrun-results-host .tab-content .tabbable > .nav-tabs > li { margin:0; }
 .cutrun-results-host .tab-content .tabbable > .nav-tabs > li > a { border:0 !important; border-radius:14px !important; background:transparent; color:#48627d !important; font-weight:700; padding:10px 14px; }
 .cutrun-results-host .tab-content .tabbable > .nav-tabs > li.active > a { background:linear-gradient(135deg,#fff,#f4f9ff) !important; color:#143150 !important; box-shadow:0 8px 16px rgba(35,63,99,.10); }
-.cutrun-results-host .row > .col-sm-2 > .well { background:rgba(248,251,255,.96); border:1px solid rgba(197,215,236,.9); border-radius:22px; padding:20px 18px; box-shadow:inset 0 1px 0 rgba(255,255,255,.9); }
-.cutrun-results-host .row > .col-sm-10 { background:rgba(255,255,255,.86); border:1px solid rgba(214,225,238,.95); border-radius:22px; padding:20px 22px; box-shadow:0 10px 26px rgba(32,56,84,.08); }
+.cutrun-results-host .row > .col-sm-2 > .well, .cutrun-results-host .row > .col-sm-3 > .well { background:rgba(248,251,255,.96); border:1px solid rgba(197,215,236,.9); border-radius:22px; padding:20px 18px; box-shadow:inset 0 1px 0 rgba(255,255,255,.9); }
+.cutrun-results-host .row > .col-sm-10, .cutrun-results-host .row > .col-sm-9 { background:rgba(255,255,255,.86); border:1px solid rgba(214,225,238,.95); border-radius:22px; padding:20px 22px; box-shadow:0 10px 26px rgba(32,56,84,.08); }
 .cutrun-results-host .form-control { border-radius:14px !important; border:1px solid #d7e0ea !important; box-shadow:none !important; min-height:46px; font-size:15px !important; }
 .cutrun-results-host .control-label { font-size:13px; text-transform:uppercase; letter-spacing:.08em; color:#5a7088; margin-bottom:8px; }
 .cutrun-results-host h4 { color:#18314e; font-weight:800; letter-spacing:-.02em; font-size:22px; }
 .cutrun-results-host iframe { display:block; width:100%; min-height:680px; border:1px solid #d7e0ea !important; border-radius:18px; background:white; box-shadow:0 8px 22px rgba(32,56,84,.10); }
-.cutrun-results-actions { display:flex; justify-content:flex-end; margin-bottom:8px; }
+.cutrun-results-host .btn, .cutrun-results-host .btn-default, .cutrun-results-host .btn-primary { border:0 !important; border-radius:12px !important; background:linear-gradient(135deg,#0f62c6,#15936f) !important; color:white !important; font-weight:750; padding:9px 15px; box-shadow:0 8px 18px rgba(17,94,177,.18); }
+.cutrun-results-host .btn:hover { transform:translateY(-1px); box-shadow:0 11px 22px rgba(17,94,177,.25); }
+.cutrun-results-host table.dataTable thead th { background:#edf4fb !important; color:#304a66 !important; border-bottom:1px solid #aac2de !important; }
+.cutrun-results-host table.dataTable tbody tr:nth-child(odd) { background:rgba(246,250,255,.9) !important; }
+.cutrun-results-host .dataTables_wrapper { background:white; border:1px solid #dbe5f0; border-radius:14px; padding:10px; }
+.cutrun-results-actions { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:8px; }
+.cutrun-updated-note { color:#657084; font-size:13px; font-weight:700; }
+.cutrun-section-heading { display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap; margin:16px 0 10px; }
+.cutrun-section-heading h4 { margin:0; }
+.cutrun-section-heading p { margin:0; color:#657084; font-size:13px; flex:1 1 320px; }
+.cutrun-file-meta { display:flex; flex-direction:column; gap:9px; }
+.cutrun-file-meta > div { display:flex; align-items:center; justify-content:space-between; gap:10px; padding-bottom:7px; border-bottom:1px solid #e6edf5; }
+.cutrun-file-meta span { color:#657084; font-size:12px; font-weight:800; text-transform:uppercase; letter-spacing:.05em; }
+.cutrun-file-meta code { display:block; white-space:normal; overflow-wrap:anywhere; word-break:break-word; padding:9px; border-radius:8px; background:#edf4fb; color:#304a66; }
+@media (max-width:900px) {
+  .cutrun-results-host .row > .col-sm-2, .cutrun-results-host .row > .col-sm-3, .cutrun-results-host .row > .col-sm-9, .cutrun-results-host .row > .col-sm-10 { width:100% !important; float:none !important; margin-bottom:12px; }
+  .cutrun-results-actions { align-items:flex-start; }
+  .cutrun-results-host iframe { min-height:560px; }
+}
 .btn-primary { background:#1f5eff; border-color:#1f5eff; }
 .status-toolbar { display:flex; gap:12px; align-items:flex-end; flex-wrap:wrap; margin-bottom:16px; }
 .status-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(250px, 1fr)); gap:12px; margin-bottom:18px; }
@@ -7634,6 +7762,24 @@ server <- function(input, output, session) {
     progress_refresh()
     cutrun_summary_cards_ui(current_project())
   })
+  output$cutrun_peak_qc_cards <- renderUI({
+    progress_refresh()
+    frip <- cutrun_seacr_frip_table(current_project())
+    values <- if (NROW(frip) && "frip" %in% names(frip)) clean_metric_number(frip$frip) else numeric(0)
+    values <- values[is.finite(values)]
+    values <- ifelse(values <= 1, values * 100, values)
+    summary <- cutrun_peak_qc_summary_table(current_project())
+    summary_values <- if (NROW(summary)) stats::setNames(as.character(summary$Value), as.character(summary$Metric)) else character(0)
+    summary_value <- function(metric, fallback = NA_character_) {
+      if (metric %in% names(summary_values)) summary_values[[metric]] else fallback
+    }
+    div(class = "cutrun-metric-grid compact",
+        cutrun_metric_card("Samples with FRiP", format_metric_value(length(values)), "Completed SEACR summaries", "blue"),
+        cutrun_metric_card("Median FRiP", if (length(values)) format_metric_value(stats::median(values), "%") else "—", "Across target samples", "green"),
+        cutrun_metric_card("Peak files", format_metric_value(clean_metric_number(summary_value("peak_files", NROW(frip)))), "Included in project QC", "gold"),
+        cutrun_metric_card("Union regions", format_metric_value(clean_metric_number(summary_value("consensus_peaks"))), "Project-wide QC union", "purple")
+    )
+  })
   output$cutrun_alignment_summary <- render_csl_table({
     cutrun_alignment_summary_table(current_project())
   }, page_length = 50)
@@ -7659,6 +7805,22 @@ server <- function(input, output, session) {
     validate(need(NROW(hit), "The selected sample is not present in the alignment summary."))
     data.frame(Metric = setdiff(names(hit), "sample"), Value = unlist(hit[1, setdiff(names(hit), "sample"), drop = FALSE], use.names = FALSE), check.names = FALSE)
   }, page_length = 50, scroll_y = "420px")
+  output$cutrun_fragment_sample_ui <- renderUI({
+    progress_refresh()
+    files <- cutrun_fragment_plot_files(current_project())
+    if (!length(files)) return(div(class = "empty-box", "No insert-size histogram has been generated yet."))
+    labels <- stats::setNames(files, basename(dirname(files)))
+    selectInput("cutrun_fragment_file", "Sample", choices = labels, selected = selected_choice(input$cutrun_fragment_file, files, files[[1]]), selectize = FALSE)
+  })
+  output$cutrun_fragment_size_ui <- renderUI({
+    progress_refresh()
+    path <- input$cutrun_fragment_file %||% ""
+    if (!nzchar(path) || !file.exists(path)) return(div(class = "empty-box", "Choose a sample with a completed Picard insert-size plot."))
+    tagList(
+      div(class = "cutrun-section-heading", tags$h4("Insert-size distribution"), tags$p(basename(dirname(path)))),
+      image_or_file_ui(path, "700px")
+    )
+  })
   output$cutrun_alignment_plot <- renderPlot({
     progress_refresh()
     df <- cutrun_alignment_summary_table(current_project())
@@ -7711,6 +7873,10 @@ server <- function(input, output, session) {
   output$cutrun_peak_counts <- render_csl_table({
     safe_read_table(file.path(current_project()$data_dir, "cutrun_peak_qc", "seacr_consensus_peak_counts.tsv"), 5000)
   }, page_length = 50)
+  output$cutrun_signal_tracks <- render_csl_table({
+    progress_refresh()
+    cutrun_signal_track_table(current_project())
+  }, page_length = 50, scroll_y = "600px")
   output$cutrun_seacr_peak_ui <- renderUI({
     req(identical(input$web_main_tabs %||% "", "Results Explorer"))
     progress_refresh()
@@ -7725,6 +7891,20 @@ server <- function(input, output, session) {
     req(input$cutrun_seacr_peak_file)
     safe_read_result_table(input$cutrun_seacr_peak_file, 5000)
   }, page_length = 50)
+  output$cutrun_seacr_peak_cards <- renderUI({
+    progress_refresh()
+    path <- input$cutrun_seacr_peak_file %||% ""
+    if (!nzchar(path) || !file.exists(path)) return(NULL)
+    peaks <- safe_read_result_table(path, 5000)
+    widths <- if (NROW(peaks) && all(c("start", "end") %in% names(peaks))) clean_metric_number(peaks$end) - clean_metric_number(peaks$start) else numeric(0)
+    widths <- widths[is.finite(widths) & widths > 0]
+    div(class = "cutrun-metric-grid compact",
+        cutrun_metric_card("Sample", basename(dirname(path)), basename(path), "blue"),
+        cutrun_metric_card("Peaks shown", format_metric_value(NROW(peaks)), "Table preview limit: 5,000", "green"),
+        cutrun_metric_card("Median width", if (length(widths)) paste0(format_metric_value(stats::median(widths)), " bp") else "—", "Native SEACR regions", "gold"),
+        cutrun_metric_card("File size", human_file_size(path), "BED output", "purple")
+    )
+  })
   output$cutrun_macs2_peak_ui <- renderUI({
     req(identical(input$web_main_tabs %||% "", "Results Explorer"))
     progress_refresh()
@@ -7758,17 +7938,69 @@ server <- function(input, output, session) {
     req(nzchar(path), dir.exists(path))
     path
   })
+  cutrun_diffbind_all_results <- reactive({
+    safe_read_table(file.path(selected_cutrun_diffbind_dir(), "all_differential_peaks.tsv"), 20000)
+  })
+  cutrun_diffbind_filtered_results <- reactive({
+    df <- cutrun_diffbind_all_results()
+    if (!NROW(df)) return(df)
+    fdr_col <- intersect(c("FDR", "padj", "qvalue"), names(df))
+    fold_col <- intersect(c("Fold", "log2FoldChange", "log2FC"), names(df))
+    keep <- rep(TRUE, NROW(df))
+    fdr_cutoff <- suppressWarnings(as.numeric(input$cutrun_diffbind_fdr %||% 0.05))
+    fold_cutoff <- suppressWarnings(as.numeric(input$cutrun_diffbind_fold %||% 0))
+    if (length(fdr_col) && is.finite(fdr_cutoff)) {
+      values <- clean_metric_number(df[[fdr_col[[1]]]])
+      keep <- keep & is.finite(values) & values <= fdr_cutoff
+    }
+    if (length(fold_col) && is.finite(fold_cutoff) && fold_cutoff > 0) {
+      values <- clean_metric_number(df[[fold_col[[1]]]])
+      keep <- keep & is.finite(values) & abs(values) >= fold_cutoff
+    }
+    df[keep, , drop = FALSE]
+  })
   output$cutrun_diffbind_summary <- render_csl_table({
     cutrun_diffbind_summary_table(current_project())
   }, page_length = 25)
   output$cutrun_diffbind_results <- render_csl_table({
-    safe_read_table(file.path(selected_cutrun_diffbind_dir(), "all_differential_peaks.tsv"), 20000)
+    cutrun_diffbind_filtered_results()
   }, page_length = 50, scroll_y = "620px")
+  output$cutrun_diffbind_significant <- render_csl_table({
+    safe_read_table(file.path(selected_cutrun_diffbind_dir(), "significant_differential_peaks.tsv"), 20000)
+  }, page_length = 50, scroll_y = "620px")
+  output$cutrun_diffbind_normalization <- render_csl_table({
+    safe_read_table(file.path(selected_cutrun_diffbind_dir(), "normalization_factors.tsv"), 5000)
+  }, page_length = 50)
+  output$cutrun_diffbind_consensus <- render_csl_table({
+    safe_read_table(file.path(selected_cutrun_diffbind_dir(), "consensus_peak_counts.tsv"), 20000)
+  }, page_length = 50, scroll_y = "620px")
+  output$cutrun_diffbind_cards <- renderUI({
+    progress_refresh()
+    path <- input$cutrun_diffbind_result_dir %||% ""
+    if (!nzchar(path) || !dir.exists(path)) return(NULL)
+    all <- cutrun_diffbind_all_results()
+    significant <- safe_read_table(file.path(path, "significant_differential_peaks.tsv"), 20000)
+    filtered <- cutrun_diffbind_filtered_results()
+    normalization <- safe_read_table(file.path(path, "normalization_factors.tsv"), 5000)
+    mode <- if (NROW(normalization) && "normalization" %in% names(normalization)) paste(unique(as.character(normalization$normalization)), collapse = ", ") else "—"
+    fold_col <- intersect(c("Fold", "log2FoldChange", "log2FC"), names(significant))
+    fold <- if (length(fold_col)) clean_metric_number(significant[[fold_col[[1]]]]) else numeric(0)
+    div(class = "cutrun-metric-grid",
+        cutrun_metric_card("Tested regions", format_metric_value(NROW(all)), basename(path), "blue"),
+        cutrun_metric_card("Significant peaks", format_metric_value(NROW(significant)), "Saved at FDR ≤ 0.05", "green"),
+        cutrun_metric_card("Passing filters", format_metric_value(NROW(filtered)), "Current sidebar cutoffs", "gold"),
+        cutrun_metric_card("Increased / decreased", if (length(fold)) paste0(sum(fold > 0, na.rm = TRUE), " / ", sum(fold < 0, na.rm = TRUE)) else "—", "Direction in comparison", "purple"),
+        cutrun_metric_card("Normalization", mode, "DiffBind factors", "blue")
+    )
+  })
   output$cutrun_diffbind_pca_ui <- renderUI({
     image_or_file_ui(file.path(selected_cutrun_diffbind_dir(), "pca_normalized_counts.png"), "760px")
   })
   output$cutrun_diffbind_volcano_ui <- renderUI({
     image_or_file_ui(file.path(selected_cutrun_diffbind_dir(), "volcano_differential_peaks.png"), "760px")
+  })
+  output$cutrun_diffbind_ma_ui <- renderUI({
+    image_or_file_ui(file.path(selected_cutrun_diffbind_dir(), "ma_differential_peaks.png"), "760px")
   })
   output$cutrun_diffbind_heatmap_ui <- renderUI({
     image_or_file_ui(file.path(selected_cutrun_diffbind_dir(), "differential_peak_heatmap.png"), "760px")
@@ -7777,15 +8009,29 @@ server <- function(input, output, session) {
     req(identical(input$web_main_tabs %||% "", "Results Explorer"))
     progress_refresh()
     p <- current_project()
-    choices <- result_file_choices(p, c("bowtie2", "seacr", "macs2", "cutrun_peak_qc", "cutrun_diffbind"), "\\.(bed|bedgraph|bw|txt|tsv|csv|png|pdf|html|narrowPeak|broadPeak)$")
-    if (!length(choices)) return(div(class = "empty-box", "No CUT&RUN result files were found yet."))
-    selectInput("cutrun_file", "CUT&RUN result file", choices = choices, selected = selected_choice(input$cutrun_file, choices, choices[[1]]), selectize = FALSE)
+    choices <- cutrun_files_by_category(p, input$cutrun_file_category %||% "qc")
+    if (!length(choices)) return(div(class = "empty-box", "No files are available in this category yet."))
+    paths <- unname(choices)
+    selectInput("cutrun_file", "Result file", choices = choices, selected = selected_choice(input$cutrun_file, paths, paths[[1]]), selectize = FALSE)
+  })
+  output$cutrun_file_metadata_ui <- renderUI({
+    path <- input$cutrun_file %||% ""
+    if (!nzchar(path) || !file.exists(path)) return(NULL)
+    info <- file.info(path)
+    div(class = "cutrun-file-meta",
+        div(span("Type"), strong(toupper(tools::file_ext(path) %||% "file"))),
+        div(span("Size"), strong(human_file_size(path))),
+        div(span("Modified"), strong(format(info$mtime[[1]], "%Y-%m-%d %H:%M"))),
+        tags$code(path)
+    )
   })
   output$cutrun_file_view <- renderUI({
     req(input$cutrun_file)
     ext <- tolower(tools::file_ext(input$cutrun_file))
-    if (ext %in% c("txt", "tsv", "csv", "bed", "bedgraph")) {
+    if (ext %in% c("txt", "tsv", "csv", "bed", "bedgraph", "narrowpeak", "broadpeak", "xls")) {
       table_output("cutrun_selected_table")
+    } else if (ext %in% c("bam", "bai", "bw", "zip", "rds")) {
+      div(class = "empty-box", tags$h4(basename(input$cutrun_file)), tags$p("This binary result is ready for downstream use at the server path shown in the sidebar."))
     } else {
       image_or_file_ui(input$cutrun_file, "900px")
     }
@@ -7832,6 +8078,33 @@ server <- function(input, output, session) {
     if (!isTRUE(current_project()$paired_end)) return(div(class = "empty-box", "This is a single-end project; there is no R2 report."))
     cutrun_qc_report_ui(current_project(), input$cutrun_qc_sample %||% "", "R2", "screen", isTRUE(input$cutrun_qc_show_trimmed))
   })
+  output$download_cutrun_alignment <- downloadHandler(
+    filename = function() paste0(clean_name(current_project()$name, "cutrun"), "_alignment_summary.tsv"),
+    content = function(file) utils::write.table(cutrun_alignment_summary_table(current_project()), file, sep = "\t", row.names = FALSE, quote = FALSE, na = "")
+  )
+  output$download_cutrun_frip <- downloadHandler(
+    filename = function() paste0(clean_name(current_project()$name, "cutrun"), "_seacr_frip.tsv"),
+    content = function(file) utils::write.table(cutrun_seacr_frip_table(current_project()), file, sep = "\t", row.names = FALSE, quote = FALSE, na = "")
+  )
+  output$download_cutrun_seacr <- downloadHandler(
+    filename = function() basename(input$cutrun_seacr_peak_file %||% "seacr_peaks.bed"),
+    content = function(file) {
+      path <- input$cutrun_seacr_peak_file %||% ""
+      req(nzchar(path), file.exists(path))
+      file.copy(path, file, overwrite = TRUE)
+    }
+  )
+  output$download_cutrun_diffbind_results <- downloadHandler(
+    filename = function() paste0(basename(input$cutrun_diffbind_result_dir %||% "cutrun_comparison"), "_filtered.tsv"),
+    content = function(file) utils::write.table(cutrun_diffbind_filtered_results(), file, sep = "\t", row.names = FALSE, quote = FALSE, na = "")
+  )
+  output$download_cutrun_diffbind_significant <- downloadHandler(
+    filename = function() paste0(basename(input$cutrun_diffbind_result_dir %||% "cutrun_comparison"), "_significant.tsv"),
+    content = function(file) {
+      df <- safe_read_table(file.path(selected_cutrun_diffbind_dir(), "significant_differential_peaks.tsv"), 20000)
+      utils::write.table(df, file, sep = "\t", row.names = FALSE, quote = FALSE, na = "")
+    }
+  )
   output$star_summary <- render_csl_table(safe_read_table(file.path(current_project()$data_dir, "star_summary", "summary_matrix.txt")), page_length = 50)
   output$featurecounts_summary <- render_csl_table(safe_read_table(file.path(current_project()$data_dir, "counts", "featurecounts_summary.txt")), page_length = 50)
   output$count_matrix <- render_csl_table(safe_read_table(file.path(current_project()$data_dir, "counts", "count_matrix.txt"), 5000), page_length = 50)
