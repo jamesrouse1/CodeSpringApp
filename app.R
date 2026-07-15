@@ -310,6 +310,10 @@ is_cutrun_project <- function(project) {
   identical(analysis_key(project$analysis_key %||% project$analysis), "cutrun")
 }
 
+is_atac_project <- function(project) {
+  identical(analysis_key(project$analysis_key %||% project$analysis), "atac")
+}
+
 parse_py_config <- function(path) {
   values <- list()
   if (!file.exists(path)) return(values)
@@ -568,6 +572,15 @@ write_project_config <- function(project) {
     sprintf("genome_version = %s", deparse(genome_reference_key(project))),
     sprintf("pairing = %s", deparse(if (isTRUE(project$paired_end)) "y" else "n"))
   )
+  if (is_atac_project(project)) {
+    ref <- atac_reference_resources(project)
+    lines <- c(lines,
+      sprintf("bowtie2_index = %s", deparse(ref$bowtie2_index)),
+      sprintf("chrom_sizes = %s", deparse(ref$chrom_sizes)),
+      sprintf("effective_genome_size = %s", deparse(ref$effective_genome_size)),
+      sprintf("macs2_genome_size = %s", deparse(ref$macs2_genome))
+    )
+  }
   if (is_cutrun_project(project)) {
     ref <- cutrun_reference_resources(project)
     lines <- c(lines,
@@ -787,6 +800,21 @@ infer_cutrun_metadata <- function(df) {
   df
 }
 
+infer_atac_metadata <- function(df) {
+  if (!NROW(df) || !"sample" %in% names(df)) return(df)
+  for (col in c("condition", "replicate")) if (!col %in% names(df)) df[[col]] <- ""
+  for (i in seq_len(NROW(df))) {
+    sample <- sub("_S[0-9]+(?:_.*)?$", "", as.character(df$sample[[i]]), perl = TRUE, ignore.case = TRUE)
+    hit <- regmatches(sample, regexec("^.+[_-]([^_-]+)[_-]rep([0-9]+)$", sample, perl = TRUE, ignore.case = TRUE))[[1]]
+    if (length(hit) != 3L) hit <- regmatches(sample, regexec("^.+[_-]([A-Za-z]+)([0-9]+)$", sample, perl = TRUE))[[1]]
+    if (length(hit) == 3L) {
+      if (!nzchar(as.character(df$condition[[i]]))) df$condition[[i]] <- hit[[2]]
+      if (!nzchar(as.character(df$replicate[[i]]))) df$replicate[[i]] <- hit[[3]]
+    }
+  }
+  df
+}
+
 sync_metadata_columns <- function(df, metadata_cols) {
   if (!NROW(df)) {
     df <- data.frame(include = logical(), sample = character(), filename = character(), status = character())
@@ -811,6 +839,7 @@ design_matrix_columns <- function(df) {
 default_metadata_cols <- function(project = NULL, analysis = NULL) {
   key <- if (!is.null(project)) analysis_key(project$analysis_key %||% project$analysis) else analysis_key(analysis %||% "rna")
   if (identical(key, "cutrun")) return(c("cell_type", "mark", "condition", "replicate", "control_sample"))
+  if (identical(key, "atac")) return(c("condition", "replicate"))
   "treatment"
 }
 
@@ -1336,6 +1365,7 @@ sample_step_data_paths <- function(project, step, samples) {
       "Bowtie2" = file.path(data_dir, "bowtie2", sample),
       "SEACR" = file.path(data_dir, "seacr", sample),
       "MACS2 (optional)" = file.path(data_dir, "macs2", sample),
+      "MACS2 Peaks" = file.path(data_dir, "macs2", sample),
       "featureCounts" = c(
         file.path(data_dir, "featurecounts", sample),
         file.path(counts_dir, "count_matrix.txt"),
@@ -1368,7 +1398,8 @@ step_data_paths <- function(project, step, samples = NULL) {
     "Bowtie2" = file.path(data_dir, "bowtie2"),
     "SEACR" = file.path(data_dir, "seacr"),
     "Peak QC" = file.path(data_dir, "cutrun_peak_qc"),
-    "Differential Peaks" = file.path(data_dir, "cutrun_diffbind"),
+    "Differential Peaks" = file.path(data_dir, if (is_atac_project(project)) "diffbind" else "cutrun_diffbind"),
+    "MACS2 Peaks" = file.path(data_dir, "macs2"),
     "MACS2 (optional)" = file.path(data_dir, "macs2"),
     "featureCounts" = c(
       file.path(data_dir, "featurecounts"),
@@ -1490,6 +1521,7 @@ canonical_job_step <- function(x) {
     macs2 = "MACS2 (optional)",
     diffbind = "Differential Peaks",
     differentialpeaks = "Differential Peaks",
+    macs2peaks = "MACS2 Peaks",
     featurecounts = "featureCounts",
     deseq2 = "DESeq2",
     gsea = "GSEA",
@@ -1655,6 +1687,23 @@ tool_reference_summary <- function(project) {
     file.path(SCRIPTS_DIR, "Kallisto", "kallisto_PE.sh"),
     file.path(SCRIPTS_DIR, "Kallisto", "kallisto_SE.sh")
   ))
+  if (is_atac_project(project)) {
+    ref <- atac_reference_resources(project)
+    bowtie2_modules <- module_versions_from_scripts(file.path(SCRIPTS_DIR, "bowtie2", "bowtie2_PE.sh"))
+    macs2_modules <- module_versions_from_scripts(file.path(SCRIPTS_DIR, "MACS2", "macs2_PE.sh"))
+    diffbind_modules <- module_versions_from_scripts(file.path(SCRIPTS_DIR, "DiffBind", "diffbind.sh"), "R/DiffBind library used by CodeSpringLab")
+    rows <- list(
+      c("Reference", "ATAC-seq genome reference", ref$label, paste0(genome_species(project), " / ", genome_reference_key(project)), "Bowtie2, MACS2, Homer, DiffBind", paste("Bowtie2 index:", ref$bowtie2_index, "| Chrom sizes:", ref$chrom_sizes)),
+      c("Tool", "FastQC", fastqc_modules, "Read quality control", "Raw or trimmed FASTQ", "Input mode is selected per run; completed samples are skipped on rerun."),
+      c("Tool", "cutadapt", cutadapt_modules, "Nextera adapter trimming", "Raw paired-end FASTQ", "The web workflow defaults to the established CodeSpringLab Nextera R1/R2 adapters and a 20 bp minimum length."),
+      c("Tool", "Bowtie2", bowtie2_modules, "Paired-end ATAC-seq alignment and track generation", ref$label, paste("Uses the GRCm39/GENCODE M39 Bowtie2 index, removes PCR duplicates, and creates an RPGC-normalized bigWig with effective genome size", ref$effective_genome_size, ".")),
+      c("Tool", "MACS2", macs2_modules, "Shifted ATAC-seq peak calling", "Duplicate-removed Bowtie2 BED", "Uses --nomodel --shift -100 --extsize 200 --call-summits; the q-value is selected in Run Pipeline. Homer annotation and a TSS heatmap are generated by the established CodeSpringLab runner."),
+      c("Tool", "DiffBind/DESeq2", diffbind_modules, "Consensus peaks and differential accessibility", "MACS2 narrowPeak files and duplicate-removed BAM files", "Requires at least two replicates in each selected condition and applies the bundled mm39 blacklist for mouse projects.")
+    )
+    out <- as.data.frame(do.call(rbind, rows), stringsAsFactors = FALSE)
+    colnames(out) <- c("Type", "Name", "Version/reference", "Used for", "Input/reference", "Parameters/settings")
+    return(out)
+  }
   if (is_cutrun_project(project)) {
     bowtie2_modules <- module_versions_from_scripts(c(
       file.path(SCRIPTS_DIR, "bowtie2", "bowtie2_cutrun_PE.sh"),
@@ -1704,9 +1753,10 @@ methods_sentence_for_step <- function(step, manifest_rows, project) {
     step,
     "FastQC" = paste0("Read quality control was performed with FastQC.", mode_text),
     "Cutadapt" = paste0("Adapter trimming was performed with cutadapt.", mode_text),
-    "Bowtie2" = paste0("CUT&RUN fragments were aligned with Bowtie2.", ref_text, mode_text),
+    "Bowtie2" = paste0(if (is_atac_project(project)) "ATAC-seq fragments were aligned with Bowtie2 and duplicate-removed RPGC bigWigs were generated." else "CUT&RUN fragments were aligned with Bowtie2.", ref_text, mode_text),
     "SEACR" = paste0("CUT&RUN peaks were called with SEACR from fragment bedGraphs.", ref_text, mode_text),
-    "Differential Peaks" = paste0("Differential CUT&RUN binding was tested separately by cell type and mark using DiffBind with DESeq2. Native SEACR intervals were preserved and spike-in BAMs were reused automatically when available.", ref_text, mode_text),
+    "Differential Peaks" = paste0(if (is_atac_project(project)) "Differential accessibility was tested on a MACS2 consensus peakset using DiffBind with DESeq2." else "Differential CUT&RUN binding was tested separately by cell type and mark using DiffBind with DESeq2. Native SEACR intervals were preserved and spike-in BAMs were reused automatically when available.", ref_text, mode_text),
+    "MACS2 Peaks" = paste0("ATAC-seq peaks were called with MACS2 using Tn5-aware shifting and annotated with Homer.", ref_text, mode_text),
     "MACS2 (optional)" = paste0("Optional CUT&RUN peaks were called with MACS2.", ref_text, mode_text),
     "STAR" = paste0("Reads were aligned with STAR using ", gencode_label(project), ".", ref_text, mode_text),
     "featureCounts" = paste0("Gene-level counts were quantified with featureCounts using the selected GTF annotation.", ref_text, mode_text),
@@ -1984,6 +2034,27 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
   design <- project$design_matrix_path
   if (is.null(jobs)) jobs <- job_history(project)
   if (is.null(active_states)) active_states <- active_job_state_map_from_jobs(jobs)
+  if (is_atac_project(project)) {
+    raw <- data.frame(
+      step = atac_pipeline_order(),
+      status = c(
+        if (file.exists(design)) "Complete" else "Not started",
+        if (count_files(file.path(data_dir, "cutadapt"), fastq_suffix_regex) > 0) "Complete" else "Not started",
+        if (count_files(file.path(data_dir, "fastqc"), "\\.html$") + count_files(file.path(data_dir, "fastqc_cutadapt"), "\\.html$") > 0) "Complete" else "Not started",
+        if (count_files(file.path(data_dir, "bowtie2"), "_alignment_summary\\.txt$") > 0) "Complete" else "Not started",
+        if (count_files(file.path(data_dir, "macs2"), "(narrowPeak|peaks\\.xls)$") > 0) "Complete" else "Not started",
+        if (count_files(file.path(data_dir, "diffbind"), "DifferentialPeaks_.*\\.txt$") > 0) "Complete" else "Not started"
+      ),
+      path = c(design, file.path(data_dir, "cutadapt"), file.path(data_dir, "fastqc"), file.path(data_dir, "bowtie2"), file.path(data_dir, "macs2"), file.path(data_dir, "diffbind")),
+      stringsAsFactors = FALSE
+    )
+    modes <- last_job_modes_from_jobs(jobs)
+    raw$input <- unname(modes[raw$step]); raw$input[is.na(raw$input)] <- ""; raw$detail <- ""
+    active <- names(active_states)
+    raw$status[raw$step %in% active & raw$status != "Complete"] <- "Active"
+    raw$status <- normalize_pipeline_status(raw$status)
+    return(raw)
+  }
   if (is_cutrun_project(project)) {
     raw <- data.frame(
       step = cutrun_pipeline_order(),
@@ -2136,12 +2207,17 @@ cutrun_pipeline_order <- function() {
   c("Design matrix", "Cutadapt", "FastQC", "Bowtie2", "SEACR", "Peak QC", "Differential Peaks", "MACS2 (optional)")
 }
 
+atac_pipeline_order <- function() {
+  c("Design matrix", "Cutadapt", "FastQC", "Bowtie2", "MACS2 Peaks", "Differential Peaks")
+}
+
 all_pipeline_steps <- function() {
-  unique(c(rna_pipeline_order(), cutrun_pipeline_order()))
+  unique(c(rna_pipeline_order(), cutrun_pipeline_order(), atac_pipeline_order()))
 }
 
 pipeline_order <- function(project = NULL) {
   if (!is.null(project) && is_cutrun_project(project)) return(cutrun_pipeline_order())
+  if (!is.null(project) && is_atac_project(project)) return(atac_pipeline_order())
   rna_pipeline_order()
 }
 
@@ -2243,6 +2319,28 @@ sample_step_targets <- function(project, sample, step) {
       character(0)
     ))
   }
+  if (is_atac_project(project)) {
+    return(switch(step,
+      "Cutadapt" = {
+        cutadapt_dir <- file.path(data_dir, "cutadapt")
+        pairs <- sample_fastq_pairs(project, FALSE)
+        hit <- pairs[pairs$sample == sample, , drop = FALSE]
+        expected <- character(0)
+        if (NROW(hit)) {
+          reads <- unique(c(hit$r1[1], if (project$paired_end) hit$r2[1] else character(0)))
+          expected <- file.path(cutadapt_dir, basename(reads))
+          if (length(expected) && all(file.exists(expected))) return(expected)
+        }
+        hits <- if (dir.exists(cutadapt_dir)) list.files(cutadapt_dir, pattern = paste0("^", sample, ".*", fastq_suffix_regex), full.names = TRUE, ignore.case = TRUE) else character(0)
+        needed <- if (isTRUE(project$paired_end)) 2 else 1
+        if (length(hits) >= needed) return(sort(hits))
+        if (length(expected)) expected else file.path(cutadapt_dir, paste0(sample, ".fastq.gz"))
+      },
+      "Bowtie2" = file.path(data_dir, "bowtie2", sample, paste0(sample, "_alignment_summary.txt")),
+      "MACS2 Peaks" = file.path(data_dir, "macs2", sample, paste0(sample, "_peaks.narrowPeak")),
+      character(0)
+    ))
+  }
   switch(step,
     "Cutadapt" = {
       cutadapt_dir <- file.path(data_dir, "cutadapt")
@@ -2276,6 +2374,7 @@ minimum_expected_bytes <- function(step) {
     "STAR" = 1000,
     "Bowtie2" = 100,
     "SEACR" = 10,
+    "MACS2 Peaks" = 10,
     "MACS2 (optional)" = 10,
     "RSEM (optional)" = 100,
     "Kallisto (optional)" = 100,
@@ -2380,6 +2479,29 @@ cutrun_diffbind_result_dirs <- function(project) {
   if (!dir.exists(root)) return(character(0))
   dirs <- list.dirs(root, recursive = FALSE, full.names = TRUE)
   dirs[file.exists(file.path(dirs, "all_differential_peaks.tsv"))]
+}
+
+atac_alignment_summary_table <- function(project) {
+  root <- file.path(project$data_dir, "bowtie2")
+  files <- if (dir.exists(root)) list.files(root, pattern = "_alignment_summary\\.txt$", recursive = TRUE, full.names = TRUE) else character(0)
+  rows <- lapply(sort(files), function(path) {
+    x <- metric_file_to_named_list(path); if (!length(x)) return(NULL)
+    as.data.frame(as.list(c(sample = x$sample %||% basename(dirname(path)), mapped_reads = x$mapped_reads %||% "", deduplicated_reads = x$deduplicated_reads %||% "", effective_genome_size = x$effective_genome_size %||% "", bigwig = x$bigwig %||% "")), stringsAsFactors = FALSE)
+  })
+  rows <- Filter(Negate(is.null), rows); if (length(rows)) do.call(rbind, rows) else data.frame()
+}
+
+atac_results_explorer_ui <- function() {
+  div(class = "native-results-host cutrun-results-host", div(class = "app-shell cutrun-results-shell",
+    div(class = "hero cutrun-results-hero", div(class = "hero-copy", h1(class = "hero-title", "ATAC-seq Results Explorer"), div(class = "hero-kicker", "GRCm39/GENCODE M39 accessibility analysis"))),
+    div(class = "main-tabs", tabsetPanel(id = "atac_results_tabs",
+      tabPanel("Overview", br(), actionButton("refresh_atac_results", "Refresh results", class = "btn-primary"), tags$h4("Pipeline status"), table_output("results_overview"), tags$h4("Design matrix"), table_output("design_table")),
+      tabPanel("Alignment", br(), table_output("atac_alignment_summary"), tags$hr(), uiOutput("atac_insert_size_ui")),
+      tabPanel("MACS2 Peaks", br(), uiOutput("atac_peak_file_ui"), table_output("atac_peak_table"), tags$hr(), uiOutput("atac_peak_heatmap_ui")),
+      tabPanel("Differential Peaks", br(), uiOutput("atac_diffbind_dir_ui"), table_output("atac_diffbind_table"), tags$hr(), fluidRow(column(6, uiOutput("atac_diffbind_pca_ui")), column(6, uiOutput("atac_diffbind_volcano_ui")))),
+      tabPanel("Files", br(), uiOutput("atac_file_ui"), uiOutput("atac_file_view"))
+    ))
+  ))
 }
 
 cutrun_metric_card <- function(label, value, note = "", tone = "blue") {
@@ -2959,11 +3081,12 @@ tool_delete_data_samples_id <- function(step) {
 }
 
 sample_level_pipeline_steps <- function() {
-  unique(c("Cutadapt", "FastQC", "STAR", "featureCounts", "RSEM (optional)", "Kallisto (optional)", "Bowtie2", "SEACR", "MACS2 (optional)"))
+  unique(c("Cutadapt", "FastQC", "STAR", "featureCounts", "RSEM (optional)", "Kallisto (optional)", "Bowtie2", "SEACR", "MACS2 (optional)", "MACS2 Peaks"))
 }
 
 sample_level_steps_for_project <- function(project) {
   if (is_cutrun_project(project)) c("Cutadapt", "FastQC", "Bowtie2", "SEACR", "MACS2 (optional)")
+  else if (is_atac_project(project)) c("Cutadapt", "FastQC", "Bowtie2", "MACS2 Peaks")
   else c("Cutadapt", "FastQC", "STAR", "featureCounts", "RSEM (optional)", "Kallisto (optional)")
 }
 
@@ -3231,6 +3354,9 @@ genome_species <- function(project) {
 genome_reference_key <- function(project) {
   catalog <- genome_reference_catalog()
   species <- genome_species(project)
+  if (is_atac_project(project) || is_cutrun_project(project)) {
+    return(if (identical(species, "human")) "human_gencode50" else "mouse_gencodeM39")
+  }
   genome <- tolower(project$genome %||% "")
   ref <- project$genome_version %||% project$reference_genome %||% ""
   ref <- trimws(as.character(ref))
@@ -3273,8 +3399,27 @@ cutrun_reference_resources <- function(project) {
   }
 }
 
+atac_reference_resources <- function(project) {
+  base <- cutrun_reference_resources(project)
+  if (identical(genome_species(project), "human")) {
+    base$macs2_genome <- "2.7e+9"
+    c(base, list(
+      effective_genome_size = "2913022398", homer_genome = "hg38",
+      tss_bed = "/grid/bsr/data/data/utama/genome/human_gencode50/gencode.v50.annotation_onlyChrNoMito.bed",
+      blacklist = ""
+    ))
+  } else {
+    base$macs2_genome <- "1.87e+9"
+    c(base, list(
+      effective_genome_size = "2654621783", homer_genome = "mm39",
+      tss_bed = "/grid/bsr/data/data/utama/genome/mouse_gencodeM39/gencode.vM39.annotation_onlyChrNoMito.bed",
+      blacklist = file.path(SCRIPTS_DIR, "test", "manifest_atac", "mm39-blacklist.bed")
+    ))
+  }
+}
+
 project_reference_label <- function(project) {
-  if (is_cutrun_project(project)) cutrun_reference_resources(project)$label else gencode_label(project)
+  if (is_cutrun_project(project)) cutrun_reference_resources(project)$label else if (is_atac_project(project)) atac_reference_resources(project)$label else gencode_label(project)
 }
 
 adapter_choices_r1 <- function() {
@@ -3941,6 +4086,80 @@ extract_bowtie2_metrics <- function(project, sample) {
     `Spike-in reads` = one("spikein_mapped_reads"),
     `Duplicate %` = dup_text
   )
+}
+
+submit_atac_bowtie2_jobs <- function(project, trimmed = TRUE) {
+  if (!isTRUE(project$paired_end)) return(record_preflight_failure(project, "Bowtie2", "The established CodeSpringLab ATAC-seq workflow requires paired-end FASTQs.", "bowtie2"))
+  res <- atac_reference_resources(project)
+  index_exists <- file.exists(paste0(res$bowtie2_index, ".1.bt2")) || file.exists(paste0(res$bowtie2_index, ".1.bt2l"))
+  missing_ref <- c(if (!index_exists) paste0(res$bowtie2_index, ".1.bt2[|l]"), if (!file.exists(res$chrom_sizes)) res$chrom_sizes)
+  if (length(missing_ref)) return(record_preflight_failure(project, "Bowtie2", paste("ATAC-seq reference files are missing:", paste(missing_ref, collapse = ", ")), "bowtie2"))
+  pairs <- sample_fastq_pairs(project, trimmed)
+  msg <- missing_read_message(project, pairs, trimmed)
+  if (nzchar(msg)) return(record_preflight_failure(project, "Bowtie2", msg, "bowtie2"))
+  outdir <- file.path(project$data_dir, "bowtie2"); dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+  targets <- stats::setNames(lapply(unique(pairs$sample), function(s) file.path(outdir, s, paste0(s, "_alignment_summary.txt"))), unique(pairs$sample))
+  plan <- sample_submission_plan(project, "Bowtie2", targets)
+  if (!length(plan$samples)) return(plan$message)
+  pairs <- pairs[pairs$sample %in% plan$samples, , drop = FALSE]
+  qsub <- file.path(SCRIPTS_DIR, "bowtie2", "qsub_bowtie2_PE.sh")
+  runner <- file.path(SCRIPTS_DIR, "bowtie2", "bowtie2_PE.sh")
+  missing_scripts <- c(qsub, runner)[!file.exists(c(qsub, runner))]
+  if (length(missing_scripts)) return(record_preflight_failure(project, "Bowtie2", paste("CodeSpringLab ATAC-seq Bowtie2 scripts are missing:", paste(missing_scripts, collapse = ", ")), "bowtie2"))
+  messages <- apply(pairs, 1, function(row) {
+    sample <- row[["sample"]]; sample_dir <- file.path(outdir, sample); dir.create(sample_dir, recursive = TRUE, showWarnings = FALSE)
+    prefix <- file.path(sample_dir, sample)
+    submit_sbatch(project, "Bowtie2", qsub, c(prefix, res$bowtie2_index, row[["r1"]], row[["r2"]], res$effective_genome_size, res$chrom_sizes, project$name, runner),
+                  "bowtie2_atac", paste(if (trimmed) "trimmed" else "raw", "reads; GRCm39/M39"), sample = sample,
+                  target = paste0(prefix, "_alignment_summary.txt"), reference = res$label)
+  })
+  paste(append_plan_message(messages, plan), collapse = "\n")
+}
+
+submit_atac_macs2_jobs <- function(project, qvalue = "0.05") {
+  res <- atac_reference_resources(project)
+  design <- project_design_df(project)
+  if (!NROW(design) || !"sample" %in% names(design)) return(record_preflight_failure(project, "MACS2 Peaks", "No samples found in design_matrix.txt.", "macs2"))
+  outdir <- file.path(project$data_dir, "macs2"); dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+  targets <- stats::setNames(lapply(design$sample, function(s) file.path(outdir, s, paste0(s, "_peaks.narrowPeak"))), design$sample)
+  plan <- sample_submission_plan(project, "MACS2 Peaks", targets)
+  if (!length(plan$samples)) return(plan$message)
+  qsub <- file.path(SCRIPTS_DIR, "MACS2", "qsub_macs2_PE.sh"); runner <- file.path(SCRIPTS_DIR, "MACS2", "macs2_PE.sh")
+  missing_resources <- c(qsub, runner, res$tss_bed)[!file.exists(c(qsub, runner, res$tss_bed))]
+  if (length(missing_resources)) return(record_preflight_failure(project, "MACS2 Peaks", paste("Required ATAC-seq MACS2 resources are missing:", paste(missing_resources, collapse = ", ")), "macs2"))
+  messages <- vapply(plan$samples, function(sample) {
+    bed <- file.path(project$data_dir, "bowtie2", sample, paste0(sample, "Aligned.sortedByCoord_removeDup.out.bed"))
+    bw_dir <- file.path(project$data_dir, "bowtie2")
+    if (!file.exists(bed)) return(record_preflight_failure(project, "MACS2 Peaks", paste("Missing duplicate-removed Bowtie2 BED:", bed), "macs2"))
+    sample_dir <- file.path(outdir, sample); dir.create(sample_dir, recursive = TRUE, showWarnings = FALSE)
+    submit_sbatch(project, "MACS2 Peaks", qsub,
+      c(sample, bed, res$macs2_genome, res$chrom_sizes, sample_dir, res$tss_bed, qvalue, project$name, res$homer_genome, bw_dir, runner),
+      "macs2_atac", paste("ATAC shift -100/extsize 200; q", qvalue), sample = sample,
+      target = file.path(sample_dir, paste0(sample, "_peaks.narrowPeak")), reference = res$label)
+  }, character(1))
+  paste(append_plan_message(messages, plan), collapse = "\n")
+}
+
+submit_atac_diffbind_job <- function(project, compare_col, reference, comparison) {
+  design <- project_design_df(project)
+  if (!NROW(design) || !nzchar(compare_col) || !compare_col %in% names(design)) return(record_preflight_failure(project, "Differential Peaks", "Select a valid ATAC-seq comparison variable from design_matrix.txt.", "diffbind"))
+  tab <- table(as.character(design[[compare_col]]))
+  if (!all(c(reference, comparison) %in% names(tab)) || any(tab[c(reference, comparison)] < 2L)) return(record_preflight_failure(project, "Differential Peaks", "DiffBind requires at least two biological replicates in both selected conditions.", "diffbind"))
+  res <- atac_reference_resources(project)
+  qsub <- file.path(SCRIPTS_DIR, "DiffBind", "qsub_diffbind.sh"); runner <- file.path(SCRIPTS_DIR, "DiffBind", "diffbind.sh"); rscript <- file.path(SCRIPTS_DIR, "DiffBind", "DiffBind.R")
+  required <- c(qsub, runner, rscript, if (genome_species(project) == "mouse") res$blacklist else character(0))
+  missing_resources <- required[!file.exists(required)]
+  if (length(missing_resources)) return(record_preflight_failure(project, "Differential Peaks", paste("Required ATAC-seq DiffBind resources are missing:", paste(missing_resources, collapse = ", ")), "diffbind"))
+  comparison_design <- deseq_design_for_column(project, compare_col)
+  design_dir <- dirname(comparison_design)
+  if (genome_species(project) == "mouse") file.copy(res$blacklist, file.path(design_dir, "mm39-blacklist.bed"), overwrite = TRUE)
+  slug <- clean_name(paste0(comparison, "_vs_", reference), "comparison")
+  outdir <- file.path(project$data_dir, "diffbind", slug); dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+  target <- file.path(outdir, paste0("DifferentialPeaks_", comparison, "_vs_", reference, "_ref.txt"))
+  if (file.exists(target)) return("This ATAC-seq DiffBind comparison is already complete. Delete its data first to rerun.")
+  submit_sbatch(project, "Differential Peaks", qsub,
+    c(rscript, outdir, design_dir, file.path(project$data_dir, "macs2"), reference, comparison, genome_species(project), file.path(project$data_dir, "bowtie2"), runner),
+    "diffbind_atac", paste(compare_col, comparison, "vs", reference, "GRCm39/M39"), target = target, reference = res$label)
 }
 
 submit_cutrun_bowtie2_jobs <- function(project, trimmed = TRUE, mapq = 30, max_fragment = 1000,
@@ -4742,6 +4961,15 @@ run_step_meta <- function(project = NULL) {
       "Build consensus SEACR peaks, peak counts, and FRiP summaries.",
       "Build mark-specific consensus peaks and run DiffBind/DESeq2 differential binding.",
       "Optional MACS2 peak calling for comparison or broad histone marks."
+    )
+  } else if (!is.null(project) && is_atac_project(project)) {
+    c(
+      "Create or load design_matrix.txt.",
+      "Trim Nextera/ATAC adapters and short reads.",
+      "Generate per-read quality reports.",
+      "Align paired-end fragments to the GRCm39/GENCODE M39 Bowtie2 index and create duplicate-removed RPGC bigWigs.",
+      "Call shifted ATAC-seq peaks with MACS2 and annotate them with Homer.",
+      "Build a consensus peakset and test differential accessibility with DiffBind/DESeq2."
     )
   } else {
     c(
@@ -6236,9 +6464,10 @@ server <- function(input, output, session) {
 
   observeEvent(input$scan_fastqs, {
     p <- current_project()
-    is_cutrun <- is_cutrun_project(p)
-    scanned <- scan_fastqs(p$fastq_dir, p$paired_end, metadata_cols_from_input(), infer_samples = is_cutrun)
+    is_cutrun <- is_cutrun_project(p); is_atac <- is_atac_project(p)
+    scanned <- scan_fastqs(p$fastq_dir, p$paired_end, metadata_cols_from_input(), infer_samples = is_cutrun || is_atac)
     if (is_cutrun) scanned <- infer_cutrun_metadata(scanned)
+    if (is_atac) scanned <- infer_atac_metadata(scanned)
     design_state(scanned)
   })
 
@@ -6411,13 +6640,13 @@ server <- function(input, output, session) {
         )
       ))
     }
-    ref <- if (is_cutrun_project(p)) cutrun_reference_resources(p) else genome_resources(p)
+    ref <- if (is_cutrun_project(p)) cutrun_reference_resources(p) else if (is_atac_project(p)) atac_reference_resources(p) else genome_resources(p)
     div(class = "resource-strip",
         div(class = "resource-card",
             tags$strong("Genome resources"),
             tags$p(class = "muted status-path", project_reference_label(p)),
-            tags$p(class = "status-path", if (is_cutrun_project(p)) ref$bowtie2_index else ref$gtf),
-            if (is_cutrun_project(p)) tags$p(class = "status-path", ref$chrom_sizes) else NULL
+            tags$p(class = "status-path", if (is_cutrun_project(p) || is_atac_project(p)) ref$bowtie2_index else ref$gtf),
+            if (is_cutrun_project(p) || is_atac_project(p)) tags$p(class = "status-path", ref$chrom_sizes) else NULL
         ),
         div(class = "resource-card flowchart-card",
             if (file.exists(FLOWCHART_PATH)) tags$img(src = file.path("codespring_flowchart", basename(FLOWCHART_PATH))) else tags$p("Pipeline flowchart")
@@ -6495,6 +6724,23 @@ server <- function(input, output, session) {
           "run_cutrun_macs2", "Submit MACS2")
       ))
     }
+    if (is_atac_project(p)) {
+      nextera1 <- unname(r1_choices[["Nextera Transposase ATAC"]]); nextera2 <- unname(r2_choices[["Nextera Transposase ATAC"]])
+      return(div(class = "run-grid",
+        tool_panel("Cutadapt", status, "Trim ATAC-seq adapters and short reads.", tagList(
+          selectInput("cutadapt_adapter1", "R1 adapter", choices = r1_choices, selected = selected_choice(input$cutadapt_adapter1, r1_choices, nextera1), selectize = FALSE),
+          selectInput("cutadapt_adapter2", "R2 adapter", choices = r2_choices, selected = selected_choice(input$cutadapt_adapter2, r2_choices, nextera2), selectize = FALSE),
+          textInput("cutadapt_min_length", "Minimum read length", value = input$cutadapt_min_length %||% "20")
+        ), "run_cutadapt", "Submit cutadapt"),
+        tool_panel("FastQC", status, "Quality reports for raw or trimmed ATAC-seq reads.", tagList(checkboxInput("fastqc_use_trimmed", "Use trimmed reads", value = trimmed_checkbox_default(p, isolate(input$fastqc_use_trimmed)))), "run_fastqc", "Submit FastQC"),
+        tool_panel("Bowtie2", status, "Align paired-end ATAC fragments to the GRCm39/GENCODE M39 index, remove duplicates, and create RPGC bigWigs.", tagList(
+          checkboxInput("atac_bowtie2_use_trimmed", "Use trimmed reads", value = trimmed_checkbox_default(p, isolate(input$atac_bowtie2_use_trimmed))),
+          tags$p(class = "muted small-note", atac_reference_resources(p)$bowtie2_index)
+        ), "run_atac_bowtie2", "Submit Bowtie2"),
+        tool_panel("MACS2 Peaks", status, "Call shifted ATAC-seq peaks and generate TSS heatmaps and Homer annotations.", tagList(textInput("atac_macs2_qvalue", "MACS2 q-value", value = input$atac_macs2_qvalue %||% "0.05")), "run_atac_macs2", "Submit MACS2"),
+        tool_panel("Differential Peaks", status, "Build the DiffBind consensus peakset and test differential accessibility.", tagList(uiOutput("atac_diffbind_controls_ui"), tags$p(class = "muted small-note", "Requires at least two biological replicates per selected condition.")), "run_atac_diffbind", "Submit DiffBind", data.frame())
+      ))
+    }
     div(class = "run-grid",
       tool_panel("Cutadapt", status, "Trim adapters and short reads from raw FASTQs.",
         tagList(
@@ -6543,6 +6789,27 @@ server <- function(input, output, session) {
       choices = conditions,
       selected = selected_choice(current, conditions, conditions[[1]]),
       selectize = FALSE
+    )
+  })
+
+  output$atac_diffbind_controls_ui <- renderUI({
+    p <- current_project(); if (!is_atac_project(p)) return(NULL)
+    cols <- design_compare_columns(p)
+    if (!length(cols)) return(div(class = "empty-box", "Add a comparison variable such as condition or day to the ATAC-seq design matrix."))
+    compare_col <- selected_choice(input$atac_diffbind_column, cols, if ("condition" %in% cols) "condition" else cols[[1]])
+    values <- design_compare_values(p, compare_col)
+    if (length(values) < 2L) return(tagList(
+      selectInput("atac_diffbind_column", "Comparison variable", choices = cols, selected = compare_col, selectize = FALSE),
+      div(class = "empty-box", "The selected variable needs at least two values.")
+    ))
+    preferred <- values[tolower(values) %in% c("veh", "vehicle", "control", "ctrl", "untreated")]
+    ref_default <- if (length(preferred)) preferred[[1]] else values[[1]]
+    ref <- selected_choice(input$atac_diffbind_reference, values, ref_default)
+    comp <- selected_choice(input$atac_diffbind_comparison, setdiff(values, ref), setdiff(values, ref)[[1]])
+    tagList(
+      selectInput("atac_diffbind_column", "Comparison variable", choices = cols, selected = compare_col, selectize = FALSE),
+      selectInput("atac_diffbind_reference", "Reference condition", choices = values, selected = ref, selectize = FALSE),
+      selectInput("atac_diffbind_comparison", "Comparison condition", choices = setdiff(values, ref), selected = comp, selectize = FALSE)
     )
   })
 
@@ -6643,6 +6910,16 @@ server <- function(input, output, session) {
       ),
       paste(if (trimmed) "trimmed reads" else "raw reads", normalization_choice)
     )
+  })
+  observeEvent(input$run_atac_bowtie2, {
+    trimmed <- isTRUE(input$atac_bowtie2_use_trimmed)
+    run_submission("Bowtie2", submit_atac_bowtie2_jobs(current_project(), trimmed), paste(if (trimmed) "trimmed" else "raw", "ATAC reads; M39 index"))
+  })
+  observeEvent(input$run_atac_macs2, {
+    run_submission("MACS2 Peaks", submit_atac_macs2_jobs(current_project(), input$atac_macs2_qvalue %||% "0.05"), "shift -100; extsize 200")
+  })
+  observeEvent(input$run_atac_diffbind, {
+    run_submission("Differential Peaks", submit_atac_diffbind_job(current_project(), input$atac_diffbind_column %||% "", input$atac_diffbind_reference %||% "", input$atac_diffbind_comparison %||% ""), paste(input$atac_diffbind_comparison, "vs", input$atac_diffbind_reference))
   })
   observeEvent(input$run_cutrun_seacr, {
     run_submission(
@@ -6826,7 +7103,7 @@ server <- function(input, output, session) {
 
   native_results_app <- reactive({
     native_results_refresh()
-    if (is_cutrun_project(current_project())) return(NULL)
+    if (is_cutrun_project(current_project()) || is_atac_project(current_project())) return(NULL)
     load_native_rnaseq_viewer(current_project())
   })
 
@@ -6859,6 +7136,7 @@ server <- function(input, output, session) {
     if (is_cutrun_project(current_project())) {
       return(cutrun_results_explorer_ui())
     }
+    if (is_atac_project(current_project())) return(atac_results_explorer_ui())
     err <- native_results_error()
     if (nzchar(err)) {
       return(div(class = "empty-box", tags$h4("Results Explorer server error"), tags$pre(err)))
@@ -6888,9 +7166,42 @@ server <- function(input, output, session) {
     if (!is_cutrun_project(current_project())) return()
     safe_refresh_progress_now("CUT&RUN results refresh")
   }, ignoreInit = TRUE)
+  observeEvent(input$refresh_atac_results, {
+    if (is_atac_project(current_project())) safe_refresh_progress_now("ATAC-seq results refresh")
+  }, ignoreInit = TRUE)
 
   output$results_overview <- render_csl_table(project_status(current_project()), page_length = 20)
   output$design_table <- render_csl_table(safe_read_table(current_project()$design_matrix_path), page_length = 50)
+  output$atac_alignment_summary <- render_csl_table(atac_alignment_summary_table(current_project()), page_length = 50)
+  output$atac_insert_size_ui <- renderUI({
+    progress_refresh(); p <- current_project(); files <- if (dir.exists(file.path(p$data_dir, "bowtie2"))) list.files(file.path(p$data_dir, "bowtie2"), pattern = "_insert_size_histogram\\.jpg$", recursive = TRUE, full.names = TRUE) else character(0)
+    if (!length(files)) return(div(class = "empty-box", "No insert-size histogram found yet."))
+    tagList(selectInput("atac_insert_size_file", "Sample insert-size plot", choices = stats::setNames(files, basename(dirname(files))), selected = selected_choice(input$atac_insert_size_file, files, files[[1]]), selectize = FALSE), image_or_file_ui(input$atac_insert_size_file %||% files[[1]], "650px"))
+  })
+  output$atac_peak_file_ui <- renderUI({
+    progress_refresh(); choices <- result_file_choices(current_project(), "macs2", "(narrowPeak|peaks_annotated\\.txt)$")
+    if (!length(choices)) return(div(class = "empty-box", "No MACS2 peaks found yet."))
+    selectInput("atac_peak_file", "Peak file", choices = choices, selected = selected_choice(input$atac_peak_file, choices, choices[[1]]), selectize = FALSE)
+  })
+  output$atac_peak_table <- render_csl_table({ req(input$atac_peak_file); safe_read_result_table(input$atac_peak_file, 10000) }, page_length = 50)
+  output$atac_peak_heatmap_ui <- renderUI({
+    req(input$atac_peak_file); dir <- dirname(input$atac_peak_file); png <- list.files(dir, pattern = "_heatmap_TSS\\.png$", full.names = TRUE)
+    if (!length(png)) return(div(class = "empty-box", "No TSS heatmap found for this sample.")); image_or_file_ui(png[[1]], "700px")
+  })
+  output$atac_diffbind_dir_ui <- renderUI({
+    progress_refresh(); root <- file.path(current_project()$data_dir, "diffbind"); dirs <- if (dir.exists(root)) list.dirs(root, recursive = FALSE, full.names = TRUE) else character(0); dirs <- dirs[lengths(lapply(dirs, function(d) list.files(d, pattern = "^DifferentialPeaks_.*\\.txt$"))) > 0]
+    if (!length(dirs)) return(div(class = "empty-box", "No DiffBind comparison found yet.")); selectInput("atac_diffbind_dir", "Comparison", choices = stats::setNames(dirs, basename(dirs)), selected = selected_choice(input$atac_diffbind_dir, dirs, dirs[[1]]), selectize = FALSE)
+  })
+  selected_atac_diffbind_dir <- reactive({ path <- input$atac_diffbind_dir %||% ""; req(nzchar(path), dir.exists(path)); path })
+  output$atac_diffbind_table <- render_csl_table({ files <- list.files(selected_atac_diffbind_dir(), pattern = "^DifferentialPeaks_.*\\.txt$", full.names = TRUE); req(length(files)); safe_read_table(files[[1]], 20000) }, page_length = 50, scroll_y = "600px")
+  output$atac_diffbind_pca_ui <- renderUI({ image_or_file_ui(file.path(selected_atac_diffbind_dir(), "diffbind_pca_byNormCounts.png"), "620px") })
+  output$atac_diffbind_volcano_ui <- renderUI({ image_or_file_ui(file.path(selected_atac_diffbind_dir(), "diffbind_volcano_byDiffPeaks.png"), "620px") })
+  output$atac_file_ui <- renderUI({
+    progress_refresh(); choices <- result_file_choices(current_project(), c("bowtie2", "macs2", "diffbind"), "\\.(bed|bedgraph|bdg|bw|bam|bai|txt|tsv|csv|png|jpg|pdf|xls|narrowPeak)$")
+    if (!length(choices)) return(div(class = "empty-box", "No ATAC-seq result files found yet.")); selectInput("atac_file", "ATAC-seq result file", choices = choices, selected = selected_choice(input$atac_file, choices, choices[[1]]), selectize = FALSE)
+  })
+  output$atac_file_view <- renderUI({ req(input$atac_file); if (tolower(tools::file_ext(input$atac_file)) %in% c("txt","tsv","csv","bed","bdg","xls","narrowpeak")) table_output("atac_selected_table") else image_or_file_ui(input$atac_file, "850px") })
+  output$atac_selected_table <- render_csl_table({ req(input$atac_file); safe_read_result_table(input$atac_file, 10000) }, page_length = 50)
   output$cutrun_summary_cards <- renderUI({
     progress_refresh()
     cutrun_summary_cards_ui(current_project())
