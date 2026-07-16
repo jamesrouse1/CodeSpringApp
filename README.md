@@ -19,6 +19,10 @@ CodeSpringApp does not fall back to a developer's or another user's home directo
 
 The launcher derives the account and home directory from the operating system rather than inherited `USER` or `HOME` variables. It refuses to start if the CodeSpringApp checkout, CodeSpringLab checkout, or private app-state directory resolves outside that Unix user's home. The startup output prints the verified Unix user, home, and CodeSpringLab path so they can be checked before opening the browser.
 
+Each launch binds only to the server loopback interface and generates a private 64-character access token. Open the complete URL printed by the launcher, including its `?token=...` value. Tunneling to another user's port without that launch's token shows an access-denied page and does not load their projects.
+
+After the last authorized browser session disconnects, the app process stops automatically after five minutes. Pipeline jobs already submitted to SLURM continue running. Set `CSL_WEB_IDLE_SHUTDOWN_SECONDS` before launching to change the grace period; use `0` to disable automatic shutdown.
+
 Saved project configurations, job history, logs, and last-project selection are stored beneath the current Unix user's `~/.codespringweb` directory. They are not loaded from the cloned repositories, so one user does not inherit another user's project menu. Legacy project configs are migrated only when their exact results data path appears in that user's private job history.
 
 ## Bundled Example Datasets
@@ -56,10 +60,10 @@ From your laptop, copy the SSH command printed by the launcher. It will use the 
 ssh -N -L <PORT>:localhost:<PORT> $USER@bamdev1
 ```
 
-Then open:
+Then open the complete private URL printed by the launcher:
 
 ```text
-http://localhost:<PORT>
+http://localhost:<PORT>/?token=<PRIVATE_TOKEN>
 ```
 
 Example launcher output. The port in your terminal may differ if the default port is already busy:

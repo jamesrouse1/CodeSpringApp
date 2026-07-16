@@ -10,7 +10,8 @@ else
   START_PORT="${1:-8601}"
 fi
 MAX_PORT="${CSL_WEB_MAX_PORT:-8699}"
-HOST="${CSL_WEB_HOST:-0.0.0.0}"
+# Only SSH tunnels and other processes on the server itself may reach Shiny.
+HOST="127.0.0.1"
 
 USER_NAME="$(id -un 2>/dev/null || true)"
 if [[ -z "$USER_NAME" ]]; then
@@ -113,6 +114,26 @@ write_codespring_r_makevars() {
 
 write_codespring_r_makevars
 
+generate_access_token() {
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex 32
+  else
+    Rscript -e 'set.seed(NULL); cat(paste(sample(c(0:9, letters[1:6]), 64, replace = TRUE), collapse = ""))'
+  fi
+}
+
+ACCESS_TOKEN="$(generate_access_token)"
+if [[ ! "$ACCESS_TOKEN" =~ ^[0-9a-f]{64}$ ]]; then
+  printf '\033[31mCould not generate a secure CodeSpringApp access token.\033[0m\n'
+  exit 1
+fi
+
+IDLE_SHUTDOWN_SECONDS="${CSL_WEB_IDLE_SHUTDOWN_SECONDS:-300}"
+if [[ ! "$IDLE_SHUTDOWN_SECONDS" =~ ^[0-9]+$ ]]; then
+  printf '\033[31mCSL_WEB_IDLE_SHUTDOWN_SECONDS must be a non-negative whole number.\033[0m\n'
+  exit 1
+fi
+
 install_r_package_if_missing() {
   local pkg="$1"
   if R_MAKEVARS_USER="$R_MAKEVARS_FILE" Rscript -e "quit(status = if (requireNamespace('$pkg', quietly = TRUE)) 0 else 1)" >/dev/null 2>&1; then
@@ -187,7 +208,7 @@ cleanup_previous_codespring_app_ports() {
   for pf in "$LOG_DIR"/codespringweb_*.pid "$LOG_DIR"/codespringapp_*.pid; do
     pid="$(head -n 1 "$pf" 2>/dev/null || true)"
     stop_pid_if_ours "$pid" "pidfile $(basename "$pf")" || true
-    rm -f "$pf"
+    rm -f "$pf" "${pf%.pid}.url"
   done
   shopt -u nullglob
 
@@ -245,6 +266,7 @@ for candidate in $(seq "$PORT" "$MAX_PORT"); do
 
   nohup env HOME="$USER_HOME" USER="$USER_NAME" LOGNAME="$USER_NAME" \
     CSL_CODESPRINGLAB_ROOT="$CSL_ROOT" CSL_WEB_HOME="$LOG_DIR" \
+    CSL_WEB_ACCESS_TOKEN="$ACCESS_TOKEN" CSL_WEB_IDLE_SHUTDOWN_SECONDS="$IDLE_SHUTDOWN_SECONDS" \
     Rscript -e "shiny::runApp('$APP_DIR', host='$HOST', port=$PORT)" > "$LOG_FILE" 2>&1 &
   APP_PID="$!"
   echo "$APP_PID" > "$LOG_DIR/codespringweb_${PORT}.pid"
@@ -271,11 +293,21 @@ if [[ -z "$APP_PID" ]] || ! kill -0 "$APP_PID" 2>/dev/null; then
   exit 1
 fi
 
+APP_URL="http://localhost:${PORT}/?token=${ACCESS_TOKEN}"
+URL_FILE="$LOG_DIR/codespringweb_${PORT}.url"
+printf '%s\n' "$APP_URL" > "$URL_FILE"
+chmod 600 "$URL_FILE"
+
 printf '\n\033[32mCodeSpringApp is running on bamdev1 port %s.\033[0m\n' "$PORT"
 printf '\033[1;36mUnix user:\033[0m %s\n' "$USER_NAME"
 printf '\033[1;36mUser home:\033[0m %s\n' "$USER_HOME"
 printf '\033[1;36mCodeSpringLab:\033[0m %s\n' "$CSL_ROOT"
 printf '\033[1;36mCopy/paste this command into your laptop terminal:\033[0m\n'
 printf '\033[1mssh -N -L %s:localhost:%s %s@bamdev1\033[0m\n' "$PORT" "$PORT" "$USER_NAME"
-printf '\033[1;36mThen open:\033[0m \033[1mhttp://localhost:%s\033[0m\n' "$PORT"
+printf '\033[1;36mThen open this private URL:\033[0m \033[1m%s\033[0m\n' "$APP_URL"
+if [[ "$IDLE_SHUTDOWN_SECONDS" == "0" ]]; then
+  printf '\033[90mAutomatic idle shutdown: disabled\033[0m\n'
+else
+  printf '\033[90mAutomatic idle shutdown: %s seconds after the last browser session closes\033[0m\n' "$IDLE_SHUTDOWN_SECONDS"
+fi
 printf '\033[90mServer log: %s\033[0m\n\n' "$LOG_FILE"

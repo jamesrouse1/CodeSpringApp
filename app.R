@@ -172,6 +172,37 @@ path_is_within <- function(path, root) {
 
 CURRENT_USER <- effective_unix_user()
 CURRENT_HOME <- unix_home_for_user(CURRENT_USER)
+ACCESS_TOKEN <- Sys.getenv("CSL_WEB_ACCESS_TOKEN", unset = "")
+IDLE_SHUTDOWN_SECONDS <- suppressWarnings(as.numeric(Sys.getenv("CSL_WEB_IDLE_SHUTDOWN_SECONDS", unset = "300")))
+if (!is.finite(IDLE_SHUTDOWN_SECONDS) || IDLE_SHUTDOWN_SECONDS < 0) IDLE_SHUTDOWN_SECONDS <- 300
+APP_RUNTIME <- new.env(parent = emptyenv())
+APP_RUNTIME$active_sessions <- 0L
+APP_RUNTIME$idle_generation <- 0L
+
+access_token_valid <- function(query_string) {
+  if (!nzchar(ACCESS_TOKEN)) return(TRUE)
+  query_string <- sub("^\\?", "", as.character(query_string %||% ""))
+  supplied <- tryCatch(shiny::parseQueryString(query_string)[["token"]] %||% "", error = function(e) "")
+  identical(as.character(supplied), ACCESS_TOKEN)
+}
+
+register_authorized_session <- function(session) {
+  APP_RUNTIME$active_sessions <- APP_RUNTIME$active_sessions + 1L
+  APP_RUNTIME$idle_generation <- APP_RUNTIME$idle_generation + 1L
+  session$onSessionEnded(function() {
+    APP_RUNTIME$active_sessions <- max(0L, APP_RUNTIME$active_sessions - 1L)
+    APP_RUNTIME$idle_generation <- APP_RUNTIME$idle_generation + 1L
+    generation <- APP_RUNTIME$idle_generation
+    if (APP_RUNTIME$active_sessions == 0L && IDLE_SHUTDOWN_SECONDS > 0) {
+      later::later(function() {
+        if (APP_RUNTIME$active_sessions == 0L && identical(APP_RUNTIME$idle_generation, generation)) {
+          shiny::stopApp()
+        }
+      }, delay = IDLE_SHUTDOWN_SECONDS)
+    }
+  })
+  invisible(NULL)
+}
 
 find_codespringlab_root <- function() {
   env_root <- Sys.getenv("CSL_CODESPRINGLAB_ROOT", unset = "")
@@ -6822,6 +6853,21 @@ ui <- fluidPage(
   )
 )
 
+MAIN_UI <- ui
+ui <- function(request) {
+  query_string <- tryCatch(request$QUERY_STRING %||% "", error = function(e) "")
+  if (access_token_valid(query_string)) return(MAIN_UI)
+  fluidPage(
+    tags$head(tags$title("CodeSpringApp access denied")),
+    div(
+      style = "max-width:720px;margin:80px auto;font-family:system-ui;padding:28px;border:1px solid #d8dee8;border-radius:10px;",
+      h2("Access denied"),
+      p("This port belongs to a different private CodeSpringApp launch, or the private URL token is missing."),
+      p("Start CodeSpringApp from your own Unix account and open the exact private URL printed by your launcher.")
+    )
+  )
+}
+
 server <- function(input, output, session) {
   projects <- reactiveVal(discover_projects())
   design_state <- reactiveVal(data.frame())
@@ -8850,6 +8896,24 @@ server <- function(input, output, session) {
     content = function(file) {
       utils::write.csv(tool_reference_summary(current_project()), file, row.names = FALSE, na = "")
     }
+  )
+}
+
+MAIN_SERVER <- server
+server <- function(input, output, session) {
+  observeEvent(
+    session$clientData$url_search,
+    {
+      query_string <- isolate(session$clientData$url_search %||% "")
+      if (!access_token_valid(query_string)) {
+        session$close()
+        return(invisible(NULL))
+      }
+      register_authorized_session(session)
+      MAIN_SERVER(input, output, session)
+    },
+    once = TRUE,
+    ignoreNULL = TRUE
   )
 }
 
