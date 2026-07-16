@@ -1310,7 +1310,22 @@ count_files <- function(path, pattern) {
 diffbind_comparison_complete <- function(path) {
   if (!dir.exists(path) || file.exists(file.path(path, "_RUN_STARTED"))) return(FALSE)
   if (file.exists(file.path(path, "_COMPLETE")) && file_size_for(file.path(path, "_COMPLETE")) > 0) return(TRUE)
-  length(list.files(path, pattern = "^DifferentialPeaks_.*\\.txt$", full.names = TRUE)) > 0
+  legacy <- list.files(path, pattern = "^DifferentialPeaks_.*\\.txt$", full.names = TRUE)
+  length(legacy) > 0 && any(vapply(legacy, file_size_for, numeric(1)) > 0)
+}
+
+diffbind_comparison_active <- function(project, path, slug = basename(path), jobs = NULL) {
+  if (is.null(jobs)) jobs <- job_history(project)
+  if (!NROW(jobs) || !all(c("step", "slurm_state") %in% names(jobs))) return(FALSE)
+  hit <- jobs[
+    canonical_job_step(jobs$step) == "Differential Peaks" & jobs$slurm_state %in% active_slurm_states(),
+    ,
+    drop = FALSE
+  ]
+  if (!NROW(hit)) return(FALSE)
+  sample_match <- if ("sample" %in% names(hit)) nzchar(as.character(hit$sample)) & as.character(hit$sample) == slug else rep(FALSE, NROW(hit))
+  target_match <- if ("target" %in% names(hit)) vapply(as.character(hit$target), function(target) nzchar(target) && path_is_within(target, path), logical(1)) else rep(FALSE, NROW(hit))
+  any(sample_match | target_match)
 }
 
 peak_diffbind_status <- function(project) {
@@ -5297,6 +5312,9 @@ submit_chip_macs2_jobs <- function(project, qvalue = "0.01", peak_type = "narrow
 
 chip_macs2_peak_file <- function(project, sample) {
   sample_dir <- file.path(project$data_dir, "macs2", sample)
+  marker <- file.path(sample_dir, paste0(sample, "_macs2_complete.txt"))
+  run_log <- file.path(sample_dir, paste0(sample, "_macs2.log"))
+  if (file.exists(run_log) && !file.exists(marker)) return("")
   summary <- metric_file_to_named_list(file.path(sample_dir, paste0(sample, "_macs2_summary.txt")))
   recorded <- as.character(summary$peak_file %||% "")
   if (nzchar(recorded) && file.exists(recorded) && file_size_for(recorded) > 0) return(recorded)
@@ -5305,7 +5323,18 @@ chip_macs2_peak_file <- function(project, sample) {
   if (length(candidates) == 1L) candidates[[1]] else ""
 }
 
+atac_macs2_peak_file <- function(project, sample) {
+  sample_dir <- file.path(project$data_dir, "macs2", sample)
+  completion <- atac_macs2_completion_target(project, sample)
+  peak <- file.path(sample_dir, paste0(sample, "_peaks.narrowPeak"))
+  if (!file.exists(completion) || file_size_for(completion) < minimum_expected_bytes("MACS2 Peaks")) return("")
+  if (file.exists(peak) && file_size_for(peak) > 0) peak else ""
+}
+
 submit_chip_diffbind_job <- function(project, compare_col, reference, comparison, subset_col = "", subset_value = "") {
+  reference <- trimws(as.character(reference %||% ""))
+  comparison <- trimws(as.character(comparison %||% ""))
+  if (!nzchar(reference) || !nzchar(comparison) || identical(reference, comparison)) return(record_preflight_failure(project, "Differential Peaks", "Select two different non-empty ChIP-seq conditions.", "diffbind_chip"))
   design <- chip_target_design(project)
   if (!NROW(design) || !nzchar(compare_col) || !compare_col %in% names(design)) return(record_preflight_failure(project, "Differential Peaks", "Select a valid ChIP-seq comparison variable from target rows in design_matrix.txt.", "diffbind_chip"))
   subset_col <- trimws(as.character(subset_col %||% ""))
@@ -5342,6 +5371,9 @@ submit_chip_diffbind_job <- function(project, compare_col, reference, comparison
   slug_parts <- c(if (nzchar(subset_value)) subset_value, comparison_label, "vs", reference_label)
   slug <- clean_name(paste(slug_parts, collapse = "_"), "comparison")
   outdir <- file.path(project$data_dir, "diffbind", slug)
+  target <- file.path(outdir, "_COMPLETE")
+  if (diffbind_comparison_complete(outdir)) return("This ChIP-seq DiffBind comparison is already complete. Delete its data first to rerun.")
+  if (diffbind_comparison_active(project, outdir, slug)) return("This ChIP-seq DiffBind comparison is already active; no duplicate job was submitted.")
   manifest_dir <- file.path(project$data_dir, "manifest", "chip_diffbind", slug)
   dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
   dir.create(manifest_dir, recursive = TRUE, showWarnings = FALSE)
@@ -5358,15 +5390,16 @@ submit_chip_diffbind_job <- function(project, compare_col, reference, comparison
   required <- c(qsub, runner, rscript, if (!identical(blacklist, "none")) blacklist else character(0))
   missing_resources <- required[!file.exists(required)]
   if (length(missing_resources)) return(record_preflight_failure(project, "Differential Peaks", paste("Required ChIP DiffBind resources are missing:", paste(missing_resources, collapse = ", ")), "diffbind_chip"))
-  target <- file.path(outdir, paste0("DifferentialPeaks_", comparison_label, "_vs_", reference_label, "_ref_annotated_with_stats.txt"))
-  if (file.exists(target) && file_size_for(target) > 0) return("This ChIP-seq DiffBind comparison is already complete. Delete its data first to rerun.")
   submit_sbatch(project, "Differential Peaks", qsub,
     c(rscript, outdir, sample_sheet_path, reference_label, comparison_label, genome_species(project), blacklist, runner),
     "diffbind_chip", paste(if (nzchar(subset_col)) paste0(subset_col, "=", subset_value, ";") else "all targets;", compare_col, comparison, "vs", reference),
-    target = target, reference = res$label)
+    sample = slug, target = target, reference = res$label)
 }
 
 submit_atac_diffbind_job <- function(project, compare_col, reference, comparison, subset_col = "", subset_value = "") {
+  reference <- trimws(as.character(reference %||% ""))
+  comparison <- trimws(as.character(comparison %||% ""))
+  if (!nzchar(reference) || !nzchar(comparison) || identical(reference, comparison)) return(record_preflight_failure(project, "Differential Peaks", "Select two different non-empty ATAC-seq conditions.", "diffbind"))
   design <- project_design_df(project)
   if (!NROW(design) || !nzchar(compare_col) || !compare_col %in% names(design)) return(record_preflight_failure(project, "Differential Peaks", "Select a valid ATAC-seq comparison variable from design_matrix.txt.", "diffbind"))
   subset_col <- trimws(as.character(subset_col %||% "")); subset_value <- trimws(as.character(subset_value %||% ""))
@@ -5374,25 +5407,32 @@ submit_atac_diffbind_job <- function(project, compare_col, reference, comparison
     if (!subset_col %in% names(design) || !nzchar(subset_value)) return(record_preflight_failure(project, "Differential Peaks", "Select a valid ATAC-seq subset before running DiffBind.", "diffbind"))
     design <- design[trimws(as.character(design[[subset_col]])) == subset_value, , drop = FALSE]
   }
-  tab <- table(as.character(design[[compare_col]]))
+  tab <- table(trimws(as.character(design[[compare_col]])))
   if (!all(c(reference, comparison) %in% names(tab)) || any(tab[c(reference, comparison)] < 2L)) return(record_preflight_failure(project, "Differential Peaks", "DiffBind requires at least two biological replicates in both selected conditions.", "diffbind"))
+  comparison_rows <- design[trimws(as.character(design[[compare_col]])) %in% c(reference, comparison), , drop = FALSE]
+  peak_files <- vapply(as.character(comparison_rows$sample), function(sample) atac_macs2_peak_file(project, sample), character(1))
+  bam_files <- file.path(project$data_dir, "bowtie2", comparison_rows$sample, paste0(comparison_rows$sample, "Aligned.sortedByCoord_removeDup.out.bam"))
+  missing_samples <- comparison_rows$sample[!nzchar(peak_files) | !file.exists(bam_files) | vapply(bam_files, file_size_for, numeric(1)) <= 0]
+  if (length(missing_samples)) return(record_preflight_failure(project, "Differential Peaks", paste("Complete ATAC-seq Bowtie2 and MACS2 with non-empty peaks for every selected sample before DiffBind. Missing or incomplete results for:", paste(unique(missing_samples), collapse = ", ")), "diffbind"))
   res <- atac_reference_resources(project)
   qsub <- file.path(SCRIPTS_DIR, "DiffBind", "qsub_diffbind.sh"); runner <- file.path(SCRIPTS_DIR, "DiffBind", "diffbind.sh"); rscript <- file.path(SCRIPTS_DIR, "DiffBind", "DiffBind.R")
   required <- c(qsub, runner, rscript, if (genome_species(project) == "mouse") res$blacklist else character(0))
   missing_resources <- required[!file.exists(required)]
   if (length(missing_resources)) return(record_preflight_failure(project, "Differential Peaks", paste("Required ATAC-seq DiffBind resources are missing:", paste(missing_resources, collapse = ", ")), "diffbind"))
-  comparison_design <- atac_diffbind_design(project, compare_col, subset_col, subset_value)
-  design_dir <- dirname(comparison_design)
-  if (genome_species(project) == "mouse") file.copy(res$blacklist, file.path(design_dir, "mm39-blacklist.bed"), overwrite = TRUE)
   display_reference <- if (nzchar(subset_value)) paste(subset_value, reference, sep = "_") else reference
   display_comparison <- if (nzchar(subset_value)) paste(subset_value, comparison, sep = "_") else comparison
   slug <- clean_name(paste0(display_comparison, "_vs_", display_reference), "comparison")
-  outdir <- file.path(project$data_dir, "diffbind", slug); dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
-  target <- file.path(outdir, paste0("DifferentialPeaks_", comparison, "_vs_", reference, "_ref_annotated_with_stats.txt"))
-  if (file.exists(target)) return("This ATAC-seq DiffBind comparison is already complete. Delete its data first to rerun.")
+  outdir <- file.path(project$data_dir, "diffbind", slug)
+  target <- file.path(outdir, "_COMPLETE")
+  if (diffbind_comparison_complete(outdir)) return("This ATAC-seq DiffBind comparison is already complete. Delete its data first to rerun.")
+  if (diffbind_comparison_active(project, outdir, slug)) return("This ATAC-seq DiffBind comparison is already active; no duplicate job was submitted.")
+  comparison_design <- atac_diffbind_design(project, compare_col, subset_col, subset_value)
+  design_dir <- dirname(comparison_design)
+  if (genome_species(project) == "mouse") file.copy(res$blacklist, file.path(design_dir, "mm39-blacklist.bed"), overwrite = TRUE)
+  dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
   submit_sbatch(project, "Differential Peaks", qsub,
     c(rscript, outdir, design_dir, file.path(project$data_dir, "macs2"), reference, comparison, genome_species(project), file.path(project$data_dir, "bowtie2"), runner),
-    "diffbind_atac", paste(if (nzchar(subset_col)) paste0(subset_col, "=", subset_value, ";") else "all samples;", compare_col, comparison, "vs", reference, "GRCm39/M39"), target = target, reference = res$label)
+    "diffbind_atac", paste(if (nzchar(subset_col)) paste0(subset_col, "=", subset_value, ";") else "all samples;", compare_col, comparison, "vs", reference, "GRCm39/M39"), sample = slug, target = target, reference = res$label)
 }
 
 submit_cutrun_bowtie2_jobs <- function(project, trimmed = TRUE, mapq = 30, max_fragment = 1000,

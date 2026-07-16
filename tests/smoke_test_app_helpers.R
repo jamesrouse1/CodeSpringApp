@@ -47,18 +47,34 @@ assert(identical(app_env$atac_macs2_completion_target(atac_project, "A1"), marke
 assert(app_env$cutrun_macs_fatal_error_signal(atac_project, data.frame(), "MACS2 Peaks", "A1"), "ATAC internal MACS2 exception detection")
 writeLines("status\tcomplete", marker)
 assert(identical(app_env$atac_macs2_completion_target(atac_project, "A1"), marker), "completed ATAC marker selected")
+assert(identical(app_env$atac_macs2_peak_file(atac_project, "A1"), legacy_peak), "validated ATAC peak selected for DiffBind")
+
+unlink(marker)
+assert(identical(app_env$chip_macs2_peak_file(chip_project, "A1"), ""), "partial ChIP MACS2 output rejected")
+writeLines("status\tcomplete", marker)
+assert(identical(app_env$chip_macs2_peak_file(chip_project, "A1"), legacy_peak), "completed ChIP MACS2 peak accepted")
 
 bad_q <- app_env$submit_atac_macs2_jobs(atac_project, "not-a-number", "A1")
 assert(grepl("q-value must be", bad_q), "invalid ATAC MACS2 q-value rejected before submission")
+assert(grepl("two different", app_env$submit_atac_diffbind_job(atac_project, "condition", "A", "A")), "identical ATAC DiffBind conditions rejected")
+assert(grepl("two different", app_env$submit_chip_diffbind_job(chip_project, "condition", "A", "A")), "identical ChIP DiffBind conditions rejected")
 
 comparison_dir <- file.path(root, "diffbind", "B_vs_A")
 dir.create(comparison_dir, recursive = TRUE)
 legacy_result <- file.path(comparison_dir, "DifferentialPeaks_B_vs_A_ref.txt")
 writeLines("Fold\tFDR\n1\t0.01", legacy_result)
 assert(identical(app_env$peak_diffbind_status(atac_project), "Complete"), "legacy DiffBind comparison remains recognized")
+writeLines(character(0), legacy_result)
+assert(!app_env$diffbind_comparison_complete(comparison_dir), "empty legacy result is not accepted")
+writeLines("Fold\tFDR\n1\t0.01", legacy_result)
 writeLines("status\trunning", file.path(comparison_dir, "_RUN_STARTED"))
 assert(identical(app_env$peak_diffbind_status(atac_project), "Likely failed"), "partial DiffBind output is not accepted")
 assert(!app_env$diffbind_comparison_complete(comparison_dir), "started DiffBind comparison hidden from Results Explorer")
+active_jobs <- data.frame(
+  step = "Differential Peaks", slurm_state = "RUNNING", sample = basename(comparison_dir),
+  target = file.path(comparison_dir, "_COMPLETE"), stringsAsFactors = FALSE
+)
+assert(app_env$diffbind_comparison_active(atac_project, comparison_dir, jobs = active_jobs), "active DiffBind comparison recognized")
 unlink(file.path(comparison_dir, "_RUN_STARTED"))
 writeLines("status\tcomplete", file.path(comparison_dir, "_COMPLETE"))
 assert(app_env$diffbind_comparison_complete(comparison_dir), "final DiffBind marker accepted")
