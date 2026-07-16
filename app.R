@@ -444,10 +444,54 @@ legacy_project_from_config <- function(path) {
   )
 }
 
+legacy_project_config_files <- function() {
+  roots <- unique(c(file.path(SCRIPTS_DIR, "project_configs"), file.path(CSL_ROOT, "project_configs")))
+  files <- unlist(lapply(roots, function(root) {
+    if (dir.exists(root)) list.files(root, pattern = "\\.py$", recursive = TRUE, full.names = TRUE) else character(0)
+  }), use.names = FALSE)
+  unique(normalizePath(files, winslash = "/", mustWork = FALSE))
+}
+
+migrate_user_legacy_projects <- function() {
+  legacy_files <- legacy_project_config_files()
+  if (!length(legacy_files) || !file.exists(JOBS_PATH)) return(invisible(character(0)))
+
+  jobs <- tryCatch(utils::read.delim(JOBS_PATH, check.names = FALSE, stringsAsFactors = FALSE, fill = TRUE), error = function(e) data.frame())
+  if (!NROW(jobs)) return(invisible(character(0)))
+  known_ids <- if ("project_id" %in% names(jobs)) {
+    values <- as.character(jobs$project_id)
+    unique(values[!is.na(values) & nzchar(values)])
+  } else character(0)
+  known_data_dirs <- if ("data_dir" %in% names(jobs)) {
+    values <- as.character(jobs$data_dir)
+    values <- values[!is.na(values) & nzchar(values)]
+    unique(normalizePath(values, winslash = "/", mustWork = FALSE))
+  } else character(0)
+
+  migrated <- character(0)
+  for (path in legacy_files) {
+    project <- legacy_project_from_config(path)
+    if (is.null(project)) next
+    project_data_dir <- normalizePath(project$data_dir %||% "", winslash = "/", mustWork = FALSE)
+    belongs_to_user <- project$id %in% known_ids || (nzchar(project_data_dir) && project_data_dir %in% known_data_dirs)
+    if (!belongs_to_user) next
+
+    destination_dir <- file.path(PROJECT_CONFIG_ROOT, project$analysis_key)
+    destination <- file.path(destination_dir, paste0(clean_name(project$name, "project"), ".py"))
+    if (file.exists(destination)) next
+    dir.create(destination_dir, recursive = TRUE, showWarnings = FALSE)
+    if (isTRUE(file.copy(path, destination, overwrite = FALSE))) migrated <- c(migrated, destination)
+  }
+  invisible(migrated)
+}
+
 discover_projects <- function() {
   # Project configs are user state. Keeping discovery inside APP_HOME prevents
   # configs accidentally committed to CodeSpringLab from appearing for every
   # person who clones the repositories.
+  # Existing users are migrated only when a legacy config matches their own
+  # private jobs.tsv history, so another person's saved projects stay hidden.
+  migrate_user_legacy_projects()
   roots <- PROJECT_CONFIG_ROOT
   files <- character(0)
   for (root in roots) {
