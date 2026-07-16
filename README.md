@@ -1,12 +1,12 @@
 # CodeSpringApp
 
-CodeSpringApp is a Shiny-based control center for running, monitoring, and reviewing CodeSpringLab sequencing projects from one server port. It replaces notebook prompts with a clean, button-driven interface for project setup, design-matrix editing, SLURM submission, progress tracking, logs, methods, and the native CodeSpringLab RNA-seq Results Explorer.
+CodeSpringApp is a Shiny-based control center for running, monitoring, and reviewing CodeSpringLab RNA-seq, ATAC-seq, CUT&RUN, and ChIP-seq projects from one server port. It replaces notebook prompts with a button-driven interface for project setup, design-matrix editing, SLURM submission, progress tracking, logs, methods, and assay-specific Results Explorers.
 
 It is designed for shared HPC environments where analyses should continue running after the browser or app is closed.
 
 ## Required Companion Repository
 
-CodeSpringApp runs the web interface, but it depends on CodeSpringLab for the analysis scripts, project configs, reference settings, and embedded RNA-seq Results Explorer. Install both repositories in your home directory on the server:
+CodeSpringApp runs the web interface, but it depends on CodeSpringLab for the analysis scripts, example data, reference settings, and RNA-seq Results Explorer. Install both repositories in your home directory on the server:
 
 ```bash
 cd ~
@@ -27,16 +27,17 @@ Saved project configurations, job history, logs, and last-project selection are 
 
 ## Bundled Example Datasets
 
-The New Project panel provides a **Use Example Dataset** button for RNA-seq and ATAC-seq. The examples use the small FASTQ and manifest files bundled under `CodeSpringLab/scripts_DoNotTouch/test`:
+The New Project panel provides a **Use Example Dataset** button for RNA-seq, ATAC-seq, and ChIP-seq. The examples use the small FASTQ and manifest files bundled under `CodeSpringLab/scripts_DoNotTouch/test`:
 
 - RNA-seq: `test/fastq` and `test/manifest`
 - ATAC-seq: `test/fastq_atac` and `test/manifest_atac`
+- ChIP-seq: `test/fastq_chip` and `test/manifest_chip`
 
 Example FASTQs remain read-only inputs. When the project is created, CodeSpringApp copies the bundled design matrix into that user's own `~/csl_results/<project>/data/manifest` directory and writes all results beneath the user's selected results root.
 
 ## Folder Browser
 
-The server folder browser starts from the current user's home directory, displays the Unix account used by the app, and hides dotfiles by default. Folders are selectable for navigation, while visible files are listed separately for confirmation. Typed paths are validated before navigation, and empty, hidden-only, missing, and unreadable folders receive distinct messages.
+The server folder browser starts from the current user's home directory and hides dotfiles by default. Folders are selectable for navigation, while visible files are listed separately for confirmation. Typed paths are validated before navigation, and empty, hidden-only, missing, and unreadable folders receive distinct messages.
 
 ## Run On The Server
 
@@ -74,10 +75,11 @@ Example launcher output. The port in your terminal may differ if the default por
 
 - Creates or resumes CodeSpringLab projects from saved project configs.
 - Builds and edits design matrices from FASTQ folders.
-- Submits real SLURM `sbatch` jobs for cutadapt, FastQC, STAR, featureCounts, DESeq2, GSEA, RSEM, and Kallisto.
+- Submits real SLURM `sbatch` jobs for RNA-seq tools plus ATAC-seq, CUT&RUN, and ChIP-seq Bowtie2/peak-calling/differential workflows.
+- Supports explicit sample selection for ATAC-seq and ChIP-seq sample-level steps and explicit target-to-control pairing for ChIP-seq.
 - Tracks per-sample and per-comparison progress with completed, running, cancelled, deleted, and likely failed states.
 - Resubmits only failed, cancelled, missing, or deleted samples while skipping active and completed jobs.
-- Embeds the native CodeSpringLab RNA-seq Results Explorer in the same Shiny app.
+- Embeds the native CodeSpringLab RNA-seq Results Explorer and provides organized ATAC-seq, CUT&RUN, and ChIP-seq explorers in the same app.
 - Records logs, methods, tool versions, reference genome selections, and run parameters.
 
 ## Preview
@@ -110,7 +112,7 @@ See workflow-level status and sample-by-step status in a compact matrix.
 
 ### Results Explorer
 
-Review QC, count matrices, DESeq2 results, PCA, volcano plots, heatmaps, and GSEA outputs without opening another port.
+Review assay-appropriate QC, alignment metrics, signal tracks, peaks, differential results, count matrices, PCA, volcano plots, heatmaps, and GSEA outputs without opening another port. ATAC-seq, CUT&RUN, and ChIP-seq design matrices can also be edited and saved from their Results Explorer overview.
 
 ![Results explorer QC](docs/assets/results_explorer_qc.png)
 
@@ -132,7 +134,7 @@ CodeSpringApp stores and discovers project configs separately for each user unde
 
 Project configs inside the cloned CodeSpringLab or CodeSpringApp repositories are not displayed. This prevents example, test, or another user's projects from being distributed with the application.
 
-For a new RNA-seq project, the initial FASTQ and design-matrix fields point to CodeSpringLab's bundled example files under `scripts_DoNotTouch/test/fastq` and `scripts_DoNotTouch/test/manifest`. Replace either path when creating a real project. Other analysis types do not receive these RNA-seq defaults.
+For a new RNA-seq project, the initial FASTQ and design-matrix fields point to CodeSpringLab's bundled RNA-seq example. The **Use Example Dataset** button loads the matching bundled paths for RNA-seq, ATAC-seq, or ChIP-seq. Replace either path when creating a real project.
 
 For new projects, it creates project-local outputs under:
 
@@ -149,7 +151,7 @@ For new projects, it creates project-local outputs under:
 - `Design Matrix`: scan FASTQ folders, include/exclude samples, edit metadata, and save a project-local `design_matrix.txt`.
 - `Run Pipeline`: submit SLURM jobs with step-specific settings and safeguards.
 - `Progress`: monitor step and sample progress, including active, cancelled, deleted, and likely failed states.
-- `Results Explorer`: load CodeSpringLab's native RNA-seq Shiny viewer inside CodeSpringApp.
+- `Results Explorer`: open the native RNA-seq viewer or the assay-specific ATAC-seq, CUT&RUN, or ChIP-seq explorer.
 - `Logs`: inspect tool logs and submit logs.
 - `Methods`: summarize project metadata, tools, versions, references, and parameters.
 
