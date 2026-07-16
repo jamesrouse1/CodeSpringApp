@@ -4861,7 +4861,7 @@ submit_atac_macs2_jobs <- function(project, qvalue = "0.05") {
   plan <- sample_submission_plan(project, "MACS2 Peaks", targets)
   if (!length(plan$samples)) return(plan$message)
   qsub <- file.path(SCRIPTS_DIR, "MACS2", "qsub_macs2_PE.sh"); runner <- file.path(SCRIPTS_DIR, "MACS2", "macs2_PE.sh")
-  missing_resources <- c(qsub, runner, res$tss_bed)[!file.exists(c(qsub, runner, res$tss_bed))]
+  missing_resources <- c(qsub, runner)[!file.exists(c(qsub, runner))]
   if (length(missing_resources)) return(record_preflight_failure(project, "MACS2 Peaks", paste("Required ATAC-seq MACS2 resources are missing:", paste(missing_resources, collapse = ", ")), "macs2"))
   messages <- vapply(plan$samples, function(sample) {
     bed <- file.path(project$data_dir, "bowtie2", sample, paste0(sample, "Aligned.sortedByCoord_removeDup.out.bed"))
