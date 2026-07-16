@@ -2902,9 +2902,9 @@ cutrun_files_by_category <- function(project, category = "all") {
     qc = unlist(lapply(file.path(project$data_dir, c("fastqc", "fastqc_cutadapt")), function(path) if (dir.exists(path)) list.files(path, pattern = "\\.(html|zip)$", recursive = TRUE, full.names = TRUE, ignore.case = TRUE) else character(0)), use.names = FALSE),
     alignment = result_file_choices(project, "bowtie2", "\\.(bam|bai|txt|jpg|jpeg|png|pdf)$"),
     signal = result_file_choices(project, "bowtie2", "\\.(bw|bedgraph)$"),
-    peaks = result_file_choices(project, c("seacr", "macs2", "cutrun_peak_qc"), "\\.(bed|narrowPeak|broadPeak|xls|txt|tsv)$"),
+    peaks = result_file_choices(project, c("seacr", "cutrun_dedup_sensitivity", "macs2", "cutrun_peak_qc"), "\\.(bed|narrowPeak|broadPeak|xls|txt|tsv)$"),
     differential = result_file_choices(project, "cutrun_diffbind", "\\.(bed|txt|tsv|csv|png|pdf|rds)$"),
-    result_file_choices(project, c("fastqc", "fastqc_cutadapt", "bowtie2", "seacr", "macs2", "cutrun_peak_qc", "cutrun_diffbind"), "\\.(html|zip|bam|bai|bw|bedgraph|bed|narrowPeak|broadPeak|xls|txt|tsv|csv|png|jpg|jpeg|pdf|rds)$")
+    result_file_choices(project, c("fastqc", "fastqc_cutadapt", "bowtie2", "seacr", "cutrun_dedup_sensitivity", "macs2", "cutrun_peak_qc", "cutrun_diffbind"), "\\.(html|zip|bam|bai|bw|bedgraph|bed|narrowPeak|broadPeak|xls|txt|tsv|csv|png|jpg|jpeg|pdf|rds)$")
   )
   files <- unname(files)
   files <- sort(unique(files[file.exists(files)]))
@@ -5044,6 +5044,54 @@ submit_cutrun_seacr_jobs <- function(project, norm = "norm", stringency = "strin
     )
   }, character(1))
   paste(append_plan_message(messages, plan), collapse = "\n")
+}
+
+submit_cutrun_dedup_sensitivity_jobs <- function(project, norm = "non", stringency = "stringent", max_fragment = "1000", remove_mito = TRUE) {
+  design <- cutrun_target_design(project, include_controls = FALSE)
+  if (!NROW(design)) return(record_preflight_failure(project, "SEACR sensitivity", "No non-control CUT&RUN target samples were found.", "cutrun_dedup_sensitivity"))
+  res <- cutrun_reference_resources(project)
+  qsub <- file.path(SCRIPTS_DIR, "CUTRUN", "qsub_cutrun_dedup_sensitivity.sh")
+  runner <- file.path(SCRIPTS_DIR, "CUTRUN", "cutrun_dedup_sensitivity.sh")
+  seacr_runner <- file.path(SCRIPTS_DIR, "SEACR", "seacr_cutrun.sh")
+  required_scripts <- c(qsub, runner, seacr_runner, res$chrom_sizes)
+  missing_scripts <- required_scripts[!file.exists(required_scripts)]
+  if (length(missing_scripts)) return(record_preflight_failure(project, "SEACR sensitivity", paste("Required deduplicated-target sensitivity resources are missing:", paste(missing_scripts, collapse = ", ")), "cutrun_dedup_sensitivity"))
+  norm <- selected_choice(norm, c("norm", "non"), "non")
+  stringency <- selected_choice(stringency, c("stringent", "relaxed"), "stringent")
+  max_fragment <- suppressWarnings(as.integer(max_fragment))
+  if (!is.finite(max_fragment) || max_fragment <= 0) return(record_preflight_failure(project, "SEACR sensitivity", "Maximum fragment length must be a positive whole number.", "cutrun_dedup_sensitivity"))
+  outdir <- file.path(project$data_dir, "cutrun_dedup_sensitivity")
+  dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+  full_design <- cutrun_design(project)
+  if (any(cutrun_control_like(full_design$target))) {
+    resolved <- vapply(as.character(design$sample), function(sample) cutrun_control_sample_for(project, sample), character(1))
+    unresolved <- as.character(design$sample[!nzchar(resolved)])
+    if (length(unresolved)) return(record_preflight_failure(project, "SEACR sensitivity", paste("These targets do not resolve to exactly one matched IgG/input control:", paste(unresolved, collapse = ", ")), "cutrun_dedup_sensitivity"))
+  }
+  missing_inputs <- character(0)
+  for (sample in as.character(design$sample)) {
+    control <- cutrun_control_sample_for(project, sample)
+    inputs <- c(
+      file.path(project$data_dir, "bowtie2", sample, paste0(sample, "Aligned.sortedByCoord_removeDup.out.bam")),
+      cutrun_bowtie2_complete_marker(project, sample),
+      if (nzchar(control)) cutrun_bowtie2_bedgraph(project, control) else character(0)
+    )
+    missing_inputs <- c(missing_inputs, inputs[!file.exists(inputs) | vapply(inputs, file_size_for, numeric(1)) <= 0])
+  }
+  if (length(missing_inputs)) return(record_preflight_failure(project, "SEACR sensitivity", paste(c("Each target needs its duplicate-removed BAM, alignment summary, and matched control bedGraph.", "Missing or empty files:", unique(missing_inputs)), collapse = "\n"), "cutrun_dedup_sensitivity"))
+  messages <- vapply(as.character(design$sample), function(sample) {
+    control <- cutrun_control_sample_for(project, sample)
+    sample_dir <- file.path(outdir, sample)
+    dir.create(sample_dir, recursive = TRUE, showWarnings = FALSE)
+    prefix <- file.path(sample_dir, sample)
+    submit_sbatch(
+      project, "SEACR sensitivity", qsub,
+      c(file.path(project$data_dir, "bowtie2", sample, paste0(sample, "Aligned.sortedByCoord_removeDup.out.bam")), res$chrom_sizes, cutrun_bowtie2_complete_marker(project, sample), if (nzchar(control)) cutrun_bowtie2_bedgraph(project, control) else "none", norm, stringency, prefix, project$name, max_fragment, if (isTRUE(remove_mito)) "y" else "n", seacr_runner, runner),
+      "cutrun_dedup_sensitivity", paste("deduplicated target;", norm, stringency), sample = sample,
+      target = file.path(sample_dir, paste0(sample, ".", stringency, ".bed")), reference = "deduplicated target BAM + matched control"
+    )
+  }, character(1))
+  paste(messages, collapse = "\n")
 }
 
 submit_cutrun_peakqc_job <- function(project) {
@@ -7805,6 +7853,12 @@ server <- function(input, output, session) {
           ),
           "run_cutrun_seacr", "Submit SEACR")
         },
+        tool_panel("Deduplicated-target sensitivity", status, "Diagnostic rerun that rebuilds target signal from duplicate-removed BAMs and calls SEACR against the existing matched deduplicated control.",
+          tagList(
+            tags$p(class = "muted small-note", "This does not alter Bowtie2 or primary SEACR results. It preserves the original spike-in scale factor, writes only to data/cutrun_dedup_sensitivity, and is intended to test whether target duplicate retention is driving discordant peak counts."),
+            tags$p(class = "muted small-note", "Uses the SEACR normalization and stringency selected above. Do not use these sensitivity peaks for Peak QC or differential binding until you compare them with the primary run.")
+          ),
+          "run_cutrun_dedup_sensitivity", "Run deduplicated-target sensitivity", status_step = "SEACR", show_sample_progress = FALSE),
         tool_panel("Peak QC", status, "Build SEACR consensus peaks, a consensus peak count matrix, and FRiP summaries.",
           tags$p(class = "muted small-note", "Run after SEACR. This mirrors nf-core-style peak-level summaries in a lightweight CodeSpringLab format."),
           "run_cutrun_peakqc", "Submit Peak QC"),
@@ -8142,6 +8196,16 @@ server <- function(input, output, session) {
       "SEACR",
       submit_cutrun_seacr_jobs(current_project(), input$cutrun_seacr_norm %||% "norm", input$cutrun_seacr_stringency %||% "stringent"),
       paste(input$cutrun_seacr_norm %||% "norm", input$cutrun_seacr_stringency %||% "stringent")
+    )
+  })
+  observeEvent(input$run_cutrun_dedup_sensitivity, {
+    run_submission(
+      "SEACR sensitivity",
+      submit_cutrun_dedup_sensitivity_jobs(
+        current_project(), input$cutrun_seacr_norm %||% "non", input$cutrun_seacr_stringency %||% "stringent",
+        input$cutrun_max_fragment %||% "1000", if (is.null(input$cutrun_remove_mito)) TRUE else isTRUE(input$cutrun_remove_mito)
+      ),
+      paste("deduplicated targets;", input$cutrun_seacr_norm %||% "non", input$cutrun_seacr_stringency %||% "stringent")
     )
   })
   observeEvent(input$run_cutrun_peakqc, {
