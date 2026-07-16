@@ -1653,8 +1653,11 @@ cutrun_macs_fatal_error_signal <- function(project, jobs, step, sample = "") {
     c(
       "Traceback \\(most recent call last\\):",
       "Exception ignored in:",
-      "ValueError: cannot resize",
-      "TypeError:.*NoneType.*not subscriptable",
+      "KeyError:",
+      "ValueError:",
+      "TypeError:",
+      "OSError:",
+      "No space left on device",
       "Segmentation fault",
       "(^|[[:space:]])Killed([[:space:]]|$)"
     ),
@@ -1666,9 +1669,9 @@ cutrun_macs_fatal_error_signal <- function(project, jobs, step, sample = "") {
     length(lines) > 0 && any(grepl(fatal_pattern, lines, perl = TRUE))
   }
 
-  # New CUT&RUN MACS3 runs overwrite this per-sample log, so an old appended
+  # New CUT&RUN MACS2 runs overwrite this per-sample log, so an old appended
   # SLURM stderr cannot keep a successfully repaired sample marked as failed.
-  run_log <- file.path(project$data_dir, "macs2", sample, paste0(sample, "_macs3.log"))
+  run_log <- file.path(project$data_dir, "macs2", sample, paste0(sample, "_macs2.log"))
   if (file.exists(run_log)) return(has_fatal_text(run_log))
 
   if (!NROW(jobs) || !"step" %in% names(jobs)) return(FALSE)
