@@ -17,6 +17,8 @@ git clone https://github.com/jamesrouse1/CodeSpringApp.git
 CodeSpringLab is mandatory for CodeSpringApp. The launcher expects to find it at `~/CodeSpringLab` unless you set `CSL_CODESPRINGLAB_ROOT` manually.
 CodeSpringApp does not fall back to a developer's or another user's home directory. If the companion repository cannot be found for the current user, startup stops with an explicit path error.
 
+The launcher derives the account and home directory from the operating system rather than inherited `USER` or `HOME` variables. It refuses to start if the CodeSpringApp checkout, CodeSpringLab checkout, or private app-state directory resolves outside that Unix user's home. The startup output prints the verified Unix user, home, and CodeSpringLab path so they can be checked before opening the browser.
+
 Saved project configurations, job history, logs, and last-project selection are stored beneath the current Unix user's `~/.codespringweb` directory. They are not loaded from the cloned repositories, so one user does not inherit another user's project menu. Legacy project configs are migrated only when their exact results data path appears in that user's private job history.
 
 ## Bundled Example Datasets
@@ -42,8 +44,11 @@ On the server:
 
 ```bash
 cd ~/CodeSpringApp
+./run_codespringweb.sh --check-config
 ./run_codespringweb.sh
 ```
+
+The optional first command prints the verified Unix user and all identity-sensitive paths without starting the app. Every printed path should belong to the logged-in user.
 
 From your laptop, copy the SSH command printed by the launcher. It will use the port that was actually started:
 

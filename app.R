@@ -138,16 +138,59 @@ clean_name <- function(x, fallback = "sample") {
   ifelse(nzchar(x), x, fallback)
 }
 
+effective_unix_user <- function() {
+  candidates <- c(
+    Sys.info()[["effective_user"]] %||% "",
+    tryCatch(trimws(system2("id", "-un", stdout = TRUE, stderr = FALSE)[1]), error = function(e) ""),
+    Sys.info()[["user"]] %||% ""
+  )
+  candidates <- candidates[!is.na(candidates) & nzchar(candidates)]
+  if (!length(candidates)) stop("Could not determine the effective Unix user running CodeSpringApp.")
+  candidates[[1]]
+}
+
+unix_home_for_user <- function(user) {
+  expanded <- path.expand(paste0("~", user))
+  if (nzchar(expanded) && !identical(expanded, paste0("~", user)) && dir.exists(expanded)) {
+    return(normalizePath(expanded, winslash = "/", mustWork = FALSE))
+  }
+  if (nzchar(Sys.which("getent"))) {
+    entry <- tryCatch(system2("getent", c("passwd", user), stdout = TRUE, stderr = FALSE), error = function(e) character(0))
+    if (length(entry)) {
+      fields <- strsplit(entry[[1]], ":", fixed = TRUE)[[1]]
+      if (length(fields) >= 6 && dir.exists(fields[[6]])) return(normalizePath(fields[[6]], winslash = "/", mustWork = FALSE))
+    }
+  }
+  stop("Could not determine the home directory for Unix user ", user, ".")
+}
+
+path_is_within <- function(path, root) {
+  path <- normalizePath(path, winslash = "/", mustWork = FALSE)
+  root <- sub("/+$", "", normalizePath(root, winslash = "/", mustWork = FALSE))
+  identical(path, root) || startsWith(path, paste0(root, "/"))
+}
+
+CURRENT_USER <- effective_unix_user()
+CURRENT_HOME <- unix_home_for_user(CURRENT_USER)
+
 find_codespringlab_root <- function() {
   env_root <- Sys.getenv("CSL_CODESPRINGLAB_ROOT", unset = "")
+  if (nzchar(env_root) && !path_is_within(env_root, CURRENT_HOME)) {
+    stop(
+      "Refusing CSL_CODESPRINGLAB_ROOT outside the effective user's home (",
+      CURRENT_HOME, "): ", env_root
+    )
+  }
   candidates <- unique(c(
     env_root,
     getwd(),
     dirname(getwd()),
-    path.expand("~/CodeSpringLab"),
-    path.expand("~/CSH/CodeSpringLab")
+    file.path(CURRENT_HOME, "CodeSpringLab"),
+    file.path(CURRENT_HOME, "CSH", "CodeSpringLab")
   ))
-  for (candidate in candidates[nzchar(candidates)]) {
+  candidates <- candidates[nzchar(candidates)]
+  candidates <- candidates[vapply(candidates, path_is_within, logical(1), root = CURRENT_HOME)]
+  for (candidate in candidates) {
     if (dir.exists(file.path(candidate, "scripts_DoNotTouch"))) {
       return(normalizePath(candidate, winslash = "/", mustWork = FALSE))
     }
@@ -160,12 +203,19 @@ find_codespringlab_root <- function() {
 
 CSL_ROOT <- find_codespringlab_root()
 SCRIPTS_DIR <- file.path(CSL_ROOT, "scripts_DoNotTouch")
-APP_HOME <- path.expand(Sys.getenv("CSL_WEB_HOME", unset = "~/.codespringweb"))
+requested_app_home <- Sys.getenv("CSL_WEB_HOME", unset = "")
+if (nzchar(requested_app_home) && !path_is_within(requested_app_home, CURRENT_HOME)) {
+  stop(
+    "Refusing CSL_WEB_HOME outside the effective user's home (",
+    CURRENT_HOME, "): ", requested_app_home
+  )
+}
+APP_HOME <- normalizePath(if (nzchar(requested_app_home)) requested_app_home else file.path(CURRENT_HOME, ".codespringweb"), winslash = "/", mustWork = FALSE)
 dir.create(APP_HOME, recursive = TRUE, showWarnings = FALSE)
 JOBS_PATH <- file.path(APP_HOME, "jobs.tsv")
 LAST_PROJECT_PATH <- file.path(APP_HOME, "last_project_id.txt")
 PROJECT_CONFIG_ROOT <- file.path(APP_HOME, "project_configs")
-DEFAULT_RESULTS_ROOT <- normalizePath(file.path(path.expand("~"), "csl_results"), winslash = "/", mustWork = FALSE)
+DEFAULT_RESULTS_ROOT <- normalizePath(file.path(CURRENT_HOME, "csl_results"), winslash = "/", mustWork = FALSE)
 RNA_EXAMPLE_FASTQ_DIR <- normalizePath(file.path(SCRIPTS_DIR, "test", "fastq"), winslash = "/", mustWork = FALSE)
 RNA_EXAMPLE_DESIGN_DIR <- normalizePath(file.path(SCRIPTS_DIR, "test", "manifest"), winslash = "/", mustWork = FALSE)
 ATAC_EXAMPLE_FASTQ_DIR <- normalizePath(file.path(SCRIPTS_DIR, "test", "fastq_atac"), winslash = "/", mustWork = FALSE)
@@ -205,7 +255,7 @@ if (file.exists(FLOWCHART_PATH)) addResourcePath("codespring_flowchart", dirname
 cleanup_previous_shiny_processes <- function() {
   if (identical(Sys.getenv("CSL_WEB_AUTOKILL_SHINY", unset = "1"), "0")) return(invisible(character(0)))
   current_pid <- as.integer(Sys.getpid())
-  current_user <- Sys.info()[["user"]] %||% ""
+  current_user <- CURRENT_USER
   killed <- character(0)
 
   run_quiet <- function(command, args) {
@@ -1229,7 +1279,7 @@ job_history <- function(project, force_refresh = FALSE) {
   jobs$slurm_job_name <- ""
   ids <- unique(jobs$job_id[nzchar(jobs$job_id)])
   if (length(ids) && nzchar(Sys.which("squeue"))) {
-    queue_user <- Sys.getenv("USER", unset = Sys.info()[["user"]] %||% "")
+    queue_user <- CURRENT_USER
     queue_args <- if (nzchar(queue_user)) {
       c("-h", "-u", queue_user, "-o", "%A|%T|%M|%j")
     } else {
@@ -1385,7 +1435,7 @@ active_squeue_project_jobs <- function(project) {
   if (Sys.which("squeue") == "") return(data.frame())
   prefix <- project_job_name_prefix(project)
   if (!nzchar(prefix)) return(data.frame())
-  user <- Sys.info()[["user"]] %||% ""
+  user <- CURRENT_USER
   args <- c("-h", "-o", "%A|%T|%.200j")
   if (nzchar(user)) args <- c(args, "-u", user)
   out <- tryCatch(system2("squeue", args, stdout = TRUE, stderr = FALSE), error = function(e) character(0))
@@ -2203,8 +2253,8 @@ first_scalar_string <- function(x, fallback = "") {
 }
 
 server_browser_listing <- function(path, mode = "dir") {
-  path <- path.expand(trimws(first_scalar_string(path, path.expand("~"))))
-  if (!nzchar(path) || !dir.exists(path)) path <- path.expand("~")
+  path <- path.expand(trimws(first_scalar_string(path, CURRENT_HOME)))
+  if (!nzchar(path) || !dir.exists(path)) path <- CURRENT_HOME
   path <- normalizePath(path, winslash = "/", mustWork = FALSE)
   # Listing a directory requires both read and traverse permission.
   if (file.access(path, mode = 5) != 0) {
@@ -2243,7 +2293,7 @@ browser_start_path <- function(value, mode = "dir") {
   if (nzchar(value) && file.exists(value) && !dir.exists(value)) return(dirname(value))
   if (nzchar(value) && dir.exists(value)) return(value)
   if (nzchar(value) && dir.exists(dirname(value))) return(dirname(value))
-  path.expand("~")
+  CURRENT_HOME
 }
 
 active_job_steps <- function(project) {
@@ -6789,7 +6839,7 @@ server <- function(input, output, session) {
   sample_progress_state <- reactiveVal(data.frame())
   progress_refresh_busy <- reactiveVal(FALSE)
   cutrun_normalization_choice <- reactiveVal("spikein")
-  path_browser <- reactiveValues(target = "", mode = "dir", path = path.expand("~"), message = "")
+  path_browser <- reactiveValues(target = "", mode = "dir", path = CURRENT_HOME, message = "")
   project_selection <- reactiveValues(rna = "", cutrun = "", atac = "", chip = "")
   new_fastq_folders <- reactiveVal(character(0))
 
@@ -6981,10 +7031,9 @@ server <- function(input, output, session) {
   }
 
   output$browser_current_path_text <- renderText({
-    run_user <- Sys.getenv("USER", unset = Sys.info()[["user"]] %||% "unknown")
     paste(
       "Current folder:", normalizePath(path_browser$path, winslash = "/", mustWork = FALSE),
-      "\nApp server user:", run_user
+      "\nApp server user:", CURRENT_USER
     )
   })
 
@@ -6993,12 +7042,11 @@ server <- function(input, output, session) {
     choices <- listing$choices
     message_box <- if (nzchar(path_browser$message %||% "")) div(class = "run-message-alert error", path_browser$message) else NULL
     if (identical(listing$status, "unreadable")) {
-      run_user <- Sys.getenv("USER", unset = Sys.info()[["user"]] %||% "unknown")
       return(tagList(message_box, div(
         class = "empty-box",
         tags$strong("This folder is not readable by the app process."),
         tags$br(),
-        "The app is running as ", code(run_user), ". Check folder permissions or launch CodeSpringApp from the intended Unix account."
+        "The app is running as ", code(CURRENT_USER), ". Check folder permissions or launch CodeSpringApp from the intended Unix account."
       )))
     }
     if (identical(listing$status, "hidden_only")) {

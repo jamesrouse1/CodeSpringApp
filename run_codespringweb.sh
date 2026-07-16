@@ -2,11 +2,99 @@
 set -euo pipefail
 
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-START_PORT="${1:-8601}"
+CHECK_CONFIG=0
+if [[ "${1:-}" == "--check-config" ]]; then
+  CHECK_CONFIG=1
+  START_PORT=8601
+else
+  START_PORT="${1:-8601}"
+fi
 MAX_PORT="${CSL_WEB_MAX_PORT:-8699}"
 HOST="${CSL_WEB_HOST:-0.0.0.0}"
-CSL_ROOT="${CSL_CODESPRINGLAB_ROOT:-$HOME/CodeSpringLab}"
-LOG_DIR="${CSL_WEB_LOG_DIR:-$HOME/.codespringweb}"
+
+USER_NAME="$(id -un 2>/dev/null || true)"
+if [[ -z "$USER_NAME" ]]; then
+  printf '\033[31mCould not determine the effective Unix user. CodeSpringApp was not started.\033[0m\n'
+  exit 1
+fi
+
+USER_HOME=""
+if command -v getent >/dev/null 2>&1; then
+  USER_HOME="$(getent passwd "$USER_NAME" 2>/dev/null | awk -F: 'NR == 1 { print $6 }')" || USER_HOME=""
+elif command -v dscl >/dev/null 2>&1; then
+  USER_HOME="$(dscl . -read "/Users/$USER_NAME" NFSHomeDirectory 2>/dev/null | awk 'NR == 1 { print $2 }')" || USER_HOME=""
+fi
+if [[ -z "$USER_HOME" && -n "$(command -v Rscript 2>/dev/null || true)" ]]; then
+  USER_HOME="$(Rscript -e 'user <- commandArgs(TRUE)[1]; home <- path.expand(paste0("~", user)); if (!identical(home, paste0("~", user))) cat(home)' "$USER_NAME" 2>/dev/null)" || USER_HOME=""
+fi
+if [[ -z "$USER_HOME" || ! -d "$USER_HOME" ]]; then
+  printf '\033[31mCould not determine a valid home directory for Unix user %s. CodeSpringApp was not started.\033[0m\n' "$USER_NAME"
+  exit 1
+fi
+USER_HOME="$(cd "$USER_HOME" && pwd -P)"
+
+path_within_user_home() {
+  local path="$1"
+  local parent
+  local resolved
+  if [[ -e "$path" ]]; then
+    if [[ -d "$path" ]]; then
+      resolved="$(cd "$path" && pwd -P)"
+    else
+      parent="$(cd "$(dirname "$path")" && pwd -P)"
+      resolved="$parent/$(basename "$path")"
+    fi
+  else
+    parent="$(dirname "$path")"
+    [[ -d "$parent" ]] || return 1
+    parent="$(cd "$parent" && pwd -P)"
+    resolved="$parent/$(basename "$path")"
+  fi
+  [[ "$resolved" == "$USER_HOME" || "$resolved" == "$USER_HOME/"* ]]
+}
+
+if ! path_within_user_home "$APP_DIR"; then
+  printf '\033[31mRefusing to start a CodeSpringApp checkout outside %s\033[0m\n' "$USER_HOME"
+  printf 'Log in as %s and clone or pull CodeSpringApp inside that user home.\n' "$USER_NAME"
+  exit 1
+fi
+
+export HOME="$USER_HOME"
+export USER="$USER_NAME"
+export LOGNAME="$USER_NAME"
+
+if [[ -n "${CSL_CODESPRINGLAB_ROOT:-}" ]]; then
+  CSL_ROOT="$CSL_CODESPRINGLAB_ROOT"
+elif [[ -d "$USER_HOME/CodeSpringLab/scripts_DoNotTouch" ]]; then
+  CSL_ROOT="$USER_HOME/CodeSpringLab"
+else
+  CSL_ROOT="$USER_HOME/CSH/CodeSpringLab"
+fi
+LOG_DIR="${CSL_WEB_LOG_DIR:-$USER_HOME/.codespringweb}"
+if ! path_within_user_home "$CSL_ROOT"; then
+  printf '\033[31mRefusing CodeSpringLab root outside %s:\033[0m %s\n' "$USER_HOME" "$CSL_ROOT"
+  exit 1
+fi
+if ! path_within_user_home "$LOG_DIR"; then
+  printf '\033[31mRefusing CodeSpringApp config/log directory outside %s:\033[0m %s\n' "$USER_HOME" "$LOG_DIR"
+  exit 1
+fi
+if [[ ! -d "$CSL_ROOT/scripts_DoNotTouch" ]]; then
+  printf '\033[31mCodeSpringLab root not found:\033[0m %s\n' "$CSL_ROOT"
+  printf 'Run again with: \033[1mCSL_CODESPRINGLAB_ROOT=/path/to/CodeSpringLab %s\033[0m\n' "$0"
+  exit 1
+fi
+
+if [[ "$CHECK_CONFIG" == "1" ]]; then
+  printf '\033[32mCodeSpringApp configuration is isolated correctly.\033[0m\n'
+  printf 'Unix user: %s\n' "$USER_NAME"
+  printf 'User home: %s\n' "$USER_HOME"
+  printf 'CodeSpringApp: %s\n' "$APP_DIR"
+  printf 'CodeSpringLab: %s\n' "$CSL_ROOT"
+  printf 'Private app state: %s\n' "$LOG_DIR"
+  exit 0
+fi
+
 mkdir -p "$LOG_DIR"
 R_MAKEVARS_FILE="$LOG_DIR/Makevars.codespringweb"
 
@@ -25,12 +113,6 @@ write_codespring_r_makevars() {
 
 write_codespring_r_makevars
 
-if [[ ! -d "$CSL_ROOT/scripts_DoNotTouch" ]]; then
-  printf '\033[31mCodeSpringLab root not found:\033[0m %s\n' "$CSL_ROOT"
-  printf 'Run again with: \033[1mCSL_CODESPRINGLAB_ROOT=/path/to/CodeSpringLab %s\033[0m\n' "$0"
-  exit 1
-fi
-
 install_r_package_if_missing() {
   local pkg="$1"
   if R_MAKEVARS_USER="$R_MAKEVARS_FILE" Rscript -e "quit(status = if (requireNamespace('$pkg', quietly = TRUE)) 0 else 1)" >/dev/null 2>&1; then
@@ -46,11 +128,7 @@ install_r_package_if_missing "base64enc"
 install_r_package_if_missing "ggplot2"
 
 current_user() {
-  if [[ -n "${USER:-}" ]]; then
-    printf '%s\n' "$USER"
-  else
-    id -un 2>/dev/null || true
-  fi
+  id -un 2>/dev/null || true
 }
 
 pid_user() {
@@ -165,7 +243,9 @@ for candidate in $(seq "$PORT" "$MAX_PORT"); do
   PORT="$candidate"
   LOG_FILE="$LOG_DIR/codespringweb_${PORT}.log"
 
-  nohup env CSL_CODESPRINGLAB_ROOT="$CSL_ROOT" Rscript -e "shiny::runApp('$APP_DIR', host='$HOST', port=$PORT)" > "$LOG_FILE" 2>&1 &
+  nohup env HOME="$USER_HOME" USER="$USER_NAME" LOGNAME="$USER_NAME" \
+    CSL_CODESPRINGLAB_ROOT="$CSL_ROOT" CSL_WEB_HOME="$LOG_DIR" \
+    Rscript -e "shiny::runApp('$APP_DIR', host='$HOST', port=$PORT)" > "$LOG_FILE" 2>&1 &
   APP_PID="$!"
   echo "$APP_PID" > "$LOG_DIR/codespringweb_${PORT}.pid"
 
@@ -191,9 +271,10 @@ if [[ -z "$APP_PID" ]] || ! kill -0 "$APP_PID" 2>/dev/null; then
   exit 1
 fi
 
-USER_NAME="$(current_user)"
-USER_NAME="${USER_NAME:-${USER:-}}"
 printf '\n\033[32mCodeSpringApp is running on bamdev1 port %s.\033[0m\n' "$PORT"
+printf '\033[1;36mUnix user:\033[0m %s\n' "$USER_NAME"
+printf '\033[1;36mUser home:\033[0m %s\n' "$USER_HOME"
+printf '\033[1;36mCodeSpringLab:\033[0m %s\n' "$CSL_ROOT"
 printf '\033[1;36mCopy/paste this command into your laptop terminal:\033[0m\n'
 printf '\033[1mssh -N -L %s:localhost:%s %s@bamdev1\033[0m\n' "$PORT" "$PORT" "$USER_NAME"
 printf '\033[1;36mThen open:\033[0m \033[1mhttp://localhost:%s\033[0m\n' "$PORT"
