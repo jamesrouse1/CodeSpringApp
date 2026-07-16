@@ -168,6 +168,8 @@ PROJECT_CONFIG_ROOT <- file.path(APP_HOME, "project_configs")
 DEFAULT_RESULTS_ROOT <- normalizePath(file.path(path.expand("~"), "csl_results"), winslash = "/", mustWork = FALSE)
 RNA_EXAMPLE_FASTQ_DIR <- normalizePath(file.path(SCRIPTS_DIR, "test", "fastq"), winslash = "/", mustWork = FALSE)
 RNA_EXAMPLE_DESIGN_DIR <- normalizePath(file.path(SCRIPTS_DIR, "test", "manifest"), winslash = "/", mustWork = FALSE)
+ATAC_EXAMPLE_FASTQ_DIR <- normalizePath(file.path(SCRIPTS_DIR, "test", "fastq_atac"), winslash = "/", mustWork = FALSE)
+ATAC_EXAMPLE_DESIGN_DIR <- normalizePath(file.path(SCRIPTS_DIR, "test", "manifest_atac"), winslash = "/", mustWork = FALSE)
 PROGRESS_REFRESH_MS <- 5000
 JOB_HISTORY_CACHE_SECONDS <- 10
 JOB_HISTORY_CACHE <- new.env(parent = emptyenv())
@@ -458,10 +460,6 @@ migrate_user_legacy_projects <- function() {
 
   jobs <- tryCatch(utils::read.delim(JOBS_PATH, check.names = FALSE, stringsAsFactors = FALSE, fill = TRUE), error = function(e) data.frame())
   if (!NROW(jobs)) return(invisible(character(0)))
-  known_ids <- if ("project_id" %in% names(jobs)) {
-    values <- as.character(jobs$project_id)
-    unique(values[!is.na(values) & nzchar(values)])
-  } else character(0)
   known_data_dirs <- if ("data_dir" %in% names(jobs)) {
     values <- as.character(jobs$data_dir)
     values <- values[!is.na(values) & nzchar(values)]
@@ -473,7 +471,7 @@ migrate_user_legacy_projects <- function() {
     project <- legacy_project_from_config(path)
     if (is.null(project)) next
     project_data_dir <- normalizePath(project$data_dir %||% "", winslash = "/", mustWork = FALSE)
-    belongs_to_user <- project$id %in% known_ids || (nzchar(project_data_dir) && project_data_dir %in% known_data_dirs)
+    belongs_to_user <- nzchar(project_data_dir) && project_data_dir %in% known_data_dirs
     if (!belongs_to_user) next
 
     destination_dir <- file.path(PROJECT_CONFIG_ROOT, project$analysis_key)
@@ -483,6 +481,24 @@ migrate_user_legacy_projects <- function() {
     if (isTRUE(file.copy(path, destination, overwrite = FALSE))) migrated <- c(migrated, destination)
   }
   invisible(migrated)
+}
+
+example_dataset_paths <- function(key) {
+  switch(
+    analysis_key(key),
+    rna = list(name = "example_rnaseq", fastq_dir = RNA_EXAMPLE_FASTQ_DIR, design_dir = RNA_EXAMPLE_DESIGN_DIR),
+    atac = list(name = "example_atac", fastq_dir = ATAC_EXAMPLE_FASTQ_DIR, design_dir = ATAC_EXAMPLE_DESIGN_DIR),
+    NULL
+  )
+}
+
+is_bundled_example_design <- function(path) {
+  path <- normalizePath(path %||% "", winslash = "/", mustWork = FALSE)
+  examples <- normalizePath(
+    c(file.path(RNA_EXAMPLE_DESIGN_DIR, "design_matrix.txt"), file.path(ATAC_EXAMPLE_DESIGN_DIR, "design_matrix.txt")),
+    winslash = "/", mustWork = FALSE
+  )
+  nzchar(path) && path %in% examples
 }
 
 discover_projects <- function() {
@@ -2208,17 +2224,14 @@ server_browser_listing <- function(path, mode = "dir") {
   if (length(dirs)) {
     choices[["Folders"]] <- stats::setNames(dirs, paste0("📁 ", basename(dirs)))
   }
-  if (length(files)) {
-    choices[["Files in this folder"]] <- stats::setNames(rep(path, length(files)), paste0("📄 ", basename(files)))
-  }
-  status <- if (length(choices)) {
+  status <- if (length(dirs) || length(files)) {
     "ok"
   } else if (length(all_entries)) {
     "hidden_only"
   } else {
     "empty"
   }
-  list(path = path, status = status, choices = choices)
+  list(path = path, status = status, choices = choices, dirs = dirs, files = files)
 }
 
 server_browser_choices <- function(path, mode = "dir") {
@@ -6691,6 +6704,7 @@ ui <- fluidPage(
       width = 2,
       selectInput("analysis", "Analysis", choices = c("RNA-seq", "CUT&RUN", "ATAC-seq", "ChIP-seq"), selected = "RNA-seq", selectize = FALSE),
       uiOutput("project_ui"),
+      tags$p(class = "muted small-note", "Saved projects are private to the Unix account running this app."),
       uiOutput("new_project_ui"),
       uiOutput("project_manage_ui"),
       tags$hr(),
@@ -6775,7 +6789,7 @@ server <- function(input, output, session) {
   sample_progress_state <- reactiveVal(data.frame())
   progress_refresh_busy <- reactiveVal(FALSE)
   cutrun_normalization_choice <- reactiveVal("spikein")
-  path_browser <- reactiveValues(target = "", mode = "dir", path = path.expand("~"))
+  path_browser <- reactiveValues(target = "", mode = "dir", path = path.expand("~"), message = "")
   project_selection <- reactiveValues(rna = "", cutrun = "", atac = "", chip = "")
   new_fastq_folders <- reactiveVal(character(0))
 
@@ -6943,6 +6957,7 @@ server <- function(input, output, session) {
     path_browser$target <- target
     path_browser$mode <- mode
     path_browser$path <- normalizePath(browser_start_path(current, mode), winslash = "/", mustWork = FALSE)
+    path_browser$message <- ""
     title <- "Choose a server folder"
     showModal(modalDialog(
       title = title,
@@ -6976,24 +6991,37 @@ server <- function(input, output, session) {
   output$browser_choices_ui <- renderUI({
     listing <- server_browser_listing(path_browser$path, path_browser$mode)
     choices <- listing$choices
+    message_box <- if (nzchar(path_browser$message %||% "")) div(class = "run-message-alert error", path_browser$message) else NULL
     if (identical(listing$status, "unreadable")) {
       run_user <- Sys.getenv("USER", unset = Sys.info()[["user"]] %||% "unknown")
-      return(div(
+      return(tagList(message_box, div(
         class = "empty-box",
         tags$strong("This folder is not readable by the app process."),
         tags$br(),
         "The app is running as ", code(run_user), ". Check folder permissions or launch CodeSpringApp from the intended Unix account."
-      ))
+      )))
     }
     if (identical(listing$status, "hidden_only")) {
-      return(div(class = "empty-box", "This folder contains only hidden items. Hidden files and folders are not shown."))
+      return(tagList(message_box, div(class = "empty-box", "This folder contains only hidden items. Hidden files and folders are not shown.")))
     }
-    if (!length(choices)) return(div(class = "empty-box", "This folder is empty."))
-    label <- "Folder contents"
+    if (identical(listing$status, "empty")) return(tagList(message_box, div(class = "empty-box", "This folder is empty.")))
     flat_values <- unlist(choices, use.names = FALSE)
-    selected <- first_scalar_string(flat_values, path_browser$path)
-    item_count <- length(flat_values)
-    selectInput("browser_choice", label, choices = choices, selected = selected, selectize = FALSE, size = min(max(item_count, 4), 18))
+    folder_selector <- if (length(flat_values)) {
+      selectInput("browser_choice", "Folders", choices = choices, selected = flat_values[[1]], selectize = FALSE, size = min(max(length(flat_values), 4), 18))
+    } else {
+      div(class = "empty-box", "This folder has no visible subfolders. You can still use the current folder.")
+    }
+    visible_files <- listing$files
+    file_list <- if (length(visible_files)) {
+      tagList(
+        tags$h5(paste0("Files in this folder (", length(visible_files), ")")),
+        div(class = "path-list compact-path-list", lapply(utils::head(visible_files, 100), function(path) {
+          div(class = "path-item", span("File"), code(basename(path)))
+        })),
+        if (length(visible_files) > 100) tags$p(class = "muted", paste(length(visible_files) - 100, "additional files are not shown.")) else NULL
+      )
+    } else NULL
+    tagList(message_box, folder_selector, file_list)
   })
 
   observeEvent(input$browse_new_fastq_dir, {
@@ -7051,12 +7079,23 @@ server <- function(input, output, session) {
   })
 
   observeEvent(input$browser_go_path, {
-    candidate <- browser_start_path(input$browser_manual_path %||% path_browser$path, "dir")
-    path_browser$path <- normalizePath(candidate, winslash = "/", mustWork = FALSE)
+    candidate <- path.expand(trimws(input$browser_manual_path %||% ""))
+    if (!nzchar(candidate) || !dir.exists(candidate)) {
+      path_browser$message <- paste("Folder does not exist:", candidate)
+      return()
+    }
+    candidate <- normalizePath(candidate, winslash = "/", mustWork = FALSE)
+    if (file.access(candidate, mode = 5) != 0) {
+      path_browser$message <- paste("The app cannot read this folder:", candidate)
+      return()
+    }
+    path_browser$message <- ""
+    path_browser$path <- candidate
     updateTextInput(session, "browser_manual_path", value = path_browser$path)
   })
 
   observeEvent(input$browser_up, {
+    path_browser$message <- ""
     path_browser$path <- normalizePath(dirname(path_browser$path), winslash = "/", mustWork = FALSE)
     updateTextInput(session, "browser_manual_path", value = path_browser$path)
   })
@@ -7065,6 +7104,7 @@ server <- function(input, output, session) {
     choice <- input$browser_choice %||% ""
     if (!nzchar(choice)) return()
     if (dir.exists(choice)) {
+      path_browser$message <- ""
       path_browser$path <- normalizePath(choice, winslash = "/", mustWork = FALSE)
       updateTextInput(session, "browser_manual_path", value = path_browser$path)
     }
@@ -7072,6 +7112,10 @@ server <- function(input, output, session) {
 
   observeEvent(input$browser_use_current, {
     value <- normalizePath(path_browser$path, winslash = "/", mustWork = FALSE)
+    if (!dir.exists(value) || file.access(value, mode = 5) != 0) {
+      path_browser$message <- paste("The app cannot use this folder:", value)
+      return()
+    }
     updateTextInput(session, path_browser$target, value = value)
     removeModal()
   })
@@ -7099,11 +7143,18 @@ server <- function(input, output, session) {
   output$new_project_ui <- renderUI({
     if (!identical(input$project_id, "__new__")) return(NULL)
     new_analysis_key <- analysis_key(input$new_project_analysis %||% input$analysis %||% "RNA-seq")
-    default_fastq_dir <- if (identical(new_analysis_key, "rna")) RNA_EXAMPLE_FASTQ_DIR else ""
-    default_design_dir <- if (identical(new_analysis_key, "rna")) RNA_EXAMPLE_DESIGN_DIR else ""
+    example <- example_dataset_paths(new_analysis_key)
+    default_fastq_dir <- example$fastq_dir %||% ""
+    default_design_dir <- example$design_dir %||% ""
     tagList(
       tags$hr(),
       h4("New Project"),
+      if (!is.null(example)) div(
+        class = "read-source-note",
+        tags$strong(paste("Bundled", analysis_label(new_analysis_key), "example")),
+        tags$p("Use the small example FASTQs and design matrix included with CodeSpringLab. Results are written only to your own results folder."),
+        actionButton("use_example_dataset", "Use Example Dataset", class = "btn-default")
+      ) else NULL,
       textInput("new_project_name", "Project name", value = "", placeholder = "e.g. my_project"),
       selectInput("new_project_analysis", "Analysis type", choices = c("RNA-seq", "CUT&RUN", "ATAC-seq", "ChIP-seq"), selected = input$analysis, selectize = FALSE),
       selectInput("new_species", "Species", choices = c("Mouse" = "mouse", "Human" = "human"), selected = "mouse", selectize = FALSE),
@@ -7149,6 +7200,23 @@ server <- function(input, output, session) {
     selected <- isolate(input$new_genome_version)
     if (is.null(selected) || !selected %in% unname(choices)) selected <- unname(choices)[[1]]
     selectInput("new_genome_version", "Genome/reference version", choices = choices, selected = selected, selectize = FALSE)
+  })
+
+  observeEvent(input$use_example_dataset, {
+    key <- analysis_key(input$new_project_analysis %||% input$analysis %||% "RNA-seq")
+    example <- example_dataset_paths(key)
+    if (is.null(example)) return()
+    current_name <- trimws(input$new_project_name %||% "")
+    if (!nzchar(current_name) || grepl("^example_(rnaseq|atac)$", current_name)) {
+      updateTextInput(session, "new_project_name", value = example$name)
+    }
+    new_fastq_folders(character(0))
+    updateRadioButtons(session, "new_fastq_location_mode", selected = "one")
+    updateTextInput(session, "new_fastq_dir", value = example$fastq_dir)
+    updateTextInput(session, "new_design_matrix_path", value = example$design_dir)
+    updateSelectInput(session, "new_species", selected = "mouse")
+    updateRadioButtons(session, "new_paired_end", selected = "paired")
+    output$create_project_status <- renderText(paste("Loaded the bundled", analysis_label(key), "example paths. Choose a project name and click Create project."))
   })
 
   output$project_manage_ui <- renderUI({
@@ -7344,6 +7412,17 @@ server <- function(input, output, session) {
         cleanup <- cancel_active_project_jobs(p)
         prune_project_job_history(p)
       }
+      example_design_copied <- ""
+      if (is_bundled_example_design(p$design_matrix_path)) {
+        source_design <- p$design_matrix_path
+        destination_design <- file.path(p$data_dir, "manifest", "design_matrix.txt")
+        dir.create(dirname(destination_design), recursive = TRUE, showWarnings = FALSE)
+        if (!isTRUE(file.copy(source_design, destination_design, overwrite = TRUE))) {
+          stop("Could not copy the bundled example design matrix into the project results folder.")
+        }
+        p$design_matrix_path <- normalizePath(destination_design, winslash = "/", mustWork = FALSE)
+        example_design_copied <- paste("Copied example design matrix:", p$design_matrix_path)
+      }
       cfg <- write_project_config(p)
       refreshed <- discover_projects()
       projects(refreshed)
@@ -7354,6 +7433,7 @@ server <- function(input, output, session) {
       paste(c(
         if (nzchar(cleanup)) cleanup,
         paste("Created project:", p$name),
+        if (nzchar(example_design_copied)) example_design_copied,
         paste("Saved project file:", cfg)
       ), collapse = "\n")
     }, error = function(e) paste("ERROR:", conditionMessage(e)))

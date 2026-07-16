@@ -17,6 +17,21 @@ git clone https://github.com/jamesrouse1/CodeSpringApp.git
 CodeSpringLab is mandatory for CodeSpringApp. The launcher expects to find it at `~/CodeSpringLab` unless you set `CSL_CODESPRINGLAB_ROOT` manually.
 CodeSpringApp does not fall back to a developer's or another user's home directory. If the companion repository cannot be found for the current user, startup stops with an explicit path error.
 
+Saved project configurations, job history, logs, and last-project selection are stored beneath the current Unix user's `~/.codespringweb` directory. They are not loaded from the cloned repositories, so one user does not inherit another user's project menu. Legacy project configs are migrated only when their exact results data path appears in that user's private job history.
+
+## Bundled Example Datasets
+
+The New Project panel provides a **Use Example Dataset** button for RNA-seq and ATAC-seq. The examples use the small FASTQ and manifest files bundled under `CodeSpringLab/scripts_DoNotTouch/test`:
+
+- RNA-seq: `test/fastq` and `test/manifest`
+- ATAC-seq: `test/fastq_atac` and `test/manifest_atac`
+
+Example FASTQs remain read-only inputs. When the project is created, CodeSpringApp copies the bundled design matrix into that user's own `~/csl_results/<project>/data/manifest` directory and writes all results beneath the user's selected results root.
+
+## Folder Browser
+
+The server folder browser starts from the current user's home directory, displays the Unix account used by the app, and hides dotfiles by default. Folders are selectable for navigation, while visible files are listed separately for confirmation. Typed paths are validated before navigation, and empty, hidden-only, missing, and unreadable folders receive distinct messages.
+
 ## Run On The Server
 
 Use the launcher script. It checks required packages, finds an open server port, starts Shiny, and prints the exact SSH tunnel command to run from your laptop.
