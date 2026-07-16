@@ -299,9 +299,6 @@ printf '%s\n' "$APP_URL" > "$URL_FILE"
 chmod 600 "$URL_FILE"
 
 printf '\n\033[32mCodeSpringApp is running on bamdev1 port %s.\033[0m\n' "$PORT"
-printf '\033[1;36mUnix user:\033[0m %s\n' "$USER_NAME"
-printf '\033[1;36mUser home:\033[0m %s\n' "$USER_HOME"
-printf '\033[1;36mCodeSpringLab:\033[0m %s\n' "$CSL_ROOT"
 printf '\033[1;36mCopy/paste this command into your laptop terminal:\033[0m\n'
 printf '\033[1mssh -N -L %s:localhost:%s %s@bamdev1\033[0m\n' "$PORT" "$PORT" "$USER_NAME"
 printf '\033[1;36mThen open this private URL:\033[0m \033[1m%s\033[0m\n' "$APP_URL"
