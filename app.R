@@ -4845,8 +4845,8 @@ submit_cutadapt_jobs <- function(project, adapter1, adapter2, min_length, sample
   if (!length(plan$samples)) return(plan$message)
   pairs <- pairs[pairs$sample %in% plan$samples, , drop = FALSE]
   script <- file.path(SCRIPTS_DIR, if (project$paired_end) "cutadapt_PE/qsub_cutadapt_PE.sh" else "cutadapt_SE/qsub_cutadapt_SE.sh")
-  runner <- if (project$paired_end) file.path(SCRIPTS_DIR, "cutadapt_PE/cutadapt_PE.sh") else ""
-  missing_scripts <- c(script, if (project$paired_end) runner else character(0))
+  runner <- file.path(SCRIPTS_DIR, if (project$paired_end) "cutadapt_PE/cutadapt_PE.sh" else "cutadapt_SE/cutadapt_SE.sh")
+  missing_scripts <- c(script, runner)
   missing_scripts <- missing_scripts[!file.exists(missing_scripts)]
   if (length(missing_scripts)) return(record_preflight_failure(project, "Cutadapt", paste("Required Cutadapt scripts are missing:", paste(missing_scripts, collapse = ", ")), "cutadapt"))
   input_mode <- "raw reads"
@@ -4854,8 +4854,7 @@ submit_cutadapt_jobs <- function(project, adapter1, adapter2, min_length, sample
     trimmed1 <- row[["trimmed_r1"]]
     trimmed2 <- if (project$paired_end) row[["trimmed_r2"]] else trimmed1
     read2 <- if (project$paired_end) row[["r2"]] else row[["r1"]]
-    args <- c(min_length, adapter1, adapter2, trimmed1, trimmed2, row[["r1"]], read2, project$name)
-    if (project$paired_end) args <- c(args, runner)
+    args <- c(min_length, adapter1, adapter2, trimmed1, trimmed2, row[["r1"]], read2, project$name, runner)
     submit_sbatch(project, "Cutadapt", script, args, "cutadapt", input_mode, sample = row[["sample"]], target = trimmed1)
   })
   paste(append_plan_message(messages, plan), collapse = "\n")
