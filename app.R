@@ -1307,6 +1307,20 @@ count_files <- function(path, pattern) {
   length(list.files(path, pattern = pattern, recursive = TRUE, full.names = TRUE))
 }
 
+diffbind_comparison_complete <- function(path) {
+  if (!dir.exists(path) || file.exists(file.path(path, "_RUN_STARTED"))) return(FALSE)
+  if (file.exists(file.path(path, "_COMPLETE")) && file_size_for(file.path(path, "_COMPLETE")) > 0) return(TRUE)
+  length(list.files(path, pattern = "^DifferentialPeaks_.*\\.txt$", full.names = TRUE)) > 0
+}
+
+peak_diffbind_status <- function(project) {
+  root <- file.path(project$data_dir, "diffbind")
+  if (!dir.exists(root)) return("Not started")
+  if (count_files(root, "^_RUN_STARTED$") > 0) return("Likely failed")
+  dirs <- list.dirs(root, recursive = FALSE, full.names = TRUE)
+  if (any(vapply(dirs, diffbind_comparison_complete, logical(1)))) "Complete" else "Not started"
+}
+
 cutadapt_outputs_available <- function(project) {
   count_files(file.path(project$data_dir, "cutadapt"), fastq_suffix_regex) > 0
 }
@@ -1708,7 +1722,10 @@ job_error_signal <- function(jobs, step, sample = "") {
 }
 
 cutrun_macs_fatal_error_signal <- function(project, jobs, step, sample = "") {
-  if (!is_cutrun_project(project) || !identical(canonical_job_step(step), "MACS2 (optional)")) return(FALSE)
+  canonical_step <- canonical_job_step(step)
+  supported <- (is_cutrun_project(project) && identical(canonical_step, "MACS2 (optional)")) ||
+    ((is_atac_project(project) || is_chip_project(project)) && identical(canonical_step, "MACS2 Peaks"))
+  if (!supported) return(FALSE)
 
   fatal_pattern <- paste(
     c(
@@ -2497,7 +2514,7 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
         if (count_files(file.path(data_dir, "fastqc"), "\\.html$") + count_files(file.path(data_dir, "fastqc_cutadapt"), "\\.html$") > 0) "Complete" else "Not started",
         if (count_files(file.path(data_dir, "bowtie2"), "_alignment_summary\\.txt$") > 0) "Complete" else "Not started",
         if (count_files(file.path(data_dir, "macs2"), "(narrowPeak|broadPeak|peaks\\.xls)$") > 0) "Complete" else "Not started",
-        if (if (is_chip_project(project)) count_files(file.path(data_dir, "diffbind"), "^_COMPLETE$") > 0 else count_files(file.path(data_dir, "diffbind"), "DifferentialPeaks_.*\\.txt$") > 0) "Complete" else "Not started"
+        peak_diffbind_status(project)
       ),
       path = c(design, file.path(data_dir, "cutadapt"), file.path(data_dir, "fastqc"), file.path(data_dir, "bowtie2"), file.path(data_dir, "macs2"), file.path(data_dir, "diffbind")),
       stringsAsFactors = FALSE
@@ -2750,6 +2767,14 @@ sample_output_target <- function(project, sample, step) {
   if (length(targets)) targets[[1]] else ""
 }
 
+atac_macs2_completion_target <- function(project, sample) {
+  sample_dir <- file.path(project$data_dir, "macs2", sample)
+  marker <- file.path(sample_dir, paste0(sample, "_macs2_complete.txt"))
+  run_log <- file.path(sample_dir, paste0(sample, "_macs2.log"))
+  legacy_peak <- file.path(sample_dir, paste0(sample, "_peaks.narrowPeak"))
+  if (file.exists(legacy_peak) && !file.exists(marker) && !file.exists(run_log)) legacy_peak else marker
+}
+
 fastqc_expected_targets <- function(reads, outdir) {
   reads <- unique(unlist(lapply(as.character(reads), split_fastq_path_list), use.names = FALSE))
   reads <- reads[nzchar(reads)]
@@ -2831,7 +2856,7 @@ sample_step_targets <- function(project, sample, step, raw_pairs = NULL, trimmed
         if (length(expected)) expected else file.path(cutadapt_dir, paste0(sample, ".fastq.gz"))
       },
       "Bowtie2" = file.path(data_dir, "bowtie2", sample, paste0(sample, "_alignment_summary.txt")),
-      "MACS2 Peaks" = if (is_chip_project(project)) file.path(data_dir, "macs2", sample, paste0(sample, "_macs2_complete.txt")) else file.path(data_dir, "macs2", sample, paste0(sample, "_peaks.narrowPeak")),
+      "MACS2 Peaks" = if (is_chip_project(project)) file.path(data_dir, "macs2", sample, paste0(sample, "_macs2_complete.txt")) else atac_macs2_completion_target(project, sample),
       character(0)
     ))
   }
@@ -3074,7 +3099,7 @@ atac_summary_cards_ui <- function(project) {
   peak_files <- result_file_choices(project, "macs2", "\\.(narrowPeak|broadPeak)$")
   diffbind_root <- file.path(project$data_dir, "diffbind")
   comparisons <- if (dir.exists(diffbind_root)) list.dirs(diffbind_root, recursive = FALSE, full.names = TRUE) else character(0)
-  comparisons <- comparisons[vapply(comparisons, function(path) length(list.files(path, pattern = "^DifferentialPeaks_.*\\.txt$")) > 0, logical(1))]
+  comparisons <- comparisons[vapply(comparisons, diffbind_comparison_complete, logical(1))]
   completed_postprocess <- atac_postprocess_status_table(project)
   completed_postprocess <- if (NROW(completed_postprocess)) sum(completed_postprocess$status == "Complete") else 0L
   assay <- if (is_chip_project(project)) "ChIP-seq" else "ATAC-seq"
@@ -5137,6 +5162,9 @@ submit_atac_bowtie2_jobs <- function(project, trimmed = TRUE, samples = NULL) {
 }
 
 submit_atac_macs2_jobs <- function(project, qvalue = "0.05", samples = NULL) {
+  qvalue_number <- suppressWarnings(as.numeric(qvalue))
+  if (!is.finite(qvalue_number) || qvalue_number <= 0 || qvalue_number > 1) return(record_preflight_failure(project, "MACS2 Peaks", "MACS2 q-value must be a number greater than 0 and at most 1.", "macs2"))
+  qvalue <- format(qvalue_number, scientific = FALSE, trim = TRUE)
   res <- atac_reference_resources(project)
   design <- project_design_df(project)
   if (!NROW(design) || !"sample" %in% names(design)) return(record_preflight_failure(project, "MACS2 Peaks", "No samples found in design_matrix.txt.", "macs2"))
@@ -5144,21 +5172,23 @@ submit_atac_macs2_jobs <- function(project, qvalue = "0.05", samples = NULL) {
   if (inherits(selected, "error")) return(record_preflight_failure(project, "MACS2 Peaks", conditionMessage(selected), "macs2"))
   design <- design[design$sample %in% selected, , drop = FALSE]
   outdir <- file.path(project$data_dir, "macs2"); dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
-  targets <- stats::setNames(lapply(design$sample, function(s) file.path(outdir, s, paste0(s, "_peaks.narrowPeak"))), design$sample)
+  targets <- stats::setNames(lapply(design$sample, function(sample) atac_macs2_completion_target(project, sample)), design$sample)
   plan <- sample_submission_plan(project, "MACS2 Peaks", targets)
   if (!length(plan$samples)) return(plan$message)
   qsub <- file.path(SCRIPTS_DIR, "MACS2", "qsub_macs2_PE.sh"); runner <- file.path(SCRIPTS_DIR, "MACS2", "macs2_PE.sh")
   missing_resources <- c(qsub, runner)[!file.exists(c(qsub, runner))]
   if (length(missing_resources)) return(record_preflight_failure(project, "MACS2 Peaks", paste("Required ATAC-seq MACS2 resources are missing:", paste(missing_resources, collapse = ", ")), "macs2"))
+  required_beds <- file.path(project$data_dir, "bowtie2", plan$samples, paste0(plan$samples, "Aligned.sortedByCoord_removeDup.out.bed"))
+  missing_beds <- required_beds[!file.exists(required_beds) | vapply(required_beds, file_size_for, numeric(1)) <= 0]
+  if (length(missing_beds)) return(record_preflight_failure(project, "MACS2 Peaks", paste("Run ATAC-seq Bowtie2 successfully before MACS2. Missing or empty duplicate-removed BED files:", paste(missing_beds, collapse = ", ")), "macs2"))
   messages <- vapply(plan$samples, function(sample) {
     bed <- file.path(project$data_dir, "bowtie2", sample, paste0(sample, "Aligned.sortedByCoord_removeDup.out.bed"))
     bw_dir <- file.path(project$data_dir, "bowtie2")
-    if (!file.exists(bed)) return(record_preflight_failure(project, "MACS2 Peaks", paste("Missing duplicate-removed Bowtie2 BED:", bed), "macs2"))
     sample_dir <- file.path(outdir, sample); dir.create(sample_dir, recursive = TRUE, showWarnings = FALSE)
     submit_sbatch(project, "MACS2 Peaks", qsub,
       c(sample, bed, res$macs2_genome, res$chrom_sizes, sample_dir, res$tss_bed, qvalue, project$name, res$homer_genome, bw_dir, runner),
       "macs2_atac", paste("ATAC shift -100/extsize 200; q", qvalue), sample = sample,
-      target = file.path(sample_dir, paste0(sample, "_peaks.narrowPeak")), reference = res$label)
+      target = file.path(sample_dir, paste0(sample, "_macs2_complete.txt")), reference = res$label)
   }, character(1))
   paste(append_plan_message(messages, plan), collapse = "\n")
 }
@@ -9132,7 +9162,7 @@ server <- function(input, output, session) {
     if (!length(png)) return(div(class = "empty-box", "No TSS heatmap found for this sample.")); image_or_file_ui(png[[1]], "700px")
   })
   output$atac_diffbind_dir_ui <- renderUI({
-    progress_refresh(); root <- file.path(current_project()$data_dir, "diffbind"); dirs <- if (dir.exists(root)) list.dirs(root, recursive = FALSE, full.names = TRUE) else character(0); dirs <- dirs[lengths(lapply(dirs, function(d) list.files(d, pattern = "^DifferentialPeaks_.*\\.txt$"))) > 0]
+    progress_refresh(); root <- file.path(current_project()$data_dir, "diffbind"); dirs <- if (dir.exists(root)) list.dirs(root, recursive = FALSE, full.names = TRUE) else character(0); dirs <- dirs[vapply(dirs, diffbind_comparison_complete, logical(1))]
     if (!length(dirs)) return(div(class = "empty-box", "No DiffBind comparison found yet.")); selectInput("atac_diffbind_dir", "Comparison", choices = stats::setNames(dirs, basename(dirs)), selected = selected_choice(input$atac_diffbind_dir, dirs, dirs[[1]]), selectize = FALSE)
   })
   selected_atac_diffbind_dir <- reactive({ path <- input$atac_diffbind_dir %||% ""; req(nzchar(path), dir.exists(path)); path })
