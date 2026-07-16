@@ -2283,7 +2283,9 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
       for (step in sample_level_steps_for_project(project)) {
         hit <- progress[progress$step == step, , drop = FALSE]
         if (!NROW(hit)) next
-        if (any(hit$status == "Likely failed, Deleted")) {
+        if (any(hit$status %in% c("Running", "Running, no growth yet", "Waiting"))) {
+          raw$status[raw$step == step] <- "Active"
+        } else if (any(hit$status == "Likely failed, Deleted")) {
           raw$status[raw$step == step] <- "Likely failed, Deleted"
         } else if (any(hit$status == "Cancelled, Deleted")) {
           raw$status[raw$step == step] <- "Cancelled, Deleted"
@@ -2291,8 +2293,6 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
           raw$status[raw$step == step] <- "Completed, Deleted"
         } else if (any(hit$status == "Cancelled")) {
           raw$status[raw$step == step] <- "Cancelled"
-        } else if (any(hit$status %in% c("Running", "Running, no growth yet", "Waiting"))) {
-          raw$status[raw$step == step] <- "Active"
         } else if (all(hit$status %in% c("Completed", "Optional, not run")) && any(hit$status == "Completed")) {
           raw$status[raw$step == step] <- "Complete"
         } else if (any(hit$status == "Likely failed")) {
@@ -3679,11 +3679,14 @@ sample_progress_step_ui <- function(progress_df, step) {
   )
 }
 
-optimistic_step_progress <- function(project, step, input_mode = "") {
+optimistic_step_progress <- function(project, step, input_mode = "", samples = NULL) {
   design <- safe_read_table(project$design_matrix_path)
   if (!NROW(design) || !"sample" %in% names(design)) return(data.frame())
-  samples <- as.character(design$sample)
-  samples <- samples[nzchar(samples)]
+  design_samples <- as.character(design$sample)
+  design_samples <- design_samples[nzchar(design_samples)]
+  requested_samples <- unique(as.character(samples %||% character(0)))
+  requested_samples <- requested_samples[nzchar(requested_samples)]
+  samples <- if (length(requested_samples)) intersect(design_samples, requested_samples) else design_samples
   if (!length(samples)) return(data.frame())
   rows <- lapply(samples, function(sample) {
     target <- sample_output_target(project, sample, step)
@@ -3697,6 +3700,10 @@ optimistic_step_progress <- function(project, step, input_mode = "") {
       output_bytes = 0,
       target = target,
       note = "Submitted; waiting for scheduler status refresh.",
+      metric_1_name = "",
+      metric_1_value = "",
+      metric_2_name = "",
+      metric_2_value = "",
       stringsAsFactors = FALSE
     )
   })
@@ -6104,7 +6111,7 @@ body { background:#eef3f8; color:#17202f; }
 .sample-status { display:inline-flex; width:100%; min-width:112px; justify-content:center; border-radius:999px; padding:5px 9px; font-size:12px; font-weight:800; border:1px solid #cfd7e3; background:#eef2f7; color:#526070; cursor:help; }
 .sample-status.completed { background:#def7e8; color:#0b6b3a; border-color:#8fd8ad; }
 .sample-status.running, .sample-status.running-no-growth-yet { background:#fff4d6; color:#7c3d00; border-color:#f0c36d; }
-.sample-status.waiting { background:#e8f2ff; color:#15549a; border-color:#b9d5f5; }
+.sample-status.waiting { background:#fff4d6; color:#7c3d00; border-color:#f0c36d; }
 .sample-status.cancelled { background:#fff0ed; color:#8a2f24; border-color:#e5a397; }
 .sample-status.likely-failed, .sample-status.likely-failed-deleted, .sample-status.cancelled-deleted { background:#fff0ed; color:#9f2d20; border-color:#e5a397; }
 .sample-status.completed-deleted { background:#eefaf3; color:#315f4c; border-color:#b7dfc7; }
@@ -6795,15 +6802,18 @@ server <- function(input, output, session) {
     div(class = "run-message-alert tool-message-alert error", tags$strong("Previous step required"), msg)
   }
 
-  mark_submission_active <- function(label, input_mode = "") {
+  mark_submission_active <- function(label, input_mode = "", samples = NULL) {
     p <- current_project()
     step <- submission_step(label)
-    sample_level_steps <- c("Cutadapt", "FastQC", "STAR", "featureCounts", "RSEM (optional)", "Kallisto (optional)")
+    sample_level_steps <- sample_level_steps_for_project(p)
     if (step %in% sample_level_steps) {
-      optimistic <- optimistic_step_progress(p, step, input_mode)
+      optimistic <- optimistic_step_progress(p, step, input_mode, samples)
       if (NROW(optimistic)) {
         old <- isolate(sample_progress_state())
-        if (NROW(old) && "step" %in% names(old)) old <- old[old$step != step, , drop = FALSE]
+        if (NROW(old) && all(c("step", "sample") %in% names(old))) {
+          replace <- old$step == step & old$sample %in% optimistic$sample
+          old <- old[!replace, , drop = FALSE]
+        }
         sample_progress_state(rbind(old, optimistic))
       }
     }
@@ -6812,7 +6822,7 @@ server <- function(input, output, session) {
     progress_refresh(Sys.time())
   }
 
-  run_submission <- function(label, expr, input_mode = "") {
+  run_submission <- function(label, expr, input_mode = "", samples = NULL) {
     step <- submission_step(label)
     run_message(paste("Submitting", label, "..."))
     set_tool_message(step, "")
@@ -6823,7 +6833,7 @@ server <- function(input, output, session) {
     if (!startsWith(msg, "ERROR")) {
       tryCatch(
         {
-          mark_submission_active(label, input_mode)
+          mark_submission_active(label, input_mode, samples)
           jobs_now <- job_history(current_project())
           job_history_state(carry_forward_job_elapsed(jobs_now, isolate(job_history_state())))
           progress_refresh(Sys.time())
@@ -7811,7 +7821,7 @@ server <- function(input, output, session) {
   })
   observeEvent(input$run_atac_postprocess, {
     samples <- input$atac_postprocess_samples %||% character(0)
-    run_submission("Bowtie2", submit_atac_postprocess_jobs(current_project(), samples), paste("post-alignment repair:", paste(samples, collapse = ", ")))
+    run_submission("Bowtie2", submit_atac_postprocess_jobs(current_project(), samples), paste("post-alignment repair:", paste(samples, collapse = ", ")), samples = samples)
   })
   observeEvent(input$run_atac_macs2, {
     run_submission("MACS2 Peaks", submit_atac_macs2_jobs(current_project(), input$atac_macs2_qvalue %||% "0.05"), "shift -100; extsize 200")
