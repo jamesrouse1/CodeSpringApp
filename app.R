@@ -5098,9 +5098,16 @@ submit_cutrun_seacr_jobs <- function(project, norm = "norm", stringency = "strin
   paste(append_plan_message(messages, plan), collapse = "\n")
 }
 
-submit_cutrun_dedup_sensitivity_jobs <- function(project, norm = "non", stringency = "stringent", max_fragment = "1000", remove_mito = TRUE) {
+submit_cutrun_dedup_sensitivity_jobs <- function(project, samples = character(0), norm = "non", stringency = "stringent", max_fragment = "1000", remove_mito = TRUE) {
   design <- cutrun_target_design(project, include_controls = FALSE)
   if (!NROW(design)) return(record_preflight_failure(project, "SEACR sensitivity", "No non-control CUT&RUN target samples were found.", "cutrun_dedup_sensitivity"))
+  requested_samples <- unique(trimws(as.character(samples %||% character(0))))
+  requested_samples <- requested_samples[nzchar(requested_samples)]
+  if (!length(requested_samples)) return(record_preflight_failure(project, "SEACR sensitivity", "Select at least one target sample for the deduplicated-target sensitivity analysis.", "cutrun_dedup_sensitivity"))
+  available_samples <- as.character(design$sample)
+  unknown_samples <- setdiff(requested_samples, available_samples)
+  if (length(unknown_samples)) return(record_preflight_failure(project, "SEACR sensitivity", paste("These selected samples are not non-control CUT&RUN targets:", paste(unknown_samples, collapse = ", ")), "cutrun_dedup_sensitivity"))
+  design <- design[match(requested_samples, available_samples), , drop = FALSE]
   res <- cutrun_reference_resources(project)
   qsub <- file.path(SCRIPTS_DIR, "CUTRUN", "qsub_cutrun_dedup_sensitivity.sh")
   runner <- file.path(SCRIPTS_DIR, "CUTRUN", "cutrun_dedup_sensitivity.sh")
@@ -7909,6 +7916,7 @@ server <- function(input, output, session) {
         },
         tool_panel("Deduplicated-target sensitivity", status, "Diagnostic rerun that rebuilds target signal from duplicate-removed BAMs and calls SEACR against the existing matched deduplicated control.",
           tagList(
+            uiOutput("cutrun_dedup_sensitivity_samples_ui"),
             tags$p(class = "muted small-note", "This does not alter Bowtie2 or primary SEACR results. It preserves the original spike-in scale factor, writes only to data/cutrun_dedup_sensitivity, and is intended to test whether target duplicate retention is driving discordant peak counts."),
             tags$p(class = "muted small-note", "Uses the SEACR normalization and stringency selected above. Do not use these sensitivity peaks for Peak QC or differential binding until you compare them with the primary run.")
           ),
@@ -8103,6 +8111,22 @@ server <- function(input, output, session) {
     checkboxGroupInput("cutrun_postprocess_samples", "Incomplete samples to repair", choices = choices, selected = selected)
   })
 
+  output$cutrun_dedup_sensitivity_samples_ui <- renderUI({
+    p <- current_project(); if (!is_cutrun_project(p)) return(NULL)
+    design <- cutrun_target_design(p, include_controls = FALSE)
+    if (!NROW(design)) return(div(class = "empty-box", "No non-control CUT&RUN target samples were found."))
+    samples <- sort(unique(as.character(design$sample)))
+    selected <- intersect(as.character(input$cutrun_dedup_sensitivity_samples %||% character(0)), samples)
+    selectizeInput(
+      "cutrun_dedup_sensitivity_samples",
+      "Target samples to test",
+      choices = samples,
+      selected = selected,
+      multiple = TRUE,
+      options = list(plugins = list("remove_button"), placeholder = "Select one or more target samples")
+    )
+  })
+
   for (step in runnable_pipeline_steps()) {
     local({
       this_step <- step
@@ -8253,13 +8277,15 @@ server <- function(input, output, session) {
     )
   })
   observeEvent(input$run_cutrun_dedup_sensitivity, {
+    samples <- input$cutrun_dedup_sensitivity_samples %||% character(0)
     run_submission(
       "SEACR sensitivity",
       submit_cutrun_dedup_sensitivity_jobs(
-        current_project(), input$cutrun_seacr_norm %||% "non", input$cutrun_seacr_stringency %||% "stringent",
+        current_project(), samples, input$cutrun_seacr_norm %||% "non", input$cutrun_seacr_stringency %||% "stringent",
         input$cutrun_max_fragment %||% "1000", if (is.null(input$cutrun_remove_mito)) TRUE else isTRUE(input$cutrun_remove_mito)
       ),
-      paste("deduplicated targets;", input$cutrun_seacr_norm %||% "non", input$cutrun_seacr_stringency %||% "stringent")
+      paste("deduplicated targets:", paste(samples, collapse = ", "), ";", input$cutrun_seacr_norm %||% "non", input$cutrun_seacr_stringency %||% "stringent"),
+      samples = samples
     )
   })
   observeEvent(input$run_cutrun_peakqc, {
