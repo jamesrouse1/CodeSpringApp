@@ -326,6 +326,11 @@ assert(app_env$diffbind_comparison_active(atac_project, comparison_dir, jobs = a
 unlink(file.path(comparison_dir, "_RUN_STARTED"))
 writeLines("status\tcomplete", file.path(comparison_dir, "_COMPLETE"))
 assert(app_env$diffbind_comparison_complete(comparison_dir), "final DiffBind marker accepted")
+writeLines(c(
+  "seqnames\tstart\tend\tFold\tp.value\tFDR",
+  "chr1\t101\t220\t2.5\t0.0002\t0.004",
+  "chr1\t501\t650\t-1.8\t0.003\t0.02"
+), legacy_result)
 
 differential_bed <- file.path(comparison_dir, "DifferentialPeaks_B_vs_A_ref.with_stats.bed")
 writeLines(c(
@@ -334,6 +339,17 @@ writeLines(c(
 ), differential_bed)
 expanded_bed <- app_env$safe_read_result_table(differential_bed)
 assert(all(c("Fold", "p.value", "FDR") %in% names(expanded_bed)), "ATAC with-stats BED exposes p-value and FDR columns in the Results Explorer")
+comparison_annotation <- file.path(comparison_dir, "DifferentialPeaks_B_vs_A_ref_annotated_with_stats.txt")
+writeLines(c(
+  "PeakID\tGene Name\tAnnotation",
+  "chr1:101-220|Fold=2.5|p.value=0.0002|FDR=0.004\tGeneA\tPromoter",
+  "chr1:501-650|Fold=-1.8|p.value=0.003|FDR=0.02\tGeneB\tIntron"
+), comparison_annotation)
+navigation <- app_env$genome_browser_comparison_navigation(comparison_dir)
+assert(all(c("GeneA", "GeneB") %in% unname(navigation$genes)), "genome browser offers annotated differential-peak genes")
+assert(length(navigation$peaks) == 2L && grepl("chr1:101-220", names(navigation$peaks)[[1]], fixed = TRUE), "genome browser offers searchable differential-peak intervals")
+differential_table <- app_env$differential_accessibility_result_table(comparison_dir)
+assert(identical(differential_table[["Genomic interval"]], c("chr1:101-220", "chr1:501-650")), "differential accessibility table includes complete genomic intervals")
 chip_sheet_dir <- file.path(root, "manifest", "chip_diffbind", basename(comparison_dir))
 dir.create(chip_sheet_dir, recursive = TRUE, showWarnings = FALSE)
 comparison_samples <- data.frame(

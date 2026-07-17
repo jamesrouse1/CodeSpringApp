@@ -322,6 +322,7 @@ PROGRESS_REFRESH_MS <- 5000
 JOB_HISTORY_CACHE_SECONDS <- 10
 JOB_HISTORY_CACHE <- new.env(parent = emptyenv())
 METRIC_LINES_CACHE <- new.env(parent = emptyenv())
+GENOME_BROWSER_NAV_CACHE <- new.env(parent = emptyenv())
 CUTRUN_DEFAULT_SPIKEIN_INDEX <- "/grid/bsr/data/data/utama/genome/ecoli_k12/bowtie2_index/ecoli_k12_mg1655"
 CUTRUN_DEFAULT_SPIKEIN_NAME <- "ecoli"
 CUTRUN_SPIKEIN_GENOME_CHOICES <- c("E. coli K-12 MG1655" = CUTRUN_DEFAULT_SPIKEIN_INDEX)
@@ -3476,8 +3477,7 @@ genome_browser_comparison_catalog <- function(project) {
     if (!NROW(sheet)) return(NULL)
     sheet <- sheet[sheet$sample %in% project_samples(project), , drop = FALSE]
     if (!NROW(sheet)) return(NULL)
-    conditions <- unique(sheet$condition[nzchar(sheet$condition)])
-    label <- if (length(conditions) >= 2L) paste(conditions, collapse = " vs ") else gsub("__", " — ", basename(result_dir), fixed = TRUE)
+    label <- trimws(gsub("_+", " ", basename(result_dir)))
     data.frame(
       id = normalizePath(result_dir, winslash = "/", mustWork = TRUE),
       label = label,
@@ -3490,6 +3490,89 @@ genome_browser_comparison_catalog <- function(project) {
   })
   rows <- Filter(Negate(is.null), rows)
   if (length(rows)) do.call(rbind, rows) else data.frame()
+}
+
+differential_accessibility_result_table <- function(result_dir, n = 20000) {
+  files <- if (dir.exists(result_dir)) list.files(result_dir, pattern = "^DifferentialPeaks_.*_ref\\.txt$", full.names = TRUE) else character(0)
+  if (!length(files)) return(data.frame())
+  result <- safe_read_table(files[[1]], n)
+  if (!NROW(result)) return(result)
+  chr_col <- intersect(c("seqnames", "chrom", "chr", "chromosome"), names(result))
+  start_col <- intersect(c("start", "Start"), names(result))
+  end_col <- intersect(c("end", "End"), names(result))
+  if (length(chr_col) && length(start_col) && length(end_col)) {
+    interval <- paste0(
+      as.character(result[[chr_col[[1]]]]), ":",
+      format(suppressWarnings(as.numeric(result[[start_col[[1]]]])), scientific = FALSE, trim = TRUE), "-",
+      format(suppressWarnings(as.numeric(result[[end_col[[1]]]])), scientific = FALSE, trim = TRUE)
+    )
+    result <- data.frame(`Genomic interval` = interval, result, stringsAsFactors = FALSE, check.names = FALSE)
+  }
+  result
+}
+
+genome_browser_comparison_navigation <- function(result_dir, max_rows = 50000L) {
+  empty <- list(genes = setNames(character(0), character(0)), peaks = setNames(character(0), character(0)))
+  if (!dir.exists(result_dir)) return(empty)
+  bed_files <- list.files(result_dir, pattern = "^DifferentialPeaks_.*\\.with_stats\\.bed$", full.names = TRUE)
+  annotation_files <- list.files(result_dir, pattern = "^DifferentialPeaks_.*_annotated_with_stats\\.txt$", full.names = TRUE)
+  source_files <- c(bed_files, annotation_files)
+  cache_key <- paste(normalizePath(result_dir, winslash = "/", mustWork = TRUE), max_rows, sep = "\r")
+  signature <- if (length(source_files)) {
+    info <- file.info(source_files)
+    paste(source_files, info$size, as.numeric(info$mtime), collapse = "|")
+  } else "empty"
+  if (exists(cache_key, envir = GENOME_BROWSER_NAV_CACHE, inherits = FALSE)) {
+    cached <- get(cache_key, envir = GENOME_BROWSER_NAV_CACHE, inherits = FALSE)
+    if (identical(cached$signature, signature)) return(cached$value)
+  }
+
+  gene_choices <- setNames(character(0), character(0))
+  if (length(annotation_files)) {
+    annotation <- safe_read_result_table(annotation_files[[1]], max_rows)
+    gene_columns <- names(annotation)[gsub("[^a-z0-9]+", "", tolower(names(annotation))) %in% c("genename", "genesymbol", "symbol")]
+    if (length(gene_columns) && NROW(annotation)) {
+      genes <- trimws(as.character(annotation[[gene_columns[[1]]]]))
+      genes <- unlist(strsplit(genes[nzchar(genes) & !is.na(genes)], "[,;]", perl = TRUE), use.names = FALSE)
+      genes <- trimws(genes)
+      genes <- genes[nzchar(genes) & !tolower(genes) %in% c("na", "nan", "none", "intergenic", ".", "-")]
+      if (length(genes)) {
+        counts <- sort(table(genes), decreasing = TRUE)
+        ordered <- sort(names(counts))
+        labels <- paste0(ordered, " — ", as.integer(counts[ordered]), " differential peak", ifelse(counts[ordered] == 1L, "", "s"))
+        gene_choices <- stats::setNames(ordered, labels)
+      }
+    }
+  }
+
+  peak_choices <- setNames(character(0), character(0))
+  if (length(bed_files)) {
+    peaks <- safe_read_result_table(bed_files[[1]], max_rows)
+    if (NROW(peaks) && all(c("chrom", "start", "end") %in% names(peaks))) {
+      start <- suppressWarnings(as.numeric(peaks$start)) + 1
+      end <- suppressWarnings(as.numeric(peaks$end))
+      keep <- nzchar(as.character(peaks$chrom)) & is.finite(start) & is.finite(end) & end >= start
+      peaks <- peaks[keep, , drop = FALSE]
+      start <- start[keep]
+      end <- end[keep]
+      if (NROW(peaks)) {
+        interval <- paste0(peaks$chrom, ":", format(start, scientific = FALSE, trim = TRUE), "-", format(end, scientific = FALSE, trim = TRUE))
+        margin <- pmax(1000, round((end - start + 1) * 2))
+        locus <- paste0(
+          peaks$chrom, ":", format(pmax(1, start - margin), scientific = FALSE, trim = TRUE), "-",
+          format(end + margin, scientific = FALSE, trim = TRUE)
+        )
+        label <- interval
+        if ("Fold" %in% names(peaks)) label <- paste0(label, " — Fold ", format(signif(suppressWarnings(as.numeric(peaks$Fold)), 4), trim = TRUE))
+        if ("p.value" %in% names(peaks)) label <- paste0(label, " — p ", format(signif(suppressWarnings(as.numeric(peaks[["p.value"]])), 3), scientific = TRUE, trim = TRUE))
+        if ("FDR" %in% names(peaks)) label <- paste0(label, " — FDR ", format(signif(suppressWarnings(as.numeric(peaks$FDR)), 3), scientific = TRUE, trim = TRUE))
+        peak_choices <- stats::setNames(locus, make.unique(label, sep = " — "))
+      }
+    }
+  }
+  value <- list(genes = gene_choices, peaks = peak_choices)
+  assign(cache_key, list(signature = signature, value = value), envir = GENOME_BROWSER_NAV_CACHE)
+  value
 }
 
 genome_browser_preferred_signal_rows <- function(project, catalog, samples, metadata = data.frame()) {
@@ -3584,7 +3667,7 @@ genome_browser_ui <- function() {
       width = 3,
       uiOutput("genome_browser_controls_ui"),
       textInput("genome_browser_locus", "Starting locus", value = "", placeholder = "Gene or chr:start-end"),
-      actionButton("load_genome_browser", "Load selected tracks", class = "btn-primary"),
+      actionButton("load_genome_browser", "Load tracks / go to locus", class = "btn-primary"),
       tags$hr(),
       helpText("Comparison mode loads one bigWig per selected sample and places the differential-peak BED at the bottom. Manual mode remains available for custom track combinations.")
     ),
@@ -3897,7 +3980,7 @@ atac_results_explorer_ui <- function() {
       tabPanel("Differential Accessibility", br(), sidebarLayout(
         sidebarPanel(width = 2, uiOutput("atac_diffbind_dir_ui"), tags$hr(), helpText("Each comparison is stored and displayed independently.")),
         mainPanel(width = 10, tabsetPanel(
-          tabPanel("Results", br(), table_output("atac_diffbind_table")),
+          tabPanel("Results", br(), div(class = "differential-accessibility-table", table_output("atac_diffbind_table"))),
           tabPanel("PCA", br(), uiOutput("atac_diffbind_pca_ui")),
           tabPanel("Volcano", br(), uiOutput("atac_diffbind_volcano_ui"))
         ))
@@ -3944,7 +4027,7 @@ chip_results_explorer_ui <- function() {
       tabPanel("Differential Binding", br(), sidebarLayout(
         sidebarPanel(width = 2, uiOutput("atac_diffbind_dir_ui"), tags$hr(), helpText("Each comparison is stored and displayed independently.")),
         mainPanel(width = 10, tabsetPanel(
-          tabPanel("Results", br(), table_output("atac_diffbind_table")),
+          tabPanel("Results", br(), div(class = "differential-accessibility-table", table_output("atac_diffbind_table"))),
           tabPanel("PCA", br(), uiOutput("atac_diffbind_pca_ui")),
           tabPanel("Volcano", br(), uiOutput("atac_diffbind_volcano_ui"))
         ))
@@ -8136,6 +8219,15 @@ table.dataTable tbody td:first-child, table.dataTable thead th:first-child {
   min-width: 150px;
   max-width: 190px;
 }
+.differential-accessibility-table table.dataTable tbody td:first-child,
+.differential-accessibility-table table.dataTable thead th:first-child {
+  min-width: 260px !important;
+  max-width: none !important;
+  width: 260px !important;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: nowrap;
+}
 .native-results-host .qc-report-frame {
   min-width: 0 !important;
   width: 112% !important;
@@ -8412,6 +8504,18 @@ ui <- fluidPage(
           window.codespringIgvHandlerRegistered = true;
           Shiny.addCustomMessageHandler('codespring-igv-load', function(message) {
             cslLoadGenomeBrowser(message, 0);
+          });
+          Shiny.addCustomMessageHandler('codespring-igv-locus', function(message) {
+            var browser = window.codespringIgvBrowser;
+            var locus = message && message.locus ? String(message.locus) : '';
+            var status = document.getElementById('codespring_igv_status');
+            if (!browser || !locus) return;
+            if (status) status.textContent = 'Navigating to ' + locus + '…';
+            Promise.resolve(browser.search(locus)).then(function() {
+              if (status) status.textContent = 'Showing ' + locus + '.';
+            }).catch(function(error) {
+              if (status) status.textContent = 'Could not navigate to ' + locus + ': ' + (error && error.message ? error.message : String(error));
+            });
           });
         }
       });
@@ -10336,8 +10440,24 @@ server <- function(input, output, session) {
       available <- comparison_samples[comparison_samples %in% samples]
       selected <- intersect(as.character(input$genome_browser_samples %||% character(0)), available)
       if (!length(selected)) selected <- available
+      navigation <- genome_browser_comparison_navigation(comparison$id[[1]])
+      gene_choices <- c("Choose a gene..." = "", navigation$genes)
+      peak_choices <- c("Choose a differential peak..." = "", navigation$peaks)
+      selected_gene <- as.character(input$genome_browser_gene %||% "")
+      if (!selected_gene %in% unname(gene_choices)) selected_gene <- ""
+      selected_peak <- as.character(input$genome_browser_peak %||% "")
+      if (!selected_peak %in% unname(peak_choices)) selected_peak <- ""
       controls <- c(controls, list(
         selectInput("genome_browser_comparison", "Differential comparison", choices = comparison_choices, selected = comparison_id, selectize = FALSE),
+        tags$h5("Navigate to"),
+        if (length(navigation$genes)) selectizeInput(
+          "genome_browser_gene", "Gene", choices = gene_choices, selected = selected_gene,
+          options = list(placeholder = "Search differential-peak genes", maxOptions = 5000L)
+        ) else div(class = "muted small-note", "No annotated differential-peak genes are available yet."),
+        if (length(navigation$peaks)) selectizeInput(
+          "genome_browser_peak", "Differential peak", choices = peak_choices, selected = selected_peak,
+          options = list(placeholder = "Search intervals, Fold, p-value, or FDR", maxOptions = 5000L)
+        ) else div(class = "muted small-note", "No differential peak intervals are available yet."),
         selectizeInput(
           "genome_browser_samples", "Comparison samples", choices = available, selected = selected,
           multiple = TRUE, options = list(maxItems = 12L, plugins = list("remove_button"))
@@ -10368,6 +10488,24 @@ server <- function(input, output, session) {
     }
     do.call(tagList, controls)
   })
+  observeEvent(input$genome_browser_gene, {
+    gene <- trimws(as.character(input$genome_browser_gene %||% ""))
+    if (!nzchar(gene)) return(invisible(NULL))
+    updateTextInput(session, "genome_browser_locus", value = gene)
+    session$sendCustomMessage("codespring-igv-locus", list(locus = gene))
+    if (nzchar(as.character(input$genome_browser_peak %||% ""))) {
+      updateSelectizeInput(session, "genome_browser_peak", selected = "")
+    }
+  }, ignoreInit = TRUE)
+  observeEvent(input$genome_browser_peak, {
+    locus <- trimws(as.character(input$genome_browser_peak %||% ""))
+    if (!nzchar(locus)) return(invisible(NULL))
+    updateTextInput(session, "genome_browser_locus", value = locus)
+    session$sendCustomMessage("codespring-igv-locus", list(locus = locus))
+    if (nzchar(as.character(input$genome_browser_gene %||% ""))) {
+      updateSelectizeInput(session, "genome_browser_gene", selected = "")
+    }
+  }, ignoreInit = TRUE)
   send_genome_browser <- function() {
     p <- current_project()
     if (!is_atac_project(p) && !is_chip_project(p) && !is_cutrun_project(p)) return(invisible(NULL))
@@ -10485,7 +10623,7 @@ server <- function(input, output, session) {
     req(nzchar(path), path_is_within(path, root), diffbind_comparison_complete(path))
     path
   })
-  output$atac_diffbind_table <- render_csl_table({ files <- list.files(selected_atac_diffbind_dir(), pattern = "^DifferentialPeaks_.*\\.txt$", full.names = TRUE); req(length(files)); safe_read_table(files[[1]], 20000) }, page_length = 50, scroll_y = "600px")
+  output$atac_diffbind_table <- render_csl_table({ differential_accessibility_result_table(selected_atac_diffbind_dir(), 20000) }, page_length = 50, scroll_y = "600px")
   output$atac_diffbind_pca_ui <- renderUI({ image_or_file_ui(file.path(selected_atac_diffbind_dir(), "diffbind_pca_byNormCounts.png"), "620px") })
   output$atac_diffbind_volcano_ui <- renderUI({ image_or_file_ui(file.path(selected_atac_diffbind_dir(), "diffbind_volcano_byDiffPeaks.png"), "620px") })
   output$atac_file_ui <- renderUI({
