@@ -394,6 +394,14 @@ annotation_inputs <- app_env$peak_annotation_input_files(atac_project)
 assert(legacy_peak %in% annotation_inputs, "peak annotation discovers completed per-sample MACS2 peaks")
 annotation_root <- file.path(root, "peak_annotation")
 dir.create(annotation_root, recursive = TRUE)
+annotation_jobs <- data.frame(
+  step = c("Peak Annotation", "Peak Annotation"),
+  slurm_state = c("RUNNING", "FAILED"), stringsAsFactors = FALSE
+)
+assert(identical(app_env$peak_annotation_status(atac_project, annotation_jobs), "Active"), "an active annotation job is not hidden by a newer stale job record")
+writeLines("status\trunning", file.path(annotation_root, "_RUN_STARTED"))
+assert(identical(app_env$peak_annotation_status(atac_project, data.frame()), "Likely failed"), "orphaned annotation run marker reports an incomplete job")
+unlink(file.path(annotation_root, "_RUN_STARTED"))
 annotated_peak <- file.path(sample_dir, "A1_peaks_annotated.txt")
 writeLines("PeakID\tAnnotation\npeak1\tPromoter", annotated_peak)
 write.table(data.frame(

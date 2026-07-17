@@ -1451,13 +1451,24 @@ peak_annotation_result_files <- function(project) {
 peak_annotation_status <- function(project, jobs = NULL) {
   marker <- file.path(project$data_dir, "peak_annotation", "_COMPLETE")
   if (file.exists(marker) && file_size_for(marker) > 0) return("Complete")
+  running_marker <- file.path(project$data_dir, "peak_annotation", "_RUN_STARTED")
   if (is.null(jobs)) jobs <- job_history(project)
-  if (!NROW(jobs) || !"step" %in% names(jobs)) return("Not started")
-  hit <- jobs[canonical_job_step(jobs$step) == "Peak Annotation", , drop = FALSE]
+  hit <- if (NROW(jobs) && "step" %in% names(jobs)) {
+    jobs[canonical_job_step(jobs$step) == "Peak Annotation", , drop = FALSE]
+  } else data.frame()
+  if (NROW(hit) && "slurm_state" %in% names(hit)) {
+    states <- toupper(trimws(as.character(hit$slurm_state)))
+    if (any(states %in% toupper(active_slurm_states()))) return("Active")
+  }
+  live <- active_squeue_project_jobs(project)
+  if (NROW(live) && "slurm_job_name" %in% names(live)) {
+    live_names <- gsub("[^a-z0-9]+", "", tolower(as.character(live$slurm_job_name)))
+    if (any(grepl("peakannotation", live_names, fixed = TRUE))) return("Active")
+  }
+  if (file.exists(running_marker)) return("Likely failed")
   if (!NROW(hit)) return("Not started")
   latest <- hit[NROW(hit), , drop = FALSE]
   state <- toupper(as.character(latest$slurm_state %||% ""))
-  if (state %in% active_slurm_states() || state == "SUBMITTED") return("Active")
   if (grepl("CANCEL", state)) return("Cancelled")
   if (state %in% c("COMPLETED", "FAILED", "TIMEOUT", "NODE_FAIL", "OUT_OF_MEMORY", "PREEMPTED", "BOOT_FAIL")) return("Likely failed")
   "Not started"
