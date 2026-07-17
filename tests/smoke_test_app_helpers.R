@@ -258,6 +258,11 @@ for (ui_check in list(
 assert(grepl("Initial QC", chip_ui_text, fixed = TRUE) && grepl("Fragment Size", chip_ui_text, fixed = TRUE), "ChIP Results Explorer includes RNA-style QC navigation")
 assert(grepl("Signal Tracks", atac_ui_text, fixed = TRUE) && grepl("Signal Tracks", chip_ui_text, fixed = TRUE), "ATAC and ChIP Results Explorers expose signal-track navigation")
 assert(all(vapply(list(atac_ui_text, chip_ui_text, cutrun_ui_text), grepl, logical(1), pattern = "Genome Browser", fixed = TRUE)), "ATAC, ChIP, and CUT&RUN Results Explorers expose the embedded genome browser")
+atac_signal_position <- regexpr("Signal &amp; Peaks", atac_ui_text, fixed = TRUE)[[1]]
+atac_browser_position <- regexpr("Genome Browser", atac_ui_text, fixed = TRUE)[[1]]
+atac_diff_position <- regexpr("Differential Accessibility", atac_ui_text, fixed = TRUE)[[1]]
+assert(atac_signal_position > 0L && atac_browser_position > atac_signal_position && atac_diff_position > atac_browser_position, "ATAC Genome Browser is a main tab between Signal & Peaks and Differential Accessibility")
+assert(grepl("codespring-genome-browser-controls", atac_ui_text, fixed = TRUE), "genome-browser controls use an overflow-safe dropdown container")
 assert(all(vapply(list(atac_ui_text, chip_ui_text, cutrun_ui_text), grepl, logical(1), pattern = "Gene Annotation", fixed = TRUE)), "all peak Results Explorers expose gene annotations")
 assert(grepl("cutrun_file_sample_ui", cutrun_ui_text, fixed = TRUE), "CUT&RUN file explorer exposes a sample selector")
 assert(grepl("height:680px", app_env$app_css, fixed = TRUE), "fragment plots share a fixed display height")
@@ -369,6 +374,7 @@ writeLines(c(
 ), comparison_annotation)
 navigation <- app_env$genome_browser_comparison_navigation(comparison_dir)
 assert(all(c("GeneA", "GeneB") %in% unname(navigation$genes)), "genome browser offers annotated differential-peak genes")
+assert(identical(unname(navigation$genes), c("GeneA", "GeneB")), "genome-browser differential genes are sorted alphabetically")
 assert(length(navigation$peaks) == 2L && grepl("1. chr1:101-220", names(navigation$peaks)[[1]], fixed = TRUE), "genome browser offers ranked searchable differential-peak intervals")
 assert(identical(unname(navigation$peaks)[[1]], "chr1:101-220"), "selected differential peak inserts its exact genomic interval into the locus search")
 ranking_dir <- file.path(root, "diffbind", "ranking_test")
@@ -387,6 +393,8 @@ assert(grepl("1. chr2:20501-20550", names(ranked_navigation$peaks)[[1]], fixed =
 assert(length(ranked_navigation$genes) <= 200L && "Gene205" %in% unname(ranked_navigation$genes), "gene selector uses only top annotated DiffBind genes")
 differential_table <- app_env$differential_accessibility_result_table(comparison_dir)
 assert(identical(differential_table[["Genomic interval"]], c("chr1:101-220", "chr1:501-650")), "differential accessibility table includes complete genomic intervals")
+assert(identical(differential_table[["Gene Name"]], c("GeneA", "GeneB")), "differential accessibility table prefers the HOMER-annotated result and displays Gene Name")
+assert(all(c("Fold", "p.value", "FDR") %in% names(differential_table)), "annotated differential accessibility table retains expanded DiffBind statistics")
 chip_sheet_dir <- file.path(root, "manifest", "chip_diffbind", basename(comparison_dir))
 dir.create(chip_sheet_dir, recursive = TRUE, showWarnings = FALSE)
 comparison_samples <- data.frame(

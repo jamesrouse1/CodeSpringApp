@@ -3517,20 +3517,42 @@ genome_browser_comparison_catalog <- function(project) {
 }
 
 differential_accessibility_result_table <- function(result_dir, n = 20000) {
-  files <- if (dir.exists(result_dir)) list.files(result_dir, pattern = "^DifferentialPeaks_.*_ref\\.txt$", full.names = TRUE) else character(0)
+  if (!dir.exists(result_dir)) return(data.frame())
+  annotated_files <- sort(list.files(
+    result_dir,
+    pattern = "^DifferentialPeaks_.*_annotated_with_stats\\.txt$",
+    full.names = TRUE
+  ))
+  annotated_files <- annotated_files[file.exists(annotated_files) & vapply(annotated_files, file_size_for, numeric(1)) > 0]
+  raw_files <- sort(list.files(result_dir, pattern = "^DifferentialPeaks_.*_ref\\.txt$", full.names = TRUE))
+  raw_files <- raw_files[file.exists(raw_files) & vapply(raw_files, file_size_for, numeric(1)) > 0]
+  files <- c(annotated_files, raw_files)
   if (!length(files)) return(data.frame())
-  result <- safe_read_table(files[[1]], n)
+  result <- if (length(annotated_files)) safe_read_result_table(files[[1]], n) else safe_read_table(files[[1]], n)
   if (!NROW(result)) return(result)
-  chr_col <- intersect(c("seqnames", "chrom", "chr", "chromosome"), names(result))
+  peak_id_col <- names(result)[gsub("[^a-z0-9]+", "", tolower(names(result))) %in% c("peakid", "peak")]
+  interval <- rep(NA_character_, NROW(result))
+  if (length(peak_id_col)) {
+    candidate <- sub("\\|.*$", "", trimws(as.character(result[[peak_id_col[[1]]]])))
+    valid <- grepl("^[^:[:space:]]+:[0-9]+-[0-9]+$", candidate)
+    interval[valid] <- candidate[valid]
+  }
+  chr_col <- intersect(c("seqnames", "Chr", "chrom", "chr", "chromosome"), names(result))
   start_col <- intersect(c("start", "Start"), names(result))
   end_col <- intersect(c("end", "End"), names(result))
   if (length(chr_col) && length(start_col) && length(end_col)) {
-    interval <- paste0(
+    coordinate_interval <- paste0(
       as.character(result[[chr_col[[1]]]]), ":",
       format(suppressWarnings(as.numeric(result[[start_col[[1]]]])), scientific = FALSE, trim = TRUE), "-",
       format(suppressWarnings(as.numeric(result[[end_col[[1]]]])), scientific = FALSE, trim = TRUE)
     )
-    result <- data.frame(`Genomic interval` = interval, result, stringsAsFactors = FALSE, check.names = FALSE)
+    interval[is.na(interval) | !nzchar(interval)] <- coordinate_interval[is.na(interval) | !nzchar(interval)]
+  }
+  if (any(!is.na(interval) & nzchar(interval))) {
+    result[["Genomic interval"]] <- interval
+    gene_col <- names(result)[gsub("[^a-z0-9]+", "", tolower(names(result))) %in% c("genename", "genesymbol", "symbol")]
+    preferred <- c("Genomic interval", if (length(gene_col)) gene_col[[1]] else character(0))
+    result <- result[c(preferred, setdiff(names(result), preferred))]
   }
   result
 }
@@ -3708,7 +3730,8 @@ register_genome_browser_track <- function(session, project, path, index = 1L) {
 }
 
 genome_browser_ui <- function() {
-  br()
+  div(class = "codespring-genome-browser-controls",
+  br(),
   sidebarLayout(
     sidebarPanel(
       width = 3,
@@ -3723,7 +3746,7 @@ genome_browser_ui <- function() {
       div(id = "codespring_igv_status", class = "muted small-note", "Choose samples, then load the browser."),
       div(id = "codespring_igv_browser", class = "codespring-igv-browser")
     )
-  )
+  ))
 }
 
 peak_annotation_results_ui <- function() {
@@ -4022,9 +4045,9 @@ atac_results_explorer_ui <- function() {
         tabPanel("Signal Tracks", br(),
           div(class = "cutrun-section-heading", tags$h4("Genome-browser tracks"), tags$p("Per-sample bigWig and bedGraph files with their saved normalization.")),
           table_output("atac_signal_tracks")
-        ),
-        tabPanel("Genome Browser", genome_browser_ui())
+        )
       )),
+      tabPanel("Genome Browser", genome_browser_ui()),
       tabPanel("Differential Accessibility", br(), sidebarLayout(
         sidebarPanel(width = 2, uiOutput("atac_diffbind_dir_ui"), tags$hr(), helpText("Each comparison is stored and displayed independently.")),
         mainPanel(width = 10, tabsetPanel(
@@ -8342,6 +8365,19 @@ select.form-control {
   border: 1px solid #b9c9dc !important;
   box-shadow: 0 14px 30px rgba(20,38,64,.18) !important;
 }
+.codespring-genome-browser-controls,
+.codespring-genome-browser-controls .row,
+.codespring-genome-browser-controls .well,
+.codespring-genome-browser-controls .form-group {
+  overflow: visible !important;
+}
+.codespring-genome-browser-controls .selectize-control.dropdown-active,
+.codespring-genome-browser-controls .form-group:has(.selectize-control.dropdown-active) {
+  z-index: 100001 !important;
+}
+.codespring-genome-browser-controls .selectize-dropdown {
+  z-index: 100002 !important;
+}
 .selectize-dropdown-content {
   background: #ffffff !important;
   color: #132033 !important;
@@ -10543,15 +10579,15 @@ server <- function(input, output, session) {
         tags$h5("Navigate to"),
         if (length(navigation$genes)) selectizeInput(
           "genome_browser_gene", "Gene", choices = gene_choices, selected = selected_gene,
-          options = list(placeholder = "Search the DiffBind Gene Name column", maxOptions = 200L)
+          options = list(placeholder = "Search the DiffBind Gene Name column", maxOptions = 200L, dropdownParent = "body")
         ) else div(class = "muted small-note", "No Gene Name values were found in the annotated DiffBind results."),
         if (length(navigation$peaks)) selectizeInput(
           "genome_browser_peak", "Top 200 differential peaks", choices = peak_choices, selected = selected_peak,
-          options = list(placeholder = "Ranked by FDR, p-value, then absolute Fold", maxOptions = 200L)
+          options = list(placeholder = "Ranked by FDR, p-value, then absolute Fold", maxOptions = 200L, dropdownParent = "body")
         ) else div(class = "muted small-note", "No differential peak intervals are available yet."),
         selectizeInput(
           "genome_browser_samples", "Comparison samples", choices = available, selected = selected,
-          multiple = TRUE, options = list(maxItems = 12L, plugins = list("remove_button"))
+          multiple = TRUE, options = list(maxItems = 12L, plugins = list("remove_button"), dropdownParent = "body")
         ),
         checkboxInput(
           "genome_browser_shared_scale", "Use one y-axis scale for all signal tracks",
@@ -10574,7 +10610,7 @@ server <- function(input, output, session) {
       controls <- c(controls, list(
         selectizeInput(
           "genome_browser_samples", "Samples", choices = samples, selected = selected,
-          multiple = TRUE, options = list(maxItems = 12L, plugins = list("remove_button"))
+          multiple = TRUE, options = list(maxItems = 12L, plugins = list("remove_button"), dropdownParent = "body")
         ),
         checkboxInput(
           "genome_browser_show_peaks", "Include individual sample peak calls",
