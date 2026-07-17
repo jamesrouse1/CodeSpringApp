@@ -32,6 +32,54 @@ chip_project <- list(
 assert(identical(app_env$chip_control_sample_for(chip_project, "A1"), "I1"), "explicit ChIP control resolution")
 assert(nrow(app_env$chip_target_design(chip_project)) == 4L, "input rows excluded from ChIP targets")
 
+duplicate_design <- data.frame(
+  include = TRUE, sample = c("sample-A", "sample A"), cell_type = "", condition = c("A", "B"),
+  replicate = 1:2, filename = c("a.fastq.gz", "b.fastq.gz"), status = "", stringsAsFactors = FALSE
+)
+atac_design_project <- chip_project
+atac_design_project$analysis_key <- "atac"
+atac_design_project$analysis <- "ATAC-seq"
+duplicate_error <- tryCatch({
+  app_env$write_design_matrix(atac_design_project, duplicate_design, c("condition", "replicate"))
+  ""
+}, error = conditionMessage)
+assert(grepl("remain unique", duplicate_error), "filesystem-safe sample collisions rejected")
+
+blank_design <- duplicate_design[1, , drop = FALSE]
+blank_design$sample <- "sample1"
+blank_design$filename <- ""
+blank_error <- tryCatch({ app_env$write_design_matrix(atac_design_project, blank_design, c("condition", "replicate")); "" }, error = conditionMessage)
+assert(grepl("FASTQ filename", blank_error), "blank included FASTQ filenames rejected")
+
+valid_design <- duplicate_design[1, , drop = FALSE]
+valid_design$sample <- "sample1"
+saved_design <- app_env$write_design_matrix(atac_design_project, valid_design, c("condition", "replicate"))
+assert(file.exists(saved_design) && file.info(saved_design)$size > 0, "design matrix saved atomically")
+saved_table <- app_env$safe_read_table(saved_design)
+assert(all(c("cell_type", "condition", "replicate") %in% names(saved_table)), "required ATAC metadata columns preserved")
+
+unsafe_design <- valid_design
+unsafe_design$condition <- "A\tB"
+unsafe_error <- tryCatch({ app_env$write_design_matrix(atac_design_project, unsafe_design, c("condition", "replicate")); "" }, error = conditionMessage)
+assert(grepl("tabs or line breaks", unsafe_error), "tab characters rejected before TSV save")
+
+for (key in c("rna", "atac", "chip")) {
+  example <- app_env$example_dataset_paths(key)
+  example_design <- file.path(example$design_dir, "design_matrix.txt")
+  assert(dir.exists(example$fastq_dir) && file.exists(example_design), paste(key, "bundled example paths exist"))
+  table <- app_env$safe_read_table(example_design)
+  assert(NROW(table) > 0 && !anyDuplicated(table$sample), paste(key, "bundled example design has unique samples"))
+  reads <- trimws(unlist(strsplit(as.character(table$filename), "[;,]")))
+  read_paths <- file.path(example$fastq_dir, reads[nzchar(reads)])
+  assert(all(file.exists(read_paths)), paste(key, "bundled example FASTQs match the design"))
+  readable <- vapply(read_paths, function(path) {
+    connection <- gzfile(path, open = "rt")
+    on.exit(close(connection), add = TRUE)
+    length(readLines(connection, n = 4L, warn = FALSE)) == 4L
+  }, logical(1))
+  assert(all(readable), paste(key, "bundled example FASTQs are readable gzip data"))
+}
+
 atac_project <- chip_project
 atac_project$analysis_key <- "atac"
 atac_project$analysis <- "ATAC-seq"

@@ -1173,11 +1173,14 @@ write_design_matrix <- function(project, df, metadata_cols) {
   if (!"include" %in% names(df)) df$include <- TRUE
   metadata_cols <- unique(metadata_cols[nzchar(metadata_cols)])
   metadata_cols <- metadata_cols[!metadata_cols %in% c("sample", "filename", "include", "status")]
-  if (is_cutrun_project(project)) metadata_cols <- unique(c(default_metadata_cols(project), metadata_cols))
+  if (is_cutrun_project(project) || is_atac_project(project) || is_chip_project(project)) metadata_cols <- unique(c(default_metadata_cols(project), metadata_cols))
   if (!length(metadata_cols)) metadata_cols <- default_metadata_cols(project)
   df <- ensure_design_metadata_columns(df, metadata_cols)
   keep <- df[vapply(df$include, as_design_bool, logical(1)), , drop = FALSE]
   if (!NROW(keep)) stop("No samples are included.")
+  keep$filename <- trimws(as.character(keep$filename %||% ""))
+  blank_filename <- !nzchar(keep$filename)
+  if (any(blank_filename)) stop("Every included row needs a FASTQ filename. Missing for row(s): ", paste(which(blank_filename), collapse = ", "))
   blank_sample <- !nzchar(trimws(as.character(keep$sample %||% "")))
   if (any(blank_sample)) {
     keep$sample[blank_sample] <- vapply(as.character(keep$filename[blank_sample]), function(x) {
@@ -1186,6 +1189,10 @@ write_design_matrix <- function(project, df, metadata_cols) {
     }, character(1))
   }
   keep$sample <- clean_name(keep$sample)
+  duplicate_sample <- duplicated(keep$sample) | duplicated(keep$sample, fromLast = TRUE)
+  if (any(duplicate_sample)) stop("Sample names must remain unique after spaces and punctuation are made filesystem-safe. Conflicting ID(s): ", paste(unique(keep$sample[duplicate_sample]), collapse = ", "))
+  unsafe_cells <- vapply(keep, function(column) any(grepl("[\t\r\n]", as.character(column))), logical(1))
+  if (any(unsafe_cells)) stop("Design values cannot contain tabs or line breaks. Fix column(s): ", paste(names(keep)[unsafe_cells], collapse = ", "))
   if (is_cutrun_project(project)) {
     keep <- infer_cutrun_metadata(keep)
     allowed_classes <- c("tf_or_other", "histone_narrow", "histone_broad", "control")
@@ -1211,7 +1218,10 @@ write_design_matrix <- function(project, df, metadata_cols) {
   out <- results_design_matrix_path(project)
   dir.create(dirname(out), recursive = TRUE, showWarnings = FALSE)
   keep <- keep[, c("sample", metadata_cols, "filename"), drop = FALSE]
-  utils::write.table(keep, out, sep = "\t", row.names = FALSE, quote = FALSE)
+  tmp <- paste0(out, ".tmp.", Sys.getpid())
+  on.exit(unlink(tmp, force = TRUE), add = TRUE)
+  utils::write.table(keep, tmp, sep = "\t", row.names = FALSE, quote = FALSE)
+  if (!file.exists(tmp) || file_size_for(tmp) <= 0 || !file.rename(tmp, out)) stop("Could not atomically save the project design matrix: ", out)
   out
 }
 
