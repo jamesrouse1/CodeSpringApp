@@ -327,6 +327,69 @@ unlink(file.path(comparison_dir, "_RUN_STARTED"))
 writeLines("status\tcomplete", file.path(comparison_dir, "_COMPLETE"))
 assert(app_env$diffbind_comparison_complete(comparison_dir), "final DiffBind marker accepted")
 
+differential_bed <- file.path(comparison_dir, "DifferentialPeaks_B_vs_A_ref.with_stats.bed")
+writeLines(c("chr1\t100\t220\tpeak_1\t2.5", "chr1\t500\t650\tpeak_2\t-1.8"), differential_bed)
+chip_sheet_dir <- file.path(root, "manifest", "chip_diffbind", basename(comparison_dir))
+dir.create(chip_sheet_dir, recursive = TRUE, showWarnings = FALSE)
+comparison_samples <- data.frame(
+  SampleID = c("A1", "A2", "B1", "B2"), Condition = c("A", "A", "B", "B"), Replicate = c(1, 2, 1, 2),
+  bamReads = "synthetic.bam", Peaks = "synthetic.narrowPeak", PeakCaller = "narrowpeak", stringsAsFactors = FALSE
+)
+write.table(comparison_samples, file.path(chip_sheet_dir, "chip_diffbind_samples.tsv"), sep = "\t", row.names = FALSE, quote = FALSE)
+for (sample in c("A2", "B1", "B2")) {
+  sample_signal_dir <- file.path(root, "bowtie2", sample)
+  dir.create(sample_signal_dir, recursive = TRUE, showWarnings = FALSE)
+  writeBin(as.raw(seq_len(64)), file.path(sample_signal_dir, paste0(sample, "Aligned.sortedByCoord_removeDup.out.bw")))
+}
+comparison_catalog <- app_env$genome_browser_comparison_catalog(chip_project)
+assert(NROW(comparison_catalog) == 1L, "genome browser discovers a completed differential comparison")
+assert(identical(comparison_catalog$samples[[1]], c("A1", "A2", "B1", "B2")), "comparison browser retains the exact sample-sheet order")
+assert(identical(comparison_catalog$differential_bed[[1]], normalizePath(differential_bed)), "comparison browser selects the differential BED annotation")
+comparison_tracks <- app_env$genome_browser_preferred_signal_rows(
+  chip_project, app_env$genome_browser_track_catalog(chip_project),
+  comparison_catalog$samples[[1]], comparison_catalog$sample_metadata[[1]]
+)
+assert(NROW(comparison_tracks) == 4L && identical(comparison_tracks$sample, c("A1", "A2", "B1", "B2")), "comparison browser loads one bigWig per sample in sample-sheet order")
+
+cutrun_comparison_dir <- file.path(root, "cutrun_diffbind", "Creb", "B_vs_A")
+dir.create(cutrun_comparison_dir, recursive = TRUE, showWarnings = FALSE)
+writeLines("chr1\t100\t220\tpeak_1\t2.5", file.path(cutrun_comparison_dir, "significant_differential_peaks.bed"))
+comparison_samples$normalization_mode <- "spikein"
+write.table(comparison_samples, file.path(cutrun_comparison_dir, "diffbind_sample_sheet.tsv"), sep = "\t", row.names = FALSE, quote = FALSE)
+cutrun_browser_project <- chip_project
+cutrun_browser_project$analysis_key <- "cutrun"
+cutrun_browser_project$analysis <- "CUT&RUN"
+cutrun_comparisons <- app_env$genome_browser_comparison_catalog(cutrun_browser_project)
+assert(NROW(cutrun_comparisons) == 1L && basename(cutrun_comparisons$id[[1]]) == "B_vs_A", "genome browser discovers nested CUT&RUN differential comparisons")
+
+atac_browser_root <- file.path(root, "atac_browser_case")
+atac_browser_samples <- paste0(rep(c("Control", "Treated"), each = 3), rep(1:3, 2))
+atac_browser_design <- data.frame(
+  sample = atac_browser_samples, condition = rep(c("Control", "Treated"), each = 3), replicate = rep(1:3, 2),
+  filename = paste0(atac_browser_samples, "_R1.fastq.gz"), stringsAsFactors = FALSE
+)
+dir.create(atac_browser_root, recursive = TRUE, showWarnings = FALSE)
+atac_browser_design_path <- file.path(atac_browser_root, "design_matrix.txt")
+write.table(atac_browser_design, atac_browser_design_path, sep = "\t", row.names = FALSE, quote = FALSE)
+atac_manifest_dir <- file.path(atac_browser_root, "manifest", "atac_diffbind", "all_samples", "condition")
+dir.create(atac_manifest_dir, recursive = TRUE, showWarnings = FALSE)
+write.table(atac_browser_design, file.path(atac_manifest_dir, "design_matrix.txt"), sep = "\t", row.names = FALSE, quote = FALSE)
+atac_comparison_dir <- file.path(atac_browser_root, "diffbind", "Treated_vs_Control")
+dir.create(atac_comparison_dir, recursive = TRUE, showWarnings = FALSE)
+writeLines("chr1\t200\t320\tpeak_1\t3", file.path(atac_comparison_dir, "DifferentialPeaks_Treated_vs_Control_ref.with_stats.bed"))
+for (sample in atac_browser_samples) {
+  sample_signal_dir <- file.path(atac_browser_root, "bowtie2", sample)
+  dir.create(sample_signal_dir, recursive = TRUE, showWarnings = FALSE)
+  writeBin(as.raw(seq_len(64)), file.path(sample_signal_dir, paste0(sample, "Aligned.sortedByCoord_removeDup.out.bw")))
+}
+atac_browser_project <- list(
+  id = "atac-browser", name = "atac-browser", analysis_key = "atac", analysis = "ATAC-seq",
+  design_matrix_path = atac_browser_design_path, data_dir = atac_browser_root, results_root = root,
+  fastq_dir = atac_browser_root, fastq_dirs = atac_browser_root, paired_end = TRUE, genome = "mouse"
+)
+atac_comparisons <- app_env$genome_browser_comparison_catalog(atac_browser_project)
+assert(NROW(atac_comparisons) == 1L && identical(atac_comparisons$samples[[1]], atac_browser_samples), "existing ATAC comparisons recover all six samples from the saved run manifest")
+
 annotation_inputs <- app_env$peak_annotation_input_files(atac_project)
 assert(legacy_peak %in% annotation_inputs, "peak annotation discovers completed per-sample MACS2 peaks")
 annotation_root <- file.path(root, "peak_annotation")

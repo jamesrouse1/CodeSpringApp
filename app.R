@@ -3337,6 +3337,145 @@ genome_browser_track_catalog <- function(project) {
   catalog
 }
 
+genome_browser_differential_bed <- function(project, result_dir) {
+  if (!dir.exists(result_dir)) return("")
+  candidates <- if (is_cutrun_project(project)) {
+    c(
+      file.path(result_dir, "significant_differential_peaks.bed"),
+      list.files(result_dir, pattern = "differential.*\\.bed$", full.names = TRUE, ignore.case = TRUE)
+    )
+  } else {
+    list.files(result_dir, pattern = "^DifferentialPeaks_.*\\.with_stats\\.bed$", full.names = TRUE)
+  }
+  candidates <- unique(candidates[file.exists(candidates) & vapply(candidates, file_size_for, numeric(1)) > 0])
+  if (length(candidates)) normalizePath(candidates[[1]], winslash = "/", mustWork = TRUE) else ""
+}
+
+normalize_genome_browser_sample_sheet <- function(sheet) {
+  if (!NROW(sheet)) return(data.frame())
+  sample_col <- intersect(c("SampleID", "sample", "Sample"), names(sheet))
+  condition_col <- intersect(c("Condition", "condition", "treatment", "Treatment"), names(sheet))
+  replicate_col <- intersect(c("Replicate", "replicate"), names(sheet))
+  normalization_col <- intersect(c("normalization_mode", "Normalization"), names(sheet))
+  if (!length(sample_col)) return(data.frame())
+  samples <- trimws(as.character(sheet[[sample_col[[1]]]]))
+  keep <- nzchar(samples) & !duplicated(samples)
+  data.frame(
+    sample = samples[keep],
+    condition = if (length(condition_col)) trimws(as.character(sheet[[condition_col[[1]]]]))[keep] else "",
+    replicate = if (length(replicate_col)) trimws(as.character(sheet[[replicate_col[[1]]]]))[keep] else "",
+    normalization_mode = if (length(normalization_col)) trimws(as.character(sheet[[normalization_col[[1]]]]))[keep] else "",
+    stringsAsFactors = FALSE,
+    check.names = FALSE
+  )
+}
+
+genome_browser_diffbind_labels <- function(result_dir) {
+  files <- list.files(result_dir, pattern = "^DifferentialPeaks_.*(?:\\.with_stats\\.bed|\\.txt)$", full.names = FALSE)
+  if (!length(files)) return(c(comparison = "", reference = ""))
+  stem <- sub("(?:\\.with_stats\\.bed|\\.txt)$", "", files[[1]])
+  match <- regmatches(stem, regexec("^DifferentialPeaks_(.*)_vs_(.*)_ref$", stem))[[1]]
+  if (length(match) == 3L) c(comparison = match[[2]], reference = match[[3]]) else c(comparison = "", reference = "")
+}
+
+genome_browser_atac_manifest_sheet <- function(project, result_dir) {
+  root <- file.path(project$data_dir, "manifest", "atac_diffbind")
+  files <- if (dir.exists(root)) list.files(root, pattern = "^design_matrix\\.txt$", recursive = TRUE, full.names = TRUE) else character(0)
+  if (!length(files)) return(data.frame())
+  labels <- genome_browser_diffbind_labels(result_dir)
+  has_labels <- all(nzchar(unname(labels)))
+  slug <- clean_name(basename(result_dir), "comparison")
+  candidates <- list()
+  for (path in files) {
+    sheet <- safe_read_table(path)
+    if (!NROW(sheet) || !"sample" %in% names(sheet)) next
+    compare_cols <- setdiff(names(sheet), c("sample", "filename", "include", "status"))
+    for (column in compare_cols) {
+      values <- trimws(as.character(sheet[[column]]))
+      value_keys <- clean_name(values, "condition")
+      wanted <- clean_name(unname(labels), "condition")
+      if (has_labels && !all(wanted %in% value_keys)) next
+      keep <- if (has_labels) value_keys %in% wanted else rep(TRUE, NROW(sheet))
+      normalized <- normalize_genome_browser_sample_sheet(data.frame(
+        SampleID = sheet$sample[keep], Condition = values[keep], stringsAsFactors = FALSE
+      ))
+      if (!NROW(normalized)) next
+      scope <- basename(dirname(dirname(path)))
+      tokens <- strsplit(clean_name(scope, "scope"), "_", fixed = TRUE)[[1]]
+      tokens <- tokens[nchar(tokens) >= 3L & !tokens %in% c("all", "samples", "cell", "type")]
+      scope_score <- sum(vapply(tokens, function(token) grepl(token, slug, fixed = TRUE), logical(1)))
+      candidates[[length(candidates) + 1L]] <- list(sheet = normalized, score = scope_score, n = NROW(normalized))
+    }
+  }
+  if (!length(candidates)) return(data.frame())
+  scores <- vapply(candidates, `[[`, numeric(1), "score")
+  sizes <- vapply(candidates, `[[`, numeric(1), "n")
+  candidates[[order(-scores, sizes)[[1]]]]$sheet
+}
+
+genome_browser_comparison_sheet <- function(project, result_dir) {
+  direct <- file.path(result_dir, "diffbind_sample_sheet.tsv")
+  marker <- file.path(result_dir, "_DIFFBIND_COMPLETE")
+  recorded <- if (file.exists(marker)) metric_file_to_named_list(marker)$sample_sheet %||% "" else ""
+  chip_manifest <- file.path(project$data_dir, "manifest", "chip_diffbind", basename(result_dir), "chip_diffbind_samples.tsv")
+  candidates <- unique(c(direct, recorded, chip_manifest))
+  candidates <- candidates[nzchar(candidates) & file.exists(candidates) & vapply(candidates, file_size_for, numeric(1)) > 0]
+  if (length(candidates)) {
+    sheet <- normalize_genome_browser_sample_sheet(safe_read_table(candidates[[1]]))
+    if (NROW(sheet)) return(sheet)
+  }
+  if (is_atac_project(project)) return(genome_browser_atac_manifest_sheet(project, result_dir))
+  data.frame()
+}
+
+genome_browser_comparison_catalog <- function(project) {
+  root <- file.path(project$data_dir, if (is_cutrun_project(project)) "cutrun_diffbind" else "diffbind")
+  if (!dir.exists(root)) return(data.frame())
+  dirs <- list.dirs(root, recursive = is_cutrun_project(project), full.names = TRUE)
+  rows <- lapply(sort(dirs), function(result_dir) {
+    bed <- genome_browser_differential_bed(project, result_dir)
+    if (!nzchar(bed)) return(NULL)
+    sheet <- genome_browser_comparison_sheet(project, result_dir)
+    if (!NROW(sheet)) return(NULL)
+    sheet <- sheet[sheet$sample %in% project_samples(project), , drop = FALSE]
+    if (!NROW(sheet)) return(NULL)
+    conditions <- unique(sheet$condition[nzchar(sheet$condition)])
+    label <- if (length(conditions) >= 2L) paste(conditions, collapse = " vs ") else gsub("__", " — ", basename(result_dir), fixed = TRUE)
+    data.frame(
+      id = normalizePath(result_dir, winslash = "/", mustWork = TRUE),
+      label = label,
+      differential_bed = bed,
+      samples = I(list(as.character(sheet$sample))),
+      sample_metadata = I(list(sheet)),
+      stringsAsFactors = FALSE,
+      check.names = FALSE
+    )
+  })
+  rows <- Filter(Negate(is.null), rows)
+  if (length(rows)) do.call(rbind, rows) else data.frame()
+}
+
+genome_browser_preferred_signal_rows <- function(project, catalog, samples, metadata = data.frame()) {
+  signal <- catalog[catalog$kind == "signal" & catalog$sample %in% samples, , drop = FALSE]
+  if (!NROW(signal)) return(signal)
+  rows <- lapply(samples, function(sample) {
+    hit <- signal[signal$sample == sample, , drop = FALSE]
+    if (!NROW(hit)) return(NULL)
+    requested_norm <- if (NROW(metadata) && sample %in% metadata$sample) {
+      metadata$normalization_mode[match(sample, metadata$sample)] %||% ""
+    } else ""
+    name <- tolower(basename(hit$path))
+    score <- rep(0, NROW(hit))
+    if (is_cutrun_project(project) && identical(tolower(requested_norm), "spikein")) score <- score + 100L * grepl("spikein", name)
+    if (is_cutrun_project(project) && !identical(tolower(requested_norm), "spikein")) score <- score + 80L * grepl("raw|cpm", name)
+    if (!is_cutrun_project(project)) score <- score + 100L * grepl("removedup|cpm", name)
+    score <- score + 10L * grepl("\\.(bw|bigwig)$", name)
+    hit[order(-score, hit$path)[[1]], , drop = FALSE]
+  })
+  rows <- Filter(Negate(is.null), rows)
+  if (length(rows)) do.call(rbind, rows) else signal[0, , drop = FALSE]
+}
+
 genome_browser_default_locus <- function(project) {
   if (identical(genome_species(project), "human")) "chr1:1,000,000-2,000,000" else "chr1:3,000,000-4,000,000"
 }
@@ -3408,10 +3547,9 @@ genome_browser_ui <- function() {
       width = 3,
       uiOutput("genome_browser_controls_ui"),
       textInput("genome_browser_locus", "Starting locus", value = "", placeholder = "Gene or chr:start-end"),
-      checkboxInput("genome_browser_show_peaks", "Include peak calls", value = TRUE),
       actionButton("load_genome_browser", "Load selected tracks", class = "btn-primary"),
       tags$hr(),
-      helpText("Select up to eight samples. The browser loads their bigWig signal and optional peak calls from this project only.")
+      helpText("Comparison mode loads one bigWig per selected sample and places the differential-peak BED at the bottom. Manual mode remains available for custom track combinations.")
     ),
     mainPanel(
       width = 9,
@@ -10142,15 +10280,56 @@ server <- function(input, output, session) {
     p <- current_project()
     catalog <- genome_browser_track_catalog(p)
     if (!NROW(catalog)) return(div(class = "empty-box", "No bigWig signal or peak files are available yet."))
+    comparisons <- genome_browser_comparison_catalog(p)
+    mode_choices <- if (NROW(comparisons)) {
+      c("Differential comparison" = "comparison", "Manual samples" = "manual")
+    } else {
+      c("Manual samples" = "manual")
+    }
+    mode <- selected_choice(input$genome_browser_mode, mode_choices, if (NROW(comparisons)) "comparison" else "manual")
     samples <- unique(as.character(catalog$sample))
     design_order <- project_samples(p)
     samples <- unique(c(design_order[design_order %in% samples], sort(setdiff(samples, design_order))))
-    selected <- intersect(as.character(input$genome_browser_samples %||% character(0)), samples)
-    if (!length(selected)) selected <- utils::head(samples, 2L)
-    selectizeInput(
-      "genome_browser_samples", "Samples", choices = samples, selected = selected,
-      multiple = TRUE, options = list(maxItems = 8L, plugins = list("remove_button"))
-    )
+    controls <- list(selectInput("genome_browser_mode", "Track selection", choices = mode_choices, selected = mode, selectize = FALSE))
+    if (identical(mode, "comparison") && NROW(comparisons)) {
+      comparison_choices <- stats::setNames(comparisons$id, make.unique(comparisons$label, sep = " — "))
+      comparison_id <- selected_choice(input$genome_browser_comparison, comparison_choices, comparisons$id[[1]])
+      comparison <- comparisons[match(comparison_id, comparisons$id), , drop = FALSE]
+      comparison_samples <- comparison$samples[[1]]
+      available <- comparison_samples[comparison_samples %in% samples]
+      selected <- intersect(as.character(input$genome_browser_samples %||% character(0)), available)
+      if (!length(selected)) selected <- available
+      controls <- c(controls, list(
+        selectInput("genome_browser_comparison", "Differential comparison", choices = comparison_choices, selected = comparison_id, selectize = FALSE),
+        selectizeInput(
+          "genome_browser_samples", "Comparison samples", choices = available, selected = selected,
+          multiple = TRUE, options = list(maxItems = 12L, plugins = list("remove_button"))
+        ),
+        checkboxInput(
+          "genome_browser_show_peaks", "Include individual sample peak calls",
+          value = if (is.null(input$genome_browser_show_peaks)) FALSE else isTRUE(input$genome_browser_show_peaks)
+        ),
+        checkboxInput(
+          "genome_browser_show_differential_peaks", "Show differential peaks as bottom track",
+          value = if (is.null(input$genome_browser_show_differential_peaks)) TRUE else isTRUE(input$genome_browser_show_differential_peaks)
+        ),
+        div(class = "muted small-note", paste("Differential BED:", basename(comparison$differential_bed[[1]])))
+      ))
+    } else {
+      selected <- intersect(as.character(input$genome_browser_samples %||% character(0)), samples)
+      if (!length(selected)) selected <- utils::head(samples, 2L)
+      controls <- c(controls, list(
+        selectizeInput(
+          "genome_browser_samples", "Samples", choices = samples, selected = selected,
+          multiple = TRUE, options = list(maxItems = 12L, plugins = list("remove_button"))
+        ),
+        checkboxInput(
+          "genome_browser_show_peaks", "Include individual sample peak calls",
+          value = if (is.null(input$genome_browser_show_peaks)) TRUE else isTRUE(input$genome_browser_show_peaks)
+        )
+      ))
+    }
+    do.call(tagList, controls)
   })
   send_genome_browser <- function() {
     p <- current_project()
@@ -10164,11 +10343,54 @@ server <- function(input, output, session) {
       ))
       return(invisible(NULL))
     }
-    selected_samples <- intersect(as.character(input$genome_browser_samples %||% character(0)), unique(catalog$sample))
-    if (!length(selected_samples)) selected_samples <- utils::head(unique(catalog$sample), 2L)
-    tracks <- catalog[catalog$sample %in% selected_samples, , drop = FALSE]
-    if (!isTRUE(input$genome_browser_show_peaks)) tracks <- tracks[tracks$kind == "signal", , drop = FALSE]
-    tracks <- tracks[order(match(tracks$sample, selected_samples), match(tracks$kind, c("signal", "peaks")), tracks$label), , drop = FALSE]
+    comparisons <- genome_browser_comparison_catalog(p)
+    browser_mode <- selected_choice(
+      input$genome_browser_mode,
+      if (NROW(comparisons)) c("comparison", "manual") else "manual",
+      if (NROW(comparisons)) "comparison" else "manual"
+    )
+    comparison_mode <- identical(browser_mode, "comparison") && NROW(comparisons)
+    comparison_label <- ""
+    differential_loaded <- FALSE
+    if (comparison_mode) {
+      comparison_id <- selected_choice(input$genome_browser_comparison, comparisons$id, comparisons$id[[1]])
+      comparison <- comparisons[match(comparison_id, comparisons$id), , drop = FALSE]
+      allowed_samples <- comparison$samples[[1]]
+      selected_samples <- intersect(as.character(input$genome_browser_samples %||% character(0)), allowed_samples)
+      if (!length(selected_samples)) selected_samples <- allowed_samples
+      metadata <- comparison$sample_metadata[[1]]
+      tracks <- genome_browser_preferred_signal_rows(p, catalog, selected_samples, metadata)
+      if (NROW(tracks)) {
+        conditions <- metadata$condition[match(tracks$sample, metadata$sample)]
+        conditions[is.na(conditions)] <- ""
+        tracks$label <- ifelse(
+          nzchar(conditions),
+          paste(conditions, tracks$sample, "signal", sep = " — "),
+          paste(tracks$sample, "signal", sep = " — ")
+        )
+      }
+      if (isTRUE(input$genome_browser_show_peaks)) {
+        sample_peaks <- catalog[catalog$kind == "peaks" & catalog$sample %in% selected_samples, , drop = FALSE]
+        sample_peaks <- sample_peaks[order(match(sample_peaks$sample, selected_samples), sample_peaks$label), , drop = FALSE]
+        tracks <- rbind(tracks, sample_peaks)
+      }
+      if (isTRUE(input$genome_browser_show_differential_peaks)) {
+        differential <- data.frame(
+          sample = "__differential__", kind = "differential", format = "bed",
+          label = paste(comparison$label[[1]], "differential peaks", sep = " — "),
+          path = comparison$differential_bed[[1]], stringsAsFactors = FALSE, check.names = FALSE
+        )
+        tracks <- rbind(tracks, differential)
+        differential_loaded <- TRUE
+      }
+      comparison_label <- comparison$label[[1]]
+    } else {
+      selected_samples <- intersect(as.character(input$genome_browser_samples %||% character(0)), unique(catalog$sample))
+      if (!length(selected_samples)) selected_samples <- utils::head(unique(catalog$sample), 2L)
+      tracks <- catalog[catalog$sample %in% selected_samples, , drop = FALSE]
+      if (!isTRUE(input$genome_browser_show_peaks)) tracks <- tracks[tracks$kind == "signal", , drop = FALSE]
+      tracks <- tracks[order(match(tracks$sample, selected_samples), match(tracks$kind, c("signal", "peaks")), tracks$label), , drop = FALSE]
+    }
     truncated <- NROW(tracks) > 32L
     if (truncated) tracks <- utils::head(tracks, 32L)
     palette <- c("#2563eb", "#dc2626", "#059669", "#7c3aed", "#d97706", "#0891b2", "#be185d", "#4d7c0f")
@@ -10176,9 +10398,12 @@ server <- function(input, output, session) {
     configs <- lapply(seq_len(NROW(tracks)), function(i) {
       row <- tracks[i, , drop = FALSE]
       url <- register_genome_browser_track(session, p, row$path[[1]], i)
-      base <- list(name = row$label[[1]], url = url, format = row$format[[1]], color = unname(sample_colors[[row$sample[[1]]]]))
+      color <- if (identical(row$kind[[1]], "differential")) "#6d28d9" else unname(sample_colors[[row$sample[[1]]]])
+      base <- list(name = row$label[[1]], url = url, format = row$format[[1]], color = color)
       if (identical(row$kind[[1]], "signal")) {
         c(base, list(type = "wig", autoscale = TRUE, height = 110L))
+      } else if (identical(row$kind[[1]], "differential")) {
+        c(base, list(type = "annotation", displayMode = "EXPANDED", indexed = FALSE, height = 120L))
       } else {
         c(base, list(type = "annotation", displayMode = "EXPANDED", indexed = FALSE, height = 90L))
       }
@@ -10187,8 +10412,12 @@ server <- function(input, output, session) {
     if (!nzchar(locus)) locus <- genome_browser_default_locus(p)
     summary <- paste0(
       "Loaded ", length(configs), " track", if (length(configs) == 1L) "" else "s",
-      " for ", length(unique(tracks$sample)), " sample", if (length(unique(tracks$sample)) == 1L) "" else "s",
+      " for ", length(selected_samples), " sample", if (length(selected_samples) == 1L) "" else "s",
       " using ", genome_browser_reference(p), ".",
+      if (comparison_mode) paste0(
+        " Comparison: ", comparison_label, ".",
+        if (differential_loaded) " Differential peaks are the bottom track." else ""
+      ) else "",
       if (truncated) " Showing the first 32 matching tracks." else ""
     )
     session$sendCustomMessage("codespring-igv-load", list(
