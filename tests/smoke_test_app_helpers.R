@@ -21,6 +21,12 @@ assert(any(grepl("codespringIgvLoadPromise", runtime_text, fixed = TRUE)), "IGV 
 assert(grepl("comparison_default_locus", server_source, fixed = TRUE) && grepl("locus_override = top_peak", server_source, fixed = TRUE), "each differential comparison defaults IGV to its most significant ranked peak")
 assert(app_env$path_is_within(app_env$APP_HOME, app_env$CURRENT_HOME), "private app state is derived from the effective Unix user's home")
 assert(identical(app_env$DEFAULT_RESULTS_ROOT, normalizePath(file.path(app_env$CURRENT_HOME, "csl_results"), winslash = "/", mustWork = FALSE)), "default results root is derived from the effective Unix user's home")
+assert(identical(unname(app_env$analysis_choices()), c("RNA-seq", "ATAC-seq", "CUT&RUN", "ChIP-seq")), "all analysis selectors use one canonical order and spelling")
+for (key in c("rna", "atac", "cutrun", "chip")) {
+  tabs <- app_env$results_explorer_tabs(key)
+  assert(identical(tabs[[1]], "Overview") && identical(tail(tabs, 1), "Files") && "QC" %in% tabs, paste(key, "follows the shared Results Explorer navigation contract"))
+  assert(nzchar(app_env$analysis_description(key)), paste(key, "has a setup description"))
+}
 assert(app_env$is_codespring_process_command("Rscript -e shiny::runApp('/home/user/CodeSpringWeb', port=8601)"), "CodeSpringApp process command recognized")
 assert(!app_env$is_codespring_process_command("Rscript unrelated_analysis.R"), "unrelated Rscript process is not treated as CodeSpringApp")
 assert(!app_env$is_codespring_process_command("Rscript -e shiny::runApp('/home/user/another_app')"), "unrelated Shiny app is not treated as CodeSpringApp")
@@ -259,6 +265,7 @@ for (ui_check in list(
   assert(grepl("Overview", ui_check, fixed = TRUE) && grepl("QC", ui_check, fixed = TRUE) && grepl("Files", ui_check, fixed = TRUE), "custom Results Explorer exposes the standard navigation")
   assert(grepl("Signal &amp; Peaks", ui_check, fixed = TRUE) || grepl("Signal & Peaks", ui_check, fixed = TRUE), "custom Results Explorer exposes standardized signal and peak navigation")
 }
+assert(all(vapply(list(atac_ui_text, chip_ui_text), function(x) grepl('col-sm-3', x, fixed = TRUE) && grepl('col-sm-9', x, fixed = TRUE), logical(1))), "ATAC and ChIP use the same 3:9 control/content layout as CUT&RUN")
 assert(grepl("Initial QC", chip_ui_text, fixed = TRUE) && grepl("Fragment Size", chip_ui_text, fixed = TRUE), "ChIP Results Explorer includes RNA-style QC navigation")
 assert(grepl("Signal Tracks", atac_ui_text, fixed = TRUE) && grepl("Signal Tracks", chip_ui_text, fixed = TRUE), "ATAC and ChIP Results Explorers expose signal-track navigation")
 assert(all(vapply(list(atac_ui_text, chip_ui_text, cutrun_ui_text), grepl, logical(1), pattern = "Genome Browser", fixed = TRUE)), "ATAC, ChIP, and CUT&RUN Results Explorers expose the embedded genome browser")
@@ -288,7 +295,11 @@ assert(grepl("gencode.vM39.primary_assembly.annotation.gtf", rna_config_text, fi
 rna_viewer <- app_env$load_native_rnaseq_viewer(rna_project)
 app_env$APP_HOME <- old_app_home
 assert(inherits(rna_viewer$ui, "shiny.tag") && is.function(rna_viewer$server), "RNA Results Explorer loads against a synthetic project")
-assert(grepl("RNA-Seq Results Explorer", as.character(rna_viewer$ui), fixed = TRUE), "RNA Results Explorer branded UI is present")
+rna_ui_text <- as.character(rna_viewer$ui)
+assert(grepl("RNA-seq Results Explorer", rna_ui_text, fixed = TRUE), "RNA Results Explorer uses the canonical analysis label")
+assert(grepl("Overview", rna_ui_text, fixed = TRUE) && grepl("QC", rna_ui_text, fixed = TRUE) && grepl("Files", rna_ui_text, fixed = TRUE), "RNA Results Explorer now follows the shared navigation contract")
+assert(grepl("Pipeline status", rna_ui_text, fixed = TRUE) && grepl("Design matrix", rna_ui_text, fixed = TRUE), "RNA overview exposes the shared pipeline and design summaries")
+assert(grepl("rna_file_category", rna_ui_text, fixed = TRUE), "RNA Files tab exposes a categorized project file catalog")
 
 fake_jobs <- data.frame(
   step = c("Bowtie2", "Bowtie2", "Bowtie2", "Bowtie2", "FastQC"),

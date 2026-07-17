@@ -409,6 +409,20 @@ cleanup_previous_shiny_processes <- function() {
   invisible(killed)
 }
 
+ANALYSIS_CATALOG <- data.frame(
+  key = c("rna", "atac", "cutrun", "chip"),
+  label = c("RNA-seq", "ATAC-seq", "CUT&RUN", "ChIP-seq"),
+  description = c(
+    "Gene expression, transcript quantification, differential expression, and pathway analysis",
+    "Chromatin accessibility, signal tracks, peak calling, and differential accessibility",
+    "Targeted chromatin profiling, spike-in-aware signal, peak QC, and differential binding",
+    "Matched-input chromatin profiling, signal tracks, peak calling, and differential binding"
+  ),
+  stringsAsFactors = FALSE
+)
+
+analysis_choices <- function() stats::setNames(ANALYSIS_CATALOG$label, ANALYSIS_CATALOG$label)
+
 analysis_label <- function(x) {
   x <- tolower(as.character(x %||% "rna"))
   if (grepl("cut.?run|cutandrun", x)) return("CUT&RUN")
@@ -423,6 +437,21 @@ analysis_key <- function(x) {
   if (grepl("atac", x)) return("atac")
   if (grepl("chip", x)) return("chip")
   "rna"
+}
+
+analysis_description <- function(x) {
+  hit <- match(analysis_key(x), ANALYSIS_CATALOG$key)
+  ANALYSIS_CATALOG$description[[hit]]
+}
+
+results_explorer_tabs <- function(x) {
+  switch(
+    analysis_key(x),
+    rna = c("Overview", "QC", "Counts", "Differential Expression", "Plots", "GSEA", "Files"),
+    atac = c("Overview", "QC", "Signal & Peaks", "Genome Browser", "Differential Accessibility", "Files"),
+    cutrun = c("Overview", "QC", "Signal & Peaks", "Differential Binding", "Files"),
+    chip = c("Overview", "QC", "Signal & Peaks", "Differential Binding", "Files")
+  )
 }
 
 analysis_notebook_dir <- function(key) {
@@ -4056,8 +4085,8 @@ atac_results_explorer_ui <- function() {
       )),
       tabPanel("QC", br(), tabsetPanel(id = "atac_qc_tabs",
         tabPanel("Initial QC", br(), sidebarLayout(
-          sidebarPanel(width = 2, uiOutput("atac_qc_sample_control"), uiOutput("atac_qc_mode_control"), tags$hr(), helpText("FastQC and FastQ Screen reports for raw or cutadapt-trimmed reads.")),
-          mainPanel(width = 10, uiOutput("atac_qc_status_ui"), tabsetPanel(
+          sidebarPanel(width = 3, uiOutput("atac_qc_sample_control"), uiOutput("atac_qc_mode_control"), tags$hr(), helpText("FastQC and FastQ Screen reports for raw or cutadapt-trimmed reads.")),
+          mainPanel(width = 9, uiOutput("atac_qc_status_ui"), tabsetPanel(
             tabPanel("R1 FastQC", uiOutput("atac_r1_fastqc_ui")),
             tabPanel("R1 Screen", uiOutput("atac_r1_screen_ui")),
             tabPanel("R2 FastQC", uiOutput("atac_r2_fastqc_ui")),
@@ -4069,8 +4098,8 @@ atac_results_explorer_ui <- function() {
       )),
       tabPanel("Signal & Peaks", br(), tabsetPanel(id = "atac_signal_peak_tabs",
         tabPanel("Peak Calls", br(), sidebarLayout(
-          sidebarPanel(width = 2, uiOutput("atac_peak_file_ui"), tags$hr(), helpText("Inspect MACS2 ATAC peak calls and the corresponding TSS-centered signal heatmap.")),
-          mainPanel(width = 10, tabsetPanel(
+          sidebarPanel(width = 3, uiOutput("atac_peak_file_ui"), tags$hr(), helpText("Inspect MACS2 ATAC peak calls and the corresponding TSS-centered signal heatmap.")),
+          mainPanel(width = 9, tabsetPanel(
             tabPanel("Peak Table", br(), table_output("atac_peak_table")),
             tabPanel("TSS Heatmap", br(), uiOutput("atac_peak_heatmap_ui"))
           ))
@@ -4083,8 +4112,8 @@ atac_results_explorer_ui <- function() {
       )),
       tabPanel("Genome Browser", genome_browser_ui()),
       tabPanel("Differential Accessibility", br(), sidebarLayout(
-        sidebarPanel(width = 2, uiOutput("atac_diffbind_dir_ui"), tags$hr(), helpText("Each comparison is stored and displayed independently.")),
-        mainPanel(width = 10, tabsetPanel(
+        sidebarPanel(width = 3, uiOutput("atac_diffbind_dir_ui"), tags$hr(), helpText("Each comparison is stored and displayed independently.")),
+        mainPanel(width = 9, tabsetPanel(
           tabPanel("Results", br(),
             tags$p(class = "muted small-note", "Detailed differential-accessibility results with full HOMER gene annotation and expanded DiffBind statistics."),
             div(class = "differential-accessibility-table", table_output("atac_diffbind_table"))
@@ -4109,8 +4138,8 @@ chip_results_explorer_ui <- function() {
       )),
       tabPanel("QC", br(), tabsetPanel(id = "chip_qc_tabs",
         tabPanel("Initial QC", br(), sidebarLayout(
-          sidebarPanel(width = 2, uiOutput("atac_qc_sample_control"), uiOutput("atac_qc_mode_control"), tags$hr(), helpText("FastQC and FastQ Screen reports for raw or cutadapt-trimmed reads.")),
-          mainPanel(width = 10, uiOutput("atac_qc_status_ui"), tabsetPanel(
+          sidebarPanel(width = 3, uiOutput("atac_qc_sample_control"), uiOutput("atac_qc_mode_control"), tags$hr(), helpText("FastQC and FastQ Screen reports for raw or cutadapt-trimmed reads.")),
+          mainPanel(width = 9, uiOutput("atac_qc_status_ui"), tabsetPanel(
             tabPanel("R1 FastQC", uiOutput("atac_r1_fastqc_ui")),
             tabPanel("R1 Screen", uiOutput("atac_r1_screen_ui")),
             tabPanel("R2 FastQC", uiOutput("atac_r2_fastqc_ui")),
@@ -4122,8 +4151,8 @@ chip_results_explorer_ui <- function() {
       )),
       tabPanel("Signal & Peaks", br(), tabsetPanel(id = "chip_signal_peak_tabs",
         tabPanel("Peak Calls", br(), tags$h4("Matched-input peak-calling summary"), table_output("chip_peak_summary"), tags$hr(), sidebarLayout(
-          sidebarPanel(width = 2, uiOutput("atac_peak_file_ui"), tags$hr(), helpText("Inspect MACS2 ChIP-seq peak calls.")),
-          mainPanel(width = 10, table_output("atac_peak_table"))
+          sidebarPanel(width = 3, uiOutput("atac_peak_file_ui"), tags$hr(), helpText("Inspect MACS2 ChIP-seq peak calls.")),
+          mainPanel(width = 9, table_output("atac_peak_table"))
         )),
         tabPanel("Gene Annotation", peak_annotation_results_ui()),
         tabPanel("Signal Tracks", br(),
@@ -4133,8 +4162,8 @@ chip_results_explorer_ui <- function() {
         tabPanel("Genome Browser", genome_browser_ui())
       )),
       tabPanel("Differential Binding", br(), sidebarLayout(
-        sidebarPanel(width = 2, uiOutput("atac_diffbind_dir_ui"), tags$hr(), helpText("Each comparison is stored and displayed independently.")),
-        mainPanel(width = 10, tabsetPanel(
+        sidebarPanel(width = 3, uiOutput("atac_diffbind_dir_ui"), tags$hr(), helpText("Each comparison is stored and displayed independently.")),
+        mainPanel(width = 9, tabsetPanel(
           tabPanel("Results", br(), div(class = "differential-accessibility-table", table_output("atac_diffbind_table"))),
           tabPanel("PCA", br(), uiOutput("atac_diffbind_pca_ui")),
           tabPanel("Volcano", br(), uiOutput("atac_diffbind_volcano_ui"))
@@ -8717,7 +8746,7 @@ ui <- fluidPage(
     sidebarPanel(
       class = "web-sidebar",
       width = 2,
-      selectInput("analysis", "Analysis", choices = c("RNA-seq", "CUT&RUN", "ATAC-seq", "ChIP-seq"), selected = "RNA-seq", selectize = FALSE),
+      selectInput("analysis", "Analysis type", choices = analysis_choices(), selected = "RNA-seq", selectize = FALSE),
       uiOutput("project_ui"),
       tags$p(class = "muted small-note", "Saved projects are private to the Unix account running this app."),
       uiOutput("new_project_ui"),
@@ -9185,7 +9214,8 @@ server <- function(input, output, session) {
         actionButton("use_example_dataset", "Use Example Dataset", class = "btn-default")
       ) else NULL,
       textInput("new_project_name", "Project name", value = "", placeholder = "e.g. my_project"),
-      selectInput("new_project_analysis", "Analysis type", choices = c("RNA-seq", "CUT&RUN", "ATAC-seq", "ChIP-seq"), selected = input$analysis, selectize = FALSE),
+      selectInput("new_project_analysis", "Analysis type", choices = analysis_choices(), selected = input$analysis, selectize = FALSE),
+      tags$p(class = "muted small-note", analysis_description(new_analysis_key)),
       selectInput("new_species", "Species", choices = c("Mouse" = "mouse", "Human" = "human"), selected = "mouse", selectize = FALSE),
       uiOutput("new_genome_version_ui"),
       radioButtons("new_paired_end", "Reads", choices = c("Paired-end" = "paired", "Single-end" = "single"), selected = "paired"),

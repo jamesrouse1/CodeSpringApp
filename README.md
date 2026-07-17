@@ -82,7 +82,7 @@ Example launcher output. The port in your terminal may differ if the default por
 - Tracks per-sample and per-comparison progress with completed, running, cancelled, deleted, and likely failed states.
 - Keeps untouched or partial sample outputs at `Not started` until SLURM reports a terminal job state; only a finished unsuccessful or incomplete job is classified as failed.
 - Resubmits only failed, cancelled, missing, or deleted samples while skipping active and completed jobs.
-- Embeds the native CodeSpringLab RNA-seq Results Explorer and provides consistently branded ATAC-seq, CUT&RUN, and ChIP-seq explorers with Overview, QC, Signal & Peaks, differential results, and Files navigation.
+- Uses one Results Explorer format across RNA-seq, ATAC-seq, CUT&RUN, and ChIP-seq: every explorer starts with Overview, includes QC and assay-specific results, and ends with a categorized Files view. Analysis selectors also share one canonical order, spelling, description style, and 3:9 control/content layout.
 - Renders paired-end fragment-size PDFs as standardized in-app images instead of native browser PDF previews, and keeps fragment plots at a consistent display size across samples.
 - Sorts numeric-looking table values numerically, including comma-formatted counts, percentages, elapsed times, and human-readable file sizes such as KB/MB/GB.
 - Filters CUT&RUN result files by category and sample before choosing an individual file.
