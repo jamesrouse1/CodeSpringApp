@@ -7018,12 +7018,20 @@ submit_kallisto_jobs <- function(project, trimmed = FALSE, samples = NULL) {
   }
   pairs <- pairs[pairs$sample %in% plan$samples, , drop = FALSE]
   script <- file.path(SCRIPTS_DIR, "Kallisto", if (project$paired_end) "qsub_kallisto_PE.sh" else "qsub_kallisto_SE.sh")
+  runner <- file.path(SCRIPTS_DIR, "Kallisto", if (project$paired_end) "kallisto_PE.sh" else "kallisto_SE.sh")
+  missing_scripts <- c(script, runner)[!file.exists(c(script, runner))]
+  if (length(missing_scripts)) {
+    return(record_preflight_failure(project, "Kallisto (optional)", paste("Required Kallisto scripts are missing:", paste(missing_scripts, collapse = ", ")), "kallisto"))
+  }
   messages <- apply(pairs, 1, function(row) {
     sample_dir <- file.path(outdir, row[["sample"]])
     dir.create(sample_dir, recursive = TRUE, showWarnings = FALSE)
     input_mode <- if (trimmed) "trimmed reads" else "raw reads"
     target <- file.path(sample_dir, "abundance.tsv")
-    submit_sbatch(project, "Kallisto (optional)", script, c(sample_dir, res$kallisto_index, row[["r1"]], row[["r2"]], project$name), "kallisto", input_mode, sample = row[["sample"]], target = target, reference = res$kallisto_index)
+    kallisto_args <- c(sample_dir, res$kallisto_index, row[["r1"]])
+    if (project$paired_end) kallisto_args <- c(kallisto_args, row[["r2"]])
+    kallisto_args <- c(kallisto_args, project$name, runner)
+    submit_sbatch(project, "Kallisto (optional)", script, kallisto_args, "kallisto", input_mode, sample = row[["sample"]], target = target, reference = res$kallisto_index)
   })
   ids <- vapply(messages, parse_sbatch_job_id, character(1))
   if (target_outputs_ready_or_planned(all_targets, plan$samples, minimum_expected_bytes("Kallisto (optional)"))) {
@@ -7050,6 +7058,11 @@ submit_rsem_jobs <- function(project, feature = "gene_id", samples = NULL) {
   dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
   dir.create(counts_dir, recursive = TRUE, showWarnings = FALSE)
   script <- file.path(SCRIPTS_DIR, "RSEM", if (project$paired_end) "qsub_RSEM_PE.sh" else "qsub_RSEM_SE.sh")
+  runner <- file.path(SCRIPTS_DIR, "RSEM", if (project$paired_end) "RSEM_PE.sh" else "RSEM_SE.sh")
+  missing_scripts <- c(script, runner)[!file.exists(c(script, runner))]
+  if (length(missing_scripts)) {
+    return(record_preflight_failure(project, "RSEM (optional)", paste("Required RSEM scripts are missing:", paste(missing_scripts, collapse = ", ")), "rsem"))
+  }
   all_samples <- project_samples(project)
   all_targets <- stats::setNames(lapply(all_samples, function(sample) file.path(outdir, sample, paste0(sample, ".genes.results"))), all_samples)
   target_list <- stats::setNames(lapply(as.character(design$sample), function(sample) {
@@ -7074,7 +7087,7 @@ submit_rsem_jobs <- function(project, feature = "gene_id", samples = NULL) {
     bam_transcript <- file.path(project$data_dir, "star", sample, paste0(sample, "Aligned.toTranscriptome.out.bam"))
     count_prefix <- file.path(sample_dir, sample)
     target <- paste0(count_prefix, ".genes.results")
-    submit_sbatch(project, "RSEM (optional)", script, c(bam, res$rsem_index, feature, count_prefix, res$strand_bed, bam_transcript, project$name), "rsem", paste("STAR BAM; feature", feature), sample = sample, target = target, reference = res$rsem_index)
+    submit_sbatch(project, "RSEM (optional)", script, c(bam, res$rsem_index, feature, count_prefix, res$strand_bed, bam_transcript, project$name, runner), "rsem", paste("STAR BAM; feature", feature), sample = sample, target = target, reference = res$rsem_index)
   }, character(1))
   ids <- vapply(messages, parse_sbatch_job_id, character(1))
   if (target_outputs_ready_or_planned(all_targets, plan$samples, minimum_expected_bytes("RSEM (optional)"))) {

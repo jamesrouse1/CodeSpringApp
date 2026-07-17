@@ -195,4 +195,4 @@ With CodeSpringLab checked out beside this repository, run:
 bash tests/run_all.sh ../CodeSpringLab
 ```
 
-This validates project setup, example datasets, pipeline step selection, output detection, retry behavior, SLURM argument construction, Results Explorer helpers, and launcher path isolation without submitting cluster jobs.
+This validates project setup, example datasets, pipeline step selection, output detection, retry behavior, paired- and single-end STAR/Kallisto/RSEM/featureCounts SLURM arguments, Results Explorer helpers, and launcher path isolation without submitting cluster jobs.

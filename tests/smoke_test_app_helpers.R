@@ -349,19 +349,24 @@ writeLines("chr1\t1\t10\tgene1", fake_strand_bed)
 captured_submissions <- list()
 original_genome_resources <- app_env$genome_resources
 original_submit_sbatch <- app_env$submit_sbatch
+original_submit_sbatch_wrap <- app_env$submit_sbatch_wrap
 original_submit_featurecounts_matrix_job <- app_env$submit_featurecounts_matrix_job
 app_env$genome_resources <- function(project) list(
   star_index = file.path(runner_test_root, "star-index"), label = "test-reference",
-  gtf = fake_gtf, strand_bed = fake_strand_bed
+  gtf = fake_gtf, strand_bed = fake_strand_bed,
+  kallisto_index = file.path(runner_test_root, "transcripts.idx"),
+  rsem_index = file.path(runner_test_root, "rsem")
 )
 app_env$submit_sbatch <- function(project, step, script, args, log_name, input_mode = "", sample = "", target = "", reference = "", dependency_ids = character(0)) {
-  captured_submissions[[length(captured_submissions) + 1L]] <<- list(step = step, script = script, args = args)
+  captured_submissions[[length(captured_submissions) + 1L]] <<- list(step = step, script = script, args = args, target = target)
   paste("Submitted", step, sample)
 }
+app_env$submit_sbatch_wrap <- function(...) "Matrix build captured"
 app_env$submit_featurecounts_matrix_job <- function(project, feature = "gene_name", dependency_ids = character(0)) "Matrix build captured"
 on.exit({
   app_env$genome_resources <- original_genome_resources
   app_env$submit_sbatch <- original_submit_sbatch
+  app_env$submit_sbatch_wrap <- original_submit_sbatch_wrap
   app_env$submit_featurecounts_matrix_job <- original_submit_featurecounts_matrix_job
 }, add = TRUE)
 
@@ -377,6 +382,18 @@ invisible(app_env$submit_featurecounts_jobs(runner_project, feature = "gene_name
 feature_submission <- captured_submissions[[length(captured_submissions)]]
 expected_feature_runner <- file.path(app_env$SCRIPTS_DIR, "featureCounts", "featurecounts_PE.sh")
 assert(identical(tail(feature_submission$args, 1), expected_feature_runner), "featureCounts submission passes an absolute runner path to SLURM")
+
+invisible(app_env$submit_kallisto_jobs(runner_project, trimmed = FALSE, samples = "rna1"))
+kallisto_submission <- captured_submissions[[length(captured_submissions)]]
+expected_kallisto_runner <- file.path(app_env$SCRIPTS_DIR, "Kallisto", "kallisto_PE.sh")
+assert(identical(tail(kallisto_submission$args, 1), expected_kallisto_runner), "paired-end Kallisto submission passes an absolute runner path to SLURM")
+assert(identical(kallisto_submission$target, file.path(runner_project$data_dir, "kallisto", "rna1", "abundance.tsv")), "Kallisto completion target matches its output directory")
+
+writeBin(as.raw(rep(1:100, 30)), file.path(star_dir, "rna1Aligned.toTranscriptome.out.bam"))
+invisible(app_env$submit_rsem_jobs(runner_project, feature = "gene_id", samples = "rna1"))
+rsem_submission <- captured_submissions[[length(captured_submissions)]]
+expected_rsem_runner <- file.path(app_env$SCRIPTS_DIR, "RSEM", "RSEM_PE.sh")
+assert(identical(tail(rsem_submission$args, 1), expected_rsem_runner), "paired-end RSEM submission passes an absolute runner path to SLURM")
 
 runner_project$paired_end <- FALSE
 runner_design$filename <- "rna1_R1.fastq.gz"
@@ -395,9 +412,54 @@ feature_se_submission <- captured_submissions[[length(captured_submissions)]]
 expected_feature_se_runner <- file.path(app_env$SCRIPTS_DIR, "featureCounts", "featurecounts_SE.sh")
 assert(identical(tail(feature_se_submission$args, 1), expected_feature_se_runner), "single-end featureCounts submission passes its absolute runner path to SLURM")
 
+invisible(app_env$submit_kallisto_jobs(runner_project, trimmed = FALSE, samples = "rna1"))
+kallisto_se_submission <- captured_submissions[[length(captured_submissions)]]
+expected_kallisto_se_runner <- file.path(app_env$SCRIPTS_DIR, "Kallisto", "kallisto_SE.sh")
+assert(identical(tail(kallisto_se_submission$args, 1), expected_kallisto_se_runner), "single-end Kallisto submission passes its absolute runner path to SLURM")
+assert(length(kallisto_se_submission$args) == 5L, "single-end Kallisto submission omits the unused R2 argument")
+assert(identical(kallisto_se_submission$target, file.path(runner_project$data_dir, "kallisto", "rna1", "abundance.tsv")), "single-end Kallisto writes to the App completion target")
+
+writeBin(as.raw(rep(1:100, 30)), file.path(star_dir, "rna1Aligned.toTranscriptome.out.bam"))
+invisible(app_env$submit_rsem_jobs(runner_project, feature = "gene_id", samples = "rna1"))
+rsem_se_submission <- captured_submissions[[length(captured_submissions)]]
+expected_rsem_se_runner <- file.path(app_env$SCRIPTS_DIR, "RSEM", "RSEM_SE.sh")
+assert(identical(tail(rsem_se_submission$args, 1), expected_rsem_se_runner), "single-end RSEM submission passes its absolute runner path to SLURM")
+
 app_env$genome_resources <- original_genome_resources
 app_env$submit_sbatch <- original_submit_sbatch
+app_env$submit_sbatch_wrap <- original_submit_sbatch_wrap
 app_env$submit_featurecounts_matrix_job <- original_submit_featurecounts_matrix_job
+
+matrix_root <- file.path(root, "quant-matrix-build")
+kallisto_dir <- file.path(matrix_root, "kallisto")
+rsem_dir <- file.path(matrix_root, "rsem")
+counts_dir <- file.path(matrix_root, "counts")
+for (sample in c("sample1", "sample2")) {
+  dir.create(file.path(kallisto_dir, sample), recursive = TRUE, showWarnings = FALSE)
+  write.table(data.frame(
+    target_id = c("tx1", "tx2"), length = c(100, 200), eff_length = c(80, 180),
+    est_counts = c(5, 10) + match(sample, c("sample1", "sample2")),
+    tpm = c(20, 30) + match(sample, c("sample1", "sample2"))
+  ), file.path(kallisto_dir, sample, "abundance.tsv"), sep = "\t", row.names = FALSE, quote = FALSE)
+  dir.create(file.path(rsem_dir, sample), recursive = TRUE, showWarnings = FALSE)
+  write.table(data.frame(
+    gene_id = c("gene1", "gene2"), expected_count = c(5, 10), TPM = c(20, 30), FPKM = c(8, 12)
+  ), file.path(rsem_dir, sample, paste0(sample, ".genes.results")), sep = "\t", row.names = FALSE, quote = FALSE)
+  write.table(data.frame(
+    transcript_id = c("tx1", "tx2"), gene_id = c("gene1", "gene2"),
+    expected_count = c(5, 10), TPM = c(20, 30), FPKM = c(8, 12)
+  ), file.path(rsem_dir, sample, paste0(sample, ".isoforms.results")), sep = "\t", row.names = FALSE, quote = FALSE)
+}
+kallisto_matrix_script <- app_env$write_quant_matrix_script(runner_project, "kallisto")
+assert(system2("Rscript", c(kallisto_matrix_script, kallisto_dir, counts_dir)) == 0L, "Kallisto matrix builder executes on synthetic quantifications")
+kallisto_matrix <- read.delim(file.path(counts_dir, "kallisto_tpm_matrix.txt"), check.names = FALSE)
+assert(identical(names(kallisto_matrix), c("target_id", "sample1", "sample2")) && NROW(kallisto_matrix) == 2L, "Kallisto TPM matrix combines all samples")
+
+rsem_matrix_script <- app_env$write_quant_matrix_script(runner_project, "rsem")
+assert(system2("Rscript", c(rsem_matrix_script, rsem_dir, counts_dir)) == 0L, "RSEM matrix builder executes on synthetic quantifications")
+rsem_matrix <- read.delim(file.path(counts_dir, "rsem_tpm_matrix.txt"), check.names = FALSE)
+assert(identical(names(rsem_matrix), c("gene_id", "sample1", "sample2")) && NROW(rsem_matrix) == 2L, "RSEM TPM matrix combines all samples")
+assert(file.exists(file.path(counts_dir, "rsem_isoform_tpm_matrix.txt")), "RSEM isoform TPM matrix is generated")
 assert(identical(app_env$requested_sample_subset(atac_project, c("A1", "A2"), "A2", "test step"), "A2"), "unchecked samples are excluded from submission")
 cutrun_example_project <- chip_project
 cutrun_example_project$analysis_key <- "cutrun"
