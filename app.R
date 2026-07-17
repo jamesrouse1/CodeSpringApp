@@ -285,6 +285,11 @@ if (file.exists(LOGO_CSL_PATH)) addResourcePath("csl_logo", dirname(LOGO_CSL_PAT
 if (file.exists(LOGO_PATH)) addResourcePath("codespring_logo", dirname(LOGO_PATH))
 if (file.exists(FLOWCHART_PATH)) addResourcePath("codespring_flowchart", dirname(FLOWCHART_PATH))
 
+is_codespring_process_command <- function(command) {
+  command <- trimws(as.character(command %||% ""))
+  nzchar(command) && grepl("CodeSpring(App|Web)|codespringweb_[0-9]+\\.log", command, ignore.case = TRUE)
+}
+
 cleanup_previous_shiny_processes <- function() {
   if (identical(Sys.getenv("CSL_WEB_AUTOKILL_SHINY", unset = "1"), "0")) return(invisible(character(0)))
   current_pid <- as.integer(Sys.getpid())
@@ -303,13 +308,13 @@ cleanup_previous_shiny_processes <- function() {
     trimws(paste(run_quiet("ps", c("-p", as.character(pid), "-o", "user=")), collapse = " "))
   }
 
-  looks_like_r_shiny <- function(cmd) {
-    grepl("(^|/)(R|Rscript)(\\s|$)|/exec/R(\\s|$)|shiny::runApp|runApp\\(|CodeSpringWeb|scripts_DoNotTouch/Shiny|RNASEQ_SHINY", cmd)
-  }
-
   kill_pid <- function(pid, reason, signal = tools::SIGTERM) {
     pid <- suppressWarnings(as.integer(pid))
     if (is.na(pid) || pid <= 1 || identical(pid, current_pid)) return(invisible(FALSE))
+    owner <- pid_user(pid)
+    command <- pid_command(pid)
+    if (nzchar(owner) && nzchar(current_user) && !identical(owner, current_user)) return(invisible(FALSE))
+    if (!is_codespring_process_command(command)) return(invisible(FALSE))
     ok <- tryCatch({
       tools::pskill(pid, signal)
       TRUE
@@ -321,24 +326,6 @@ cleanup_previous_shiny_processes <- function() {
     invisible(ok)
   }
 
-  listener_pids <- function(port) {
-    if (!nzchar(Sys.which("lsof"))) return(character(0))
-    pids <- run_quiet("lsof", c("-nP", paste0("-iTCP:", port), "-sTCP:LISTEN", "-t"))
-    unique(trimws(pids[nzchar(pids)]))
-  }
-
-  stop_listener <- function(pid, reason, signal = tools::SIGTERM, require_shiny = TRUE) {
-    cmd <- pid_command(pid)
-    user <- pid_user(pid)
-    same_user <- !nzchar(current_user) || !nzchar(user) || identical(user, current_user)
-    if (!same_user) return(invisible(FALSE))
-    if (!require_shiny || looks_like_r_shiny(cmd)) {
-      reason <- paste0(reason, if (nzchar(cmd)) paste0(", command: ", substr(cmd, 1, 120)) else "")
-      return(kill_pid(pid, reason, signal))
-    }
-    invisible(FALSE)
-  }
-
   pidfiles <- list.files(APP_HOME, pattern = "^codespringweb_.*\\.pid$|^rnaseq_shiny_.*\\.pid$", full.names = TRUE)
   for (pf in pidfiles) {
     pid <- suppressWarnings(as.integer(readLines(pf, warn = FALSE, n = 1)))
@@ -346,50 +333,12 @@ cleanup_previous_shiny_processes <- function() {
     unlink(pf, force = TRUE)
   }
 
-  ps_lines <- run_quiet("ps", c("-eo", "pid=,command="))
-  for (line in ps_lines) {
-    line <- trimws(line)
-    m <- regexec("^([0-9]+)\\s+(.+)$", line)
-    hit <- regmatches(line, m)[[1]]
-    if (length(hit) != 3) next
-    pid <- suppressWarnings(as.integer(hit[2]))
-    cmd <- hit[3]
-    if (looks_like_r_shiny(cmd) && !identical(pid, current_pid)) kill_pid(pid, "R/Shiny process")
-  }
-
-  shiny_ports <- 3838:3850
-  web_ports <- 8501:8515
-  for (port in shiny_ports) {
-    for (pid in listener_pids(port)) stop_listener(pid, paste0("Shiny port:", port), require_shiny = TRUE)
-  }
-  for (port in web_ports) {
-    for (pid in listener_pids(port)) stop_listener(pid, paste0("CodeSpringWeb port:", port), require_shiny = FALSE)
-  }
-
-  Sys.sleep(0.7)
-  for (port in shiny_ports) {
-    for (pid in listener_pids(port)) stop_listener(pid, paste0("Shiny port still busy:", port), tools::SIGKILL, require_shiny = TRUE)
-  }
-  for (port in web_ports) {
-    for (pid in listener_pids(port)) stop_listener(pid, paste0("CodeSpringWeb port still busy:", port), tools::SIGKILL, require_shiny = FALSE)
-  }
-
-  Sys.sleep(0.3)
-  busy_web <- unlist(lapply(web_ports, function(port) {
-    pids <- listener_pids(port)
-    if (!length(pids)) return(character(0))
-    paste0(port, "=", paste(pids, collapse = ","))
-  }), use.names = FALSE)
-  if (length(busy_web)) {
-    cat("WARNING: these CodeSpringWeb ports are still busy after cleanup: ", paste(busy_web, collapse = "; "), "\n", sep = "")
-  }
-
   pid_path <- file.path(APP_HOME, paste0("codespringweb_", current_pid, ".pid"))
   writeLines(as.character(current_pid), pid_path)
   if (length(killed)) {
-    cat("Stopped previous CodeSpring/R Shiny sessions before starting CodeSpringWeb: ", paste(killed, collapse = ", "), "\n", sep = "")
+    cat("Stopped previous CodeSpringApp sessions before starting CodeSpringWeb: ", paste(killed, collapse = ", "), "\n", sep = "")
   } else {
-    cat("Checked for previous CodeSpring/R Shiny sessions; none needed cleanup.\n")
+    cat("Checked CodeSpringApp-owned pidfiles; none needed cleanup.\n")
   }
   invisible(killed)
 }
@@ -3364,12 +3313,18 @@ atac_results_explorer_ui <- function() {
         tabPanel("Alignment", br(), tags$h4("Alignment summary across samples"), table_output("atac_alignment_summary"), tags$hr(), tags$h4("Post-alignment output checks"), table_output("atac_postprocess_status")),
         tabPanel("Fragment Size", br(), tags$p(class = "muted small-note", "Inspect the paired-end insert-size distribution produced after duplicate removal."), uiOutput("atac_insert_size_ui"))
       )),
-      tabPanel("Signal & Peaks", br(), sidebarLayout(
-        sidebarPanel(width = 2, uiOutput("atac_peak_file_ui"), tags$hr(), helpText("Inspect MACS2 ATAC peak calls and the corresponding TSS-centered signal heatmap.")),
-        mainPanel(width = 10, tabsetPanel(
-          tabPanel("Peak Table", br(), table_output("atac_peak_table")),
-          tabPanel("TSS Heatmap", br(), uiOutput("atac_peak_heatmap_ui"))
-        ))
+      tabPanel("Signal & Peaks", br(), tabsetPanel(id = "atac_signal_peak_tabs",
+        tabPanel("Peak Calls", br(), sidebarLayout(
+          sidebarPanel(width = 2, uiOutput("atac_peak_file_ui"), tags$hr(), helpText("Inspect MACS2 ATAC peak calls and the corresponding TSS-centered signal heatmap.")),
+          mainPanel(width = 10, tabsetPanel(
+            tabPanel("Peak Table", br(), table_output("atac_peak_table")),
+            tabPanel("TSS Heatmap", br(), uiOutput("atac_peak_heatmap_ui"))
+          ))
+        )),
+        tabPanel("Signal Tracks", br(),
+          div(class = "cutrun-section-heading", tags$h4("Genome-browser tracks"), tags$p("Per-sample bigWig and bedGraph files with their saved normalization.")),
+          table_output("atac_signal_tracks")
+        )
       )),
       tabPanel("Differential Accessibility", br(), sidebarLayout(
         sidebarPanel(width = 2, uiOutput("atac_diffbind_dir_ui"), tags$hr(), helpText("Each comparison is stored and displayed independently.")),
@@ -3406,9 +3361,15 @@ chip_results_explorer_ui <- function() {
         tabPanel("Alignment", br(), tags$h4("Alignment summary across samples"), table_output("atac_alignment_summary"), tags$hr(), tags$h4("Post-alignment output checks"), table_output("atac_postprocess_status")),
         tabPanel("Fragment Size", br(), tags$p(class = "muted small-note", "Inspect the paired-end insert-size distribution produced after duplicate removal."), uiOutput("atac_insert_size_ui"))
       )),
-      tabPanel("Signal & Peaks", br(), tags$h4("Matched-input peak-calling summary"), table_output("chip_peak_summary"), tags$hr(), sidebarLayout(
-        sidebarPanel(width = 2, uiOutput("atac_peak_file_ui"), tags$hr(), helpText("Inspect MACS2 ChIP-seq peak calls.")),
-        mainPanel(width = 10, table_output("atac_peak_table"))
+      tabPanel("Signal & Peaks", br(), tabsetPanel(id = "chip_signal_peak_tabs",
+        tabPanel("Peak Calls", br(), tags$h4("Matched-input peak-calling summary"), table_output("chip_peak_summary"), tags$hr(), sidebarLayout(
+          sidebarPanel(width = 2, uiOutput("atac_peak_file_ui"), tags$hr(), helpText("Inspect MACS2 ChIP-seq peak calls.")),
+          mainPanel(width = 10, table_output("atac_peak_table"))
+        )),
+        tabPanel("Signal Tracks", br(),
+          div(class = "cutrun-section-heading", tags$h4("Genome-browser tracks"), tags$p("Target and input-control bigWig/bedGraph files with their saved normalization.")),
+          table_output("atac_signal_tracks")
+        )
       )),
       tabPanel("Differential Binding", br(), sidebarLayout(
         sidebarPanel(width = 2, uiOutput("atac_diffbind_dir_ui"), tags$hr(), helpText("Each comparison is stored and displayed independently.")),
@@ -6538,11 +6499,15 @@ write_native_shiny_config <- function(project) {
   cfg_dir <- file.path(APP_HOME, "native_configs")
   dir.create(cfg_dir, recursive = TRUE, showWarnings = FALSE)
   cfg <- file.path(cfg_dir, paste0(clean_name(project$id, "project"), "_shiny_results_config.R"))
+  resources <- genome_resources(project)
   lines <- c(
     sprintf("project_name <- %s", deparse(project$name)),
     sprintf("results_root <- %s", deparse(project$results_root)),
     sprintf("data_dir <- %s", deparse(project$data_dir)),
     sprintf("design_matrix_path <- %s", deparse(project$design_matrix_path)),
+    sprintf("genome_species <- %s", deparse(genome_species(project))),
+    sprintf("genome_version <- %s", deparse(genome_reference_key(project))),
+    sprintf("selected_gtf_path <- %s", deparse(resources$gtf %||% "")),
     sprintf("app_dir <- %s", deparse(file.path(SCRIPTS_DIR, "Shiny"))),
     sprintf("logo_search_dirs <- c(%s)", paste(vapply(c(SCRIPTS_DIR, file.path(SCRIPTS_DIR, "Shiny")), deparse, character(1)), collapse = ", "))
   )
@@ -6867,6 +6832,17 @@ relative_result_labels <- function(project, files) {
   labels
 }
 
+validated_project_result_path <- function(project, path, kind = c("file", "dir")) {
+  kind <- match.arg(kind)
+  path <- trimws(as.character(path %||% ""))
+  if (length(path) != 1L || is.na(path) || !nzchar(path)) return("")
+  root <- trimws(as.character(project$data_dir %||% ""))
+  if (!nzchar(root) || !path_is_within(path, root)) return("")
+  exists <- if (identical(kind, "dir")) dir.exists(path) else file.exists(path)
+  if (!isTRUE(exists)) return("")
+  normalizePath(path, winslash = "/", mustWork = TRUE)
+}
+
 result_file_choices <- function(project, subdirs = character(0), pattern = "\\.(txt|csv|tsv)$") {
   files <- list_result_files(project, pattern)
   if (length(subdirs)) {
@@ -6875,6 +6851,41 @@ result_file_choices <- function(project, subdirs = character(0), pattern = "\\.(
   }
   files <- sort(files)
   stats::setNames(files, relative_result_labels(project, files))
+}
+
+peak_signal_track_table <- function(project) {
+  root <- file.path(project$data_dir, "bowtie2")
+  files <- if (dir.exists(root)) list.files(root, pattern = "\\.(bw|bedgraph|bdg)$", recursive = TRUE, full.names = TRUE, ignore.case = TRUE) else character(0)
+  files <- sort(unique(files[file.exists(files)]))
+  if (!length(files)) return(data.frame())
+  design <- project_design_df(project)
+  rows <- lapply(files, function(path) {
+    sample <- basename(dirname(path))
+    name <- basename(path)
+    summary <- metric_file_to_named_list(file.path(dirname(path), paste0(sample, "_alignment_summary.txt")))
+    normalization <- trimws(as.character(summary$bigwig_normalization %||% ""))
+    if (grepl("spikein", name, ignore.case = TRUE)) normalization <- "E. coli spike-in"
+    else if (grepl("cpm", name, ignore.case = TRUE)) normalization <- "CPM"
+    else if (!nzchar(normalization)) normalization <- "Raw / none"
+    role <- ""
+    if (is_chip_project(project) && NROW(design) && all(c("sample", "reference") %in% names(design))) {
+      idx <- match(sample, as.character(design$sample))
+      if (!is.na(idx)) role <- as.character(design$reference[[idx]] %||% "")
+    }
+    data.frame(
+      sample = sample,
+      role = role,
+      format = if (tolower(tools::file_ext(path)) == "bw") "bigWig" else "bedGraph",
+      normalization = normalization,
+      size = human_file_size(path),
+      file = normalizePath(path, winslash = "/", mustWork = TRUE),
+      stringsAsFactors = FALSE,
+      check.names = FALSE
+    )
+  })
+  out <- do.call(rbind, rows)
+  if (!is_chip_project(project)) out$role <- NULL
+  out
 }
 
 image_or_file_ui <- function(path, height = "900px") {
@@ -9372,25 +9383,42 @@ server <- function(input, output, session) {
   })
   output$atac_postprocess_status <- render_csl_table(atac_postprocess_status_table(current_project()), page_length = 50)
   output$atac_insert_size_ui <- renderUI({
-    progress_refresh(); p <- current_project(); files <- if (dir.exists(file.path(p$data_dir, "bowtie2"))) list.files(file.path(p$data_dir, "bowtie2"), pattern = "_insert_size_histogram\\.jpg$", recursive = TRUE, full.names = TRUE) else character(0)
+    progress_refresh(); p <- current_project(); files <- if (dir.exists(file.path(p$data_dir, "bowtie2"))) list.files(file.path(p$data_dir, "bowtie2"), pattern = "_insert_size_histogram\\.(jpg|jpeg|png|pdf)$", recursive = TRUE, full.names = TRUE, ignore.case = TRUE) else character(0)
     if (!length(files)) return(div(class = "empty-box", "No insert-size histogram found yet."))
-    tagList(selectInput("atac_insert_size_file", "Sample insert-size plot", choices = stats::setNames(files, basename(dirname(files))), selected = selected_choice(input$atac_insert_size_file, files, files[[1]]), selectize = FALSE), image_or_file_ui(input$atac_insert_size_file %||% files[[1]], "650px"))
+    selected <- selected_choice(input$atac_insert_size_file, files, files[[1]])
+    path <- validated_project_result_path(p, selected)
+    tagList(selectInput("atac_insert_size_file", "Sample insert-size plot", choices = stats::setNames(files, basename(dirname(files))), selected = selected, selectize = FALSE), image_or_file_ui(path, "650px"))
   })
   output$atac_peak_file_ui <- renderUI({
     progress_refresh(); choices <- result_file_choices(current_project(), "macs2", "(narrowPeak|broadPeak|peaks_annotated\\.txt)$")
     if (!length(choices)) return(div(class = "empty-box", "No MACS2 peaks found yet."))
     selectInput("atac_peak_file", "Peak file", choices = choices, selected = selected_choice(input$atac_peak_file, choices, choices[[1]]), selectize = FALSE)
   })
-  output$atac_peak_table <- render_csl_table({ req(input$atac_peak_file); safe_read_result_table(input$atac_peak_file, 10000) }, page_length = 50)
+  output$atac_peak_table <- render_csl_table({
+    path <- validated_project_result_path(current_project(), input$atac_peak_file)
+    validate(need(nzchar(path), "Choose a peak file from the current project."))
+    safe_read_result_table(path, 10000)
+  }, page_length = 50)
   output$atac_peak_heatmap_ui <- renderUI({
-    req(input$atac_peak_file); dir <- dirname(input$atac_peak_file); png <- list.files(dir, pattern = "_heatmap_TSS\\.png$", full.names = TRUE)
+    path <- validated_project_result_path(current_project(), input$atac_peak_file)
+    if (!nzchar(path)) return(div(class = "empty-box", "Choose a peak file from the current project."))
+    dir <- dirname(path); png <- list.files(dir, pattern = "_heatmap_TSS\\.png$", full.names = TRUE)
     if (!length(png)) return(div(class = "empty-box", "No TSS heatmap found for this sample.")); image_or_file_ui(png[[1]], "700px")
   })
+  output$atac_signal_tracks <- render_csl_table({
+    progress_refresh()
+    peak_signal_track_table(current_project())
+  }, page_length = 50, scroll_y = "600px")
   output$atac_diffbind_dir_ui <- renderUI({
     progress_refresh(); root <- file.path(current_project()$data_dir, "diffbind"); dirs <- if (dir.exists(root)) list.dirs(root, recursive = FALSE, full.names = TRUE) else character(0); dirs <- dirs[vapply(dirs, diffbind_comparison_complete, logical(1))]
     if (!length(dirs)) return(div(class = "empty-box", "No DiffBind comparison found yet.")); selectInput("atac_diffbind_dir", "Comparison", choices = stats::setNames(dirs, basename(dirs)), selected = selected_choice(input$atac_diffbind_dir, dirs, dirs[[1]]), selectize = FALSE)
   })
-  selected_atac_diffbind_dir <- reactive({ path <- input$atac_diffbind_dir %||% ""; req(nzchar(path), dir.exists(path)); path })
+  selected_atac_diffbind_dir <- reactive({
+    path <- validated_project_result_path(current_project(), input$atac_diffbind_dir, "dir")
+    root <- file.path(current_project()$data_dir, "diffbind")
+    req(nzchar(path), path_is_within(path, root), diffbind_comparison_complete(path))
+    path
+  })
   output$atac_diffbind_table <- render_csl_table({ files <- list.files(selected_atac_diffbind_dir(), pattern = "^DifferentialPeaks_.*\\.txt$", full.names = TRUE); req(length(files)); safe_read_table(files[[1]], 20000) }, page_length = 50, scroll_y = "600px")
   output$atac_diffbind_pca_ui <- renderUI({ image_or_file_ui(file.path(selected_atac_diffbind_dir(), "diffbind_pca_byNormCounts.png"), "620px") })
   output$atac_diffbind_volcano_ui <- renderUI({ image_or_file_ui(file.path(selected_atac_diffbind_dir(), "diffbind_volcano_byDiffPeaks.png"), "620px") })
@@ -9407,8 +9435,16 @@ server <- function(input, output, session) {
         selectInput("atac_file", paste(assay, "result file"), choices = choices, selected = selected_choice(input$atac_file, choices, choices[[1]]), selectize = FALSE)
     )
   })
-  output$atac_file_view <- renderUI({ req(input$atac_file); if (tolower(tools::file_ext(input$atac_file)) %in% c("txt","tsv","csv","bed","bdg","xls","narrowpeak")) table_output("atac_selected_table") else image_or_file_ui(input$atac_file, "850px") })
-  output$atac_selected_table <- render_csl_table({ req(input$atac_file); safe_read_result_table(input$atac_file, 10000) }, page_length = 50)
+  output$atac_file_view <- renderUI({
+    path <- validated_project_result_path(current_project(), input$atac_file)
+    if (!nzchar(path)) return(div(class = "empty-box", "Choose a result file from the current project."))
+    if (tolower(tools::file_ext(path)) %in% c("txt", "tsv", "csv", "bed", "bedgraph", "bdg", "xls", "narrowpeak", "broadpeak")) table_output("atac_selected_table") else image_or_file_ui(path, "850px")
+  })
+  output$atac_selected_table <- render_csl_table({
+    path <- validated_project_result_path(current_project(), input$atac_file)
+    validate(need(nzchar(path), "Choose a result file from the current project."))
+    safe_read_result_table(path, 10000)
+  }, page_length = 50)
   output$cutrun_summary_cards <- renderUI({
     progress_refresh()
     cutrun_summary_cards_ui(current_project())
@@ -9465,8 +9501,8 @@ server <- function(input, output, session) {
   })
   output$cutrun_fragment_size_ui <- renderUI({
     progress_refresh()
-    path <- input$cutrun_fragment_file %||% ""
-    if (!nzchar(path) || !file.exists(path)) return(div(class = "empty-box", "Choose a sample with a completed Picard insert-size plot."))
+    path <- validated_project_result_path(current_project(), input$cutrun_fragment_file)
+    if (!nzchar(path)) return(div(class = "empty-box", "Choose a sample with a completed Picard insert-size plot."))
     tagList(
       div(class = "cutrun-section-heading", tags$h4("Insert-size distribution"), tags$p(basename(dirname(path)))),
       image_or_file_ui(path, "700px")
@@ -9546,13 +9582,14 @@ server <- function(input, output, session) {
     selectInput("cutrun_seacr_peak_file", "SEACR sample", choices = friendly, selected = selected_choice(input$cutrun_seacr_peak_file, paths, paths[[1]]), selectize = FALSE)
   })
   output$cutrun_seacr_peak_table <- render_csl_table({
-    req(input$cutrun_seacr_peak_file)
-    safe_read_result_table(input$cutrun_seacr_peak_file, 5000)
+    path <- validated_project_result_path(current_project(), input$cutrun_seacr_peak_file)
+    validate(need(nzchar(path), "Choose a SEACR peak file from the current project."))
+    safe_read_result_table(path, 5000)
   }, page_length = 50)
   output$cutrun_seacr_peak_cards <- renderUI({
     progress_refresh()
-    path <- input$cutrun_seacr_peak_file %||% ""
-    if (!nzchar(path) || !file.exists(path)) return(NULL)
+    path <- validated_project_result_path(current_project(), input$cutrun_seacr_peak_file)
+    if (!nzchar(path)) return(NULL)
     peaks <- safe_read_result_table(path, 5000)
     widths <- if (NROW(peaks) && all(c("start", "end") %in% names(peaks))) clean_metric_number(peaks$end) - clean_metric_number(peaks$start) else numeric(0)
     widths <- widths[is.finite(widths) & widths > 0]
@@ -9574,8 +9611,9 @@ server <- function(input, output, session) {
     selectInput("cutrun_macs2_peak_file", "MACS2 sample", choices = friendly, selected = selected_choice(input$cutrun_macs2_peak_file, paths, paths[[1]]), selectize = FALSE)
   })
   output$cutrun_macs2_peak_table <- render_csl_table({
-    req(input$cutrun_macs2_peak_file)
-    safe_read_result_table(input$cutrun_macs2_peak_file, 5000)
+    path <- validated_project_result_path(current_project(), input$cutrun_macs2_peak_file)
+    validate(need(nzchar(path), "Choose a MACS2 peak file from the current project."))
+    safe_read_result_table(path, 5000)
   }, page_length = 50)
   output$cutrun_diffbind_comparison_ui <- renderUI({
     req(identical(input$web_main_tabs %||% "", "Results Explorer"))
@@ -9592,8 +9630,9 @@ server <- function(input, output, session) {
     )
   })
   selected_cutrun_diffbind_dir <- reactive({
-    path <- input$cutrun_diffbind_result_dir %||% ""
-    req(nzchar(path), dir.exists(path))
+    path <- validated_project_result_path(current_project(), input$cutrun_diffbind_result_dir, "dir")
+    root <- file.path(current_project()$data_dir, "cutrun_diffbind")
+    req(nzchar(path), path_is_within(path, root), file.exists(file.path(path, "all_differential_peaks.tsv")))
     path
   })
   cutrun_diffbind_all_results <- reactive({
@@ -9634,8 +9673,7 @@ server <- function(input, output, session) {
   }, page_length = 50, scroll_y = "620px")
   output$cutrun_diffbind_cards <- renderUI({
     progress_refresh()
-    path <- input$cutrun_diffbind_result_dir %||% ""
-    if (!nzchar(path) || !dir.exists(path)) return(NULL)
+    path <- selected_cutrun_diffbind_dir()
     all <- cutrun_diffbind_all_results()
     significant <- safe_read_table(file.path(path, "significant_differential_peaks.tsv"), 20000)
     filtered <- cutrun_diffbind_filtered_results()
@@ -9673,8 +9711,8 @@ server <- function(input, output, session) {
     selectInput("cutrun_file", "Result file", choices = choices, selected = selected_choice(input$cutrun_file, paths, paths[[1]]), selectize = FALSE)
   })
   output$cutrun_file_metadata_ui <- renderUI({
-    path <- input$cutrun_file %||% ""
-    if (!nzchar(path) || !file.exists(path)) return(NULL)
+    path <- validated_project_result_path(current_project(), input$cutrun_file)
+    if (!nzchar(path)) return(NULL)
     info <- file.info(path)
     div(class = "cutrun-file-meta",
         div(span("Type"), strong(toupper(tools::file_ext(path) %||% "file"))),
@@ -9684,19 +9722,21 @@ server <- function(input, output, session) {
     )
   })
   output$cutrun_file_view <- renderUI({
-    req(input$cutrun_file)
-    ext <- tolower(tools::file_ext(input$cutrun_file))
+    path <- validated_project_result_path(current_project(), input$cutrun_file)
+    if (!nzchar(path)) return(div(class = "empty-box", "Choose a result file from the current project."))
+    ext <- tolower(tools::file_ext(path))
     if (ext %in% c("txt", "tsv", "csv", "bed", "bedgraph", "narrowpeak", "broadpeak", "xls")) {
       table_output("cutrun_selected_table")
     } else if (ext %in% c("bam", "bai", "bw", "zip", "rds")) {
-      div(class = "empty-box", tags$h4(basename(input$cutrun_file)), tags$p("This binary result is ready for downstream use at the server path shown in the sidebar."))
+      div(class = "empty-box", tags$h4(basename(path)), tags$p("This binary result is ready for downstream use at the server path shown in the sidebar."))
     } else {
-      image_or_file_ui(input$cutrun_file, "900px")
+      image_or_file_ui(path, "900px")
     }
   })
   output$cutrun_selected_table <- render_csl_table({
-    req(input$cutrun_file)
-    safe_read_result_table(input$cutrun_file, 5000)
+    path <- validated_project_result_path(current_project(), input$cutrun_file)
+    validate(need(nzchar(path), "Choose a result file from the current project."))
+    safe_read_result_table(path, 5000)
   }, page_length = 50)
   output$cutrun_qc_sample_control <- renderUI({
     req(identical(input$web_main_tabs %||% "", "Results Explorer"))
@@ -9745,19 +9785,22 @@ server <- function(input, output, session) {
     content = function(file) utils::write.table(cutrun_seacr_frip_table(current_project()), file, sep = "\t", row.names = FALSE, quote = FALSE, na = "")
   )
   output$download_cutrun_seacr <- downloadHandler(
-    filename = function() basename(input$cutrun_seacr_peak_file %||% "seacr_peaks.bed"),
+    filename = function() {
+      path <- validated_project_result_path(current_project(), input$cutrun_seacr_peak_file)
+      if (nzchar(path)) basename(path) else "seacr_peaks.bed"
+    },
     content = function(file) {
-      path <- input$cutrun_seacr_peak_file %||% ""
-      req(nzchar(path), file.exists(path))
+      path <- validated_project_result_path(current_project(), input$cutrun_seacr_peak_file)
+      req(nzchar(path))
       file.copy(path, file, overwrite = TRUE)
     }
   )
   output$download_cutrun_diffbind_results <- downloadHandler(
-    filename = function() paste0(basename(input$cutrun_diffbind_result_dir %||% "cutrun_comparison"), "_filtered.tsv"),
+    filename = function() paste0(basename(selected_cutrun_diffbind_dir()), "_filtered.tsv"),
     content = function(file) utils::write.table(cutrun_diffbind_filtered_results(), file, sep = "\t", row.names = FALSE, quote = FALSE, na = "")
   )
   output$download_cutrun_diffbind_significant <- downloadHandler(
-    filename = function() paste0(basename(input$cutrun_diffbind_result_dir %||% "cutrun_comparison"), "_significant.tsv"),
+    filename = function() paste0(basename(selected_cutrun_diffbind_dir()), "_significant.tsv"),
     content = function(file) {
       df <- safe_read_table(file.path(selected_cutrun_diffbind_dir(), "significant_differential_peaks.tsv"), 20000)
       utils::write.table(df, file, sep = "\t", row.names = FALSE, quote = FALSE, na = "")

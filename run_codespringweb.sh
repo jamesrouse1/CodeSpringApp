@@ -169,7 +169,7 @@ listener_pids_for_port() {
 
 looks_like_codespring_app() {
   local cmd="$1"
-  [[ "$cmd" =~ (CodeSpringApp|CodeSpringWeb|shiny::runApp|runApp\(|/Rscript|/R[[:space:]]) ]]
+  [[ "$cmd" =~ (CodeSpringApp|CodeSpringWeb|codespringweb_[0-9]+\.log) ]]
 }
 
 stop_pid_if_ours() {

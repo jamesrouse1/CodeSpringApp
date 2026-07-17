@@ -7,6 +7,9 @@ app_env <- new.env(parent = globalenv())
 sys.source(file.path(repo_root, "app.R"), envir = app_env)
 
 assert <- function(value, message) if (!isTRUE(value)) stop("ASSERTION FAILED: ", message, call. = FALSE)
+assert(app_env$is_codespring_process_command("Rscript -e shiny::runApp('/home/user/CodeSpringWeb', port=8601)"), "CodeSpringApp process command recognized")
+assert(!app_env$is_codespring_process_command("Rscript unrelated_analysis.R"), "unrelated Rscript process is not treated as CodeSpringApp")
+assert(!app_env$is_codespring_process_command("Rscript -e shiny::runApp('/home/user/another_app')"), "unrelated Shiny app is not treated as CodeSpringApp")
 root <- tempfile("codespring-app-smoke-")
 dir.create(root, recursive = TRUE)
 on.exit(unlink(root, recursive = TRUE, force = TRUE), add = TRUE)
@@ -114,8 +117,16 @@ assert(NROW(chip_peaks) == 4L && chip_peaks$status[chip_peaks$sample == "A1"] ==
 alignment_dir <- file.path(root, "bowtie2", "A1")
 dir.create(alignment_dir, recursive = TRUE)
 writeLines(c("sample\tA1", "mapped_reads\t100", "deduplicated_reads\t80", "bigwig_normalization\tCPM"), file.path(alignment_dir, "A1_alignment_summary.txt"))
+signal_file <- file.path(alignment_dir, "A1Aligned.sortedByCoord_removeDup.out.bw")
+writeLines("fake bigWig", signal_file)
 chip_alignment <- app_env$chip_alignment_summary_table(chip_project)
 assert(NROW(chip_alignment) == 1L && all(c("role", "condition", "matched_input") %in% names(chip_alignment)) && chip_alignment$matched_input[[1]] == "I1", "ChIP alignment summary includes experimental roles")
+chip_signal <- app_env$peak_signal_track_table(chip_project)
+assert(NROW(chip_signal) == 1L && chip_signal$role[[1]] == "chip" && chip_signal$normalization[[1]] == "CPM", "ChIP signal table reports role and saved normalization")
+assert(identical(app_env$validated_project_result_path(chip_project, signal_file), normalizePath(signal_file)), "current-project result path accepted")
+outside_file <- tempfile("outside-result-")
+writeLines("outside", outside_file)
+assert(identical(app_env$validated_project_result_path(chip_project, outside_file), ""), "result path outside the current project is rejected")
 assert(inherits(app_env$atac_summary_cards_ui(chip_project), "shiny.tag"), "ChIP summary cards render with fake results")
 assert(inherits(app_env$chip_results_explorer_ui(), "shiny.tag"), "ChIP Results Explorer UI renders locally")
 
@@ -132,14 +143,22 @@ for (ui_check in list(
   assert(grepl("Signal &amp; Peaks", ui_check, fixed = TRUE) || grepl("Signal & Peaks", ui_check, fixed = TRUE), "custom Results Explorer exposes standardized signal and peak navigation")
 }
 assert(grepl("Initial QC", chip_ui_text, fixed = TRUE) && grepl("Fragment Size", chip_ui_text, fixed = TRUE), "ChIP Results Explorer includes RNA-style QC navigation")
+assert(grepl("Signal Tracks", atac_ui_text, fixed = TRUE) && grepl("Signal Tracks", chip_ui_text, fixed = TRUE), "ATAC and ChIP Results Explorers expose signal-track navigation")
 
 rna_project <- chip_project
 rna_project$id <- "fake-rna"
 rna_project$name <- "fake-rna"
 rna_project$analysis_key <- "rna"
 rna_project$analysis <- "RNA-seq"
+rna_project$genome <- "mouse"
+rna_project$genome_version <- "mouse_gencodeM39"
 old_app_home <- app_env$APP_HOME
 app_env$APP_HOME <- file.path(root, "fake-app-home")
+rna_config <- app_env$write_native_shiny_config(rna_project)
+rna_config_text <- paste(readLines(rna_config, warn = FALSE), collapse = "\n")
+assert(grepl('genome_species <- "mouse"', rna_config_text, fixed = TRUE), "RNA Results Explorer config records the analysis species")
+assert(grepl('genome_version <- "mouse_gencodeM39"', rna_config_text, fixed = TRUE), "RNA Results Explorer config records the analysis reference")
+assert(grepl("gencode.vM39.primary_assembly.annotation.gtf", rna_config_text, fixed = TRUE), "RNA Results Explorer config receives the analysis GTF")
 rna_viewer <- app_env$load_native_rnaseq_viewer(rna_project)
 app_env$APP_HOME <- old_app_home
 assert(inherits(rna_viewer$ui, "shiny.tag") && is.function(rna_viewer$server), "RNA Results Explorer loads against a synthetic project")
@@ -157,6 +176,20 @@ assert(identical(sort(active_bowtie$job_id), c("101", "102")), "active-job filte
 assert(identical(unname(app_env$active_step_sample_choices(fake_jobs, "Bowtie2")), c("A1", "A2")), "cancellation choices contain only samples with active jobs")
 assert(identical(app_env$filter_active_jobs_by_samples(active_bowtie, "A2")$job_id, "102"), "selected-sample cancellation resolves only the requested active job")
 assert(inherits(app_env$active_jobs_modal_table(active_bowtie), "shiny.tag"), "active-job cancellation summary renders locally")
+
+assay_jobs <- data.frame(
+  step = c("STAR", "Bowtie2", "SEACR", "MACS2 Peaks"),
+  sample = c("rna_sample", "atac_sample", "cutrun_sample", "chip_sample"),
+  job_id = c("201", "202", "203", "204"),
+  slurm_state = rep("RUNNING", 4),
+  stringsAsFactors = FALSE
+)
+for (step in assay_jobs$step) {
+  expected <- assay_jobs$sample[assay_jobs$step == step]
+  assert(identical(unname(app_env$active_step_sample_choices(assay_jobs, step)), expected), paste(step, "supports active sample cancellation"))
+}
+
+assert(system2("bash", c("-n", shQuote(file.path(repo_root, "run_codespringweb.sh")))) == 0L, "CodeSpringApp launcher shell syntax is valid")
 
 bad_q <- app_env$submit_atac_macs2_jobs(atac_project, "not-a-number", "A1")
 assert(grepl("q-value must be", bad_q), "invalid ATAC MACS2 q-value rejected before submission")

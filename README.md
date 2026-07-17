@@ -80,6 +80,7 @@ Example launcher output. The port in your terminal may differ if the default por
 - Tracks per-sample and per-comparison progress with completed, running, cancelled, deleted, and likely failed states.
 - Resubmits only failed, cancelled, missing, or deleted samples while skipping active and completed jobs.
 - Embeds the native CodeSpringLab RNA-seq Results Explorer and provides consistently branded ATAC-seq, CUT&RUN, and ChIP-seq explorers with Overview, QC, Signal & Peaks, differential results, and Files navigation.
+- Keeps every result-file view scoped to the currently selected project, including after switching between projects, and reports bigWig/bedGraph normalization in the ATAC-seq, CUT&RUN, and ChIP-seq signal-track views.
 - Records logs, methods, tool versions, reference genome selections, and run parameters.
 
 ### ChIP-seq workflow
@@ -107,6 +108,8 @@ Scan FASTQ folders, include/exclude samples, rename samples, and edit metadata c
 ### Run Pipeline
 
 Each step has its own parameters, submit button, status panel, sample progress, cancel controls, and data-delete controls. Cancellation dialogs show only active tracked jobs and allow exact sample selection when sample identities are available.
+
+The launcher stops only CodeSpringApp processes owned by the current Unix account. Unrelated R or Shiny processes are not treated as CodeSpringApp sessions.
 
 ![Run pipeline](docs/assets/run_readme.png)
 
