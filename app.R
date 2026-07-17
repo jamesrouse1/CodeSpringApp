@@ -8630,17 +8630,30 @@ ui <- fluidPage(
           return;
         }
         if (status) status.textContent = 'Loading genome tracks…';
-        var create = function() {
-          container.innerHTML = '';
-          return window.igv.createBrowser(container, message.config).then(function(browser) {
-            window.codespringIgvBrowser = browser;
-            if (status) status.textContent = message.summary || 'Genome browser loaded.';
-            window.setTimeout(function() { $(window).trigger('resize'); }, 100);
+        var requestId = (window.codespringIgvLoadRequestId || 0) + 1;
+        window.codespringIgvLoadRequestId = requestId;
+        var priorLoad = window.codespringIgvLoadPromise || Promise.resolve();
+        window.codespringIgvLoadPromise = priorLoad.catch(function() {}).then(function() {
+          if (requestId !== window.codespringIgvLoadRequestId) return null;
+          var previous = window.codespringIgvBrowser;
+          var removal = previous ? Promise.resolve(window.igv.removeBrowser(previous)) : Promise.resolve();
+          return removal.then(function() {
+            if (requestId !== window.codespringIgvLoadRequestId) return null;
+            window.codespringIgvBrowser = null;
+            container.innerHTML = '';
+            return window.igv.createBrowser(container, message.config).then(function(browser) {
+              if (requestId !== window.codespringIgvLoadRequestId) {
+                return Promise.resolve(window.igv.removeBrowser(browser));
+              }
+              window.codespringIgvBrowser = browser;
+              if (status) status.textContent = message.summary || 'Genome browser loaded.';
+              window.setTimeout(function() { $(window).trigger('resize'); }, 100);
+              return browser;
+            });
           });
-        };
-        var previous = window.codespringIgvBrowser;
-        var removal = previous ? Promise.resolve(window.igv.removeBrowser(previous)) : Promise.resolve();
-        removal.then(create).catch(function(error) {
+        }).catch(function(error) {
+          if (requestId !== window.codespringIgvLoadRequestId) return;
+          window.codespringIgvBrowser = null;
           container.innerHTML = '';
           if (status) status.textContent = 'Genome browser error: ' + (error && error.message ? error.message : String(error));
         });
@@ -10675,7 +10688,7 @@ server <- function(input, output, session) {
       updateSelectizeInput(session, "genome_browser_gene", selected = "")
     }
   }, ignoreInit = TRUE)
-  send_genome_browser <- function(comparison_override = "", samples_override = NULL) {
+  send_genome_browser <- function(comparison_override = "", samples_override = NULL, locus_override = "") {
     p <- current_project()
     if (!is_atac_project(p) && !is_chip_project(p) && !is_cutrun_project(p)) return(invisible(NULL))
     catalog <- genome_browser_track_catalog(p)
@@ -10696,6 +10709,7 @@ server <- function(input, output, session) {
     comparison_mode <- identical(browser_mode, "comparison") && NROW(comparisons)
     shared_signal_scale <- comparison_mode && (if (is.null(input$genome_browser_shared_scale)) TRUE else isTRUE(input$genome_browser_shared_scale))
     comparison_label <- ""
+    comparison_default_locus <- ""
     differential_loaded <- FALSE
     if (comparison_mode) {
       requested_comparison <- if (nzchar(as.character(comparison_override %||% ""))) comparison_override else input$genome_browser_comparison
@@ -10731,6 +10745,8 @@ server <- function(input, output, session) {
         differential_loaded <- TRUE
       }
       comparison_label <- comparison$label[[1]]
+      navigation <- genome_browser_comparison_navigation(comparison$id[[1]], project = p, max_peaks = 200L)
+      if (length(navigation$peaks)) comparison_default_locus <- unname(navigation$peaks)[[1]]
     } else {
       selected_samples <- intersect(as.character(input$genome_browser_samples %||% character(0)), unique(catalog$sample))
       if (!length(selected_samples)) selected_samples <- utils::head(unique(catalog$sample), 2L)
@@ -10755,8 +10771,13 @@ server <- function(input, output, session) {
         c(base, list(type = "annotation", displayMode = "EXPANDED", indexed = FALSE, height = 90L))
       }
     })
-    locus <- trimws(input$genome_browser_locus %||% "")
+    locus <- trimws(as.character(locus_override %||% ""))
+    if (!nzchar(locus)) locus <- trimws(input$genome_browser_locus %||% "")
+    if (!nzchar(locus) && comparison_mode) locus <- comparison_default_locus
     if (!nzchar(locus)) locus <- genome_browser_default_locus(p)
+    if (!nzchar(trimws(input$genome_browser_locus %||% "")) || nzchar(as.character(locus_override %||% ""))) {
+      updateTextInput(session, "genome_browser_locus", value = locus)
+    }
     summary <- paste0(
       "Loaded ", length(configs), " track", if (length(configs) == 1L) "" else "s",
       " for ", length(selected_samples), " sample", if (length(selected_samples) == 1L) "" else "s",
@@ -10795,13 +10816,18 @@ server <- function(input, output, session) {
     catalog <- genome_browser_track_catalog(p)
     available <- comparison$samples[[1]]
     available <- available[available %in% unique(as.character(catalog$sample))]
+    navigation <- genome_browser_comparison_navigation(comparison$id[[1]], project = p, max_peaks = 200L)
+    top_peak <- if (length(navigation$peaks)) unname(navigation$peaks)[[1]] else ""
     updateSelectizeInput(session, "genome_browser_samples", choices = available, selected = available, server = FALSE)
     updateSelectizeInput(session, "genome_browser_gene", selected = "")
-    updateSelectizeInput(session, "genome_browser_peak", selected = "")
+    updateSelectizeInput(session, "genome_browser_peak", selected = top_peak)
+    if (nzchar(top_peak)) updateTextInput(session, "genome_browser_locus", value = top_peak)
     session$onFlushed(function() {
       updateSelectizeInput(session, "genome_browser_samples", choices = available, selected = available, server = FALSE)
+      updateSelectizeInput(session, "genome_browser_gene", selected = "")
+      updateSelectizeInput(session, "genome_browser_peak", selected = top_peak)
     }, once = TRUE)
-    send_genome_browser(comparison_override = comparison_id, samples_override = available)
+    send_genome_browser(comparison_override = comparison_id, samples_override = available, locus_override = top_peak)
   }, ignoreInit = TRUE)
   observeEvent(input$load_genome_browser, send_genome_browser(), ignoreInit = TRUE)
   observeEvent(input$genome_browser_ready, send_genome_browser(), ignoreInit = TRUE)

@@ -17,6 +17,8 @@ server_source <- paste(deparse(body(app_env$MAIN_SERVER)), collapse = "\n")
 owner_path_pattern <- "(/grid/bsr/home/rouse|/home/rouse|/Users/rouse|rouse@bamdev)"
 assert(!any(grepl(owner_path_pattern, runtime_text, ignore.case = TRUE)), "runtime code contains no hardcoded rouse home, login, or server path")
 assert(grepl("observeEvent(input$genome_browser_comparison", server_source, fixed = TRUE) && grepl("samples_override = available", server_source, fixed = TRUE), "changing a genome-browser comparison resets its samples and reloads the selected comparison")
+assert(any(grepl("codespringIgvLoadPromise", runtime_text, fixed = TRUE)), "IGV replacements are serialized so repeated reload events cannot create duplicate browsers")
+assert(grepl("comparison_default_locus", server_source, fixed = TRUE) && grepl("locus_override = top_peak", server_source, fixed = TRUE), "each differential comparison defaults IGV to its most significant ranked peak")
 assert(app_env$path_is_within(app_env$APP_HOME, app_env$CURRENT_HOME), "private app state is derived from the effective Unix user's home")
 assert(identical(app_env$DEFAULT_RESULTS_ROOT, normalizePath(file.path(app_env$CURRENT_HOME, "csl_results"), winslash = "/", mustWork = FALSE)), "default results root is derived from the effective Unix user's home")
 assert(app_env$is_codespring_process_command("Rscript -e shiny::runApp('/home/user/CodeSpringWeb', port=8601)"), "CodeSpringApp process command recognized")
