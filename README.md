@@ -76,10 +76,10 @@ Example launcher output. The port in your terminal may differ if the default por
 - Creates or resumes CodeSpringLab projects from saved project configs.
 - Builds and edits design matrices from FASTQ folders.
 - Submits real SLURM `sbatch` jobs for RNA-seq tools plus ATAC-seq, CUT&RUN, and ChIP-seq Bowtie2/peak-calling/differential workflows.
-- Supports explicit sample selection for ATAC-seq and ChIP-seq sample-level steps and explicit target-to-control pairing for ChIP-seq.
+- Supports explicit sample selection for sample-level runs and cancellations across RNA-seq, ATAC-seq, CUT&RUN, and ChIP-seq, plus explicit target-to-control pairing for ChIP-seq.
 - Tracks per-sample and per-comparison progress with completed, running, cancelled, deleted, and likely failed states.
 - Resubmits only failed, cancelled, missing, or deleted samples while skipping active and completed jobs.
-- Embeds the native CodeSpringLab RNA-seq Results Explorer and provides organized ATAC-seq, CUT&RUN, and ChIP-seq explorers in the same app.
+- Embeds the native CodeSpringLab RNA-seq Results Explorer and provides consistently branded ATAC-seq, CUT&RUN, and ChIP-seq explorers with Overview, QC, Signal & Peaks, differential results, and Files navigation.
 - Records logs, methods, tool versions, reference genome selections, and run parameters.
 
 ### ChIP-seq workflow
@@ -106,7 +106,7 @@ Scan FASTQ folders, include/exclude samples, rename samples, and edit metadata c
 
 ### Run Pipeline
 
-Each step has its own parameters, submit button, status panel, sample progress, cancel controls, and data-delete controls.
+Each step has its own parameters, submit button, status panel, sample progress, cancel controls, and data-delete controls. Cancellation dialogs show only active tracked jobs and allow exact sample selection when sample identities are available.
 
 ![Run pipeline](docs/assets/run_readme.png)
 

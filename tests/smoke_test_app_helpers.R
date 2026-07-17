@@ -119,6 +119,45 @@ assert(NROW(chip_alignment) == 1L && all(c("role", "condition", "matched_input")
 assert(inherits(app_env$atac_summary_cards_ui(chip_project), "shiny.tag"), "ChIP summary cards render with fake results")
 assert(inherits(app_env$chip_results_explorer_ui(), "shiny.tag"), "ChIP Results Explorer UI renders locally")
 
+atac_ui_text <- as.character(app_env$atac_results_explorer_ui())
+chip_ui_text <- as.character(app_env$chip_results_explorer_ui())
+cutrun_ui_text <- as.character(app_env$cutrun_results_explorer_ui())
+for (ui_check in list(
+  ATAC = atac_ui_text,
+  ChIP = chip_ui_text,
+  CUTRUN = cutrun_ui_text
+)) {
+  assert(grepl("Developed by CSHL's Bioinformatics Shared Resource", ui_check, fixed = TRUE), paste(names(ui_check), "Results Explorer uses the shared branded header"))
+  assert(grepl("Overview", ui_check, fixed = TRUE) && grepl("QC", ui_check, fixed = TRUE) && grepl("Files", ui_check, fixed = TRUE), "custom Results Explorer exposes the standard navigation")
+  assert(grepl("Signal &amp; Peaks", ui_check, fixed = TRUE) || grepl("Signal & Peaks", ui_check, fixed = TRUE), "custom Results Explorer exposes standardized signal and peak navigation")
+}
+assert(grepl("Initial QC", chip_ui_text, fixed = TRUE) && grepl("Fragment Size", chip_ui_text, fixed = TRUE), "ChIP Results Explorer includes RNA-style QC navigation")
+
+rna_project <- chip_project
+rna_project$id <- "fake-rna"
+rna_project$name <- "fake-rna"
+rna_project$analysis_key <- "rna"
+rna_project$analysis <- "RNA-seq"
+old_app_home <- app_env$APP_HOME
+app_env$APP_HOME <- file.path(root, "fake-app-home")
+rna_viewer <- app_env$load_native_rnaseq_viewer(rna_project)
+app_env$APP_HOME <- old_app_home
+assert(inherits(rna_viewer$ui, "shiny.tag") && is.function(rna_viewer$server), "RNA Results Explorer loads against a synthetic project")
+assert(grepl("RNA-Seq Results Explorer", as.character(rna_viewer$ui), fixed = TRUE), "RNA Results Explorer branded UI is present")
+
+fake_jobs <- data.frame(
+  step = c("Bowtie2", "Bowtie2", "Bowtie2", "Bowtie2", "FastQC"),
+  sample = c("A1", "A2", "A3", "A4", "A1"),
+  job_id = c("101", "102", "103", "104", "105"),
+  slurm_state = c("RUNNING", "PENDING", "COMPLETED", "CANCELLED", "RUNNING"),
+  stringsAsFactors = FALSE
+)
+active_bowtie <- app_env$active_step_jobs_from_jobs(fake_jobs, "Bowtie2")
+assert(identical(sort(active_bowtie$job_id), c("101", "102")), "active-job filtering excludes completed, cancelled, and other-step jobs")
+assert(identical(unname(app_env$active_step_sample_choices(fake_jobs, "Bowtie2")), c("A1", "A2")), "cancellation choices contain only samples with active jobs")
+assert(identical(app_env$filter_active_jobs_by_samples(active_bowtie, "A2")$job_id, "102"), "selected-sample cancellation resolves only the requested active job")
+assert(inherits(app_env$active_jobs_modal_table(active_bowtie), "shiny.tag"), "active-job cancellation summary renders locally")
+
 bad_q <- app_env$submit_atac_macs2_jobs(atac_project, "not-a-number", "A1")
 assert(grepl("q-value must be", bad_q), "invalid ATAC MACS2 q-value rejected before submission")
 assert(grepl("two different", app_env$submit_atac_diffbind_job(atac_project, "condition", "A", "A")), "identical ATAC DiffBind conditions rejected")

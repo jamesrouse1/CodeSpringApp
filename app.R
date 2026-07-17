@@ -1511,6 +1511,58 @@ project_samples <- function(project) {
   unique(as.character(design$sample[nzchar(as.character(design$sample))]))
 }
 
+active_step_jobs_from_jobs <- function(jobs, step) {
+  required <- c("step", "job_id", "slurm_state")
+  if (!NROW(jobs) || !all(required %in% names(jobs))) return(data.frame())
+  state <- toupper(trimws(as.character(jobs$slurm_state)))
+  active <- toupper(active_slurm_states())
+  keep <- canonical_job_step(jobs$step) == canonical_job_step(step) &
+    state %in% active & nzchar(trimws(as.character(jobs$job_id)))
+  keep[is.na(keep)] <- FALSE
+  jobs[keep, , drop = FALSE]
+}
+
+filter_active_jobs_by_samples <- function(jobs, samples) {
+  samples <- unique(trimws(as.character(samples %||% character(0))))
+  samples <- samples[!is.na(samples) & nzchar(samples)]
+  if (!length(samples) || !NROW(jobs) || !"sample" %in% names(jobs)) return(jobs[0, , drop = FALSE])
+  tracked <- trimws(as.character(jobs$sample))
+  jobs[!is.na(tracked) & nzchar(tracked) & tracked %in% samples, , drop = FALSE]
+}
+
+active_step_samples_from_jobs <- function(jobs, step) {
+  hit <- active_step_jobs_from_jobs(jobs, step)
+  if (!NROW(hit) || !"sample" %in% names(hit)) return(character(0))
+  samples <- trimws(as.character(hit$sample))
+  sort(unique(samples[nzchar(samples) & !is.na(samples)]))
+}
+
+active_step_sample_choices <- function(jobs, step) {
+  hit <- active_step_jobs_from_jobs(jobs, step)
+  samples <- active_step_samples_from_jobs(jobs, step)
+  if (!length(samples)) return(character(0))
+  labels <- vapply(samples, function(sample) {
+    rows <- hit[trimws(as.character(hit$sample)) == sample, , drop = FALSE]
+    states <- unique(toupper(trimws(as.character(rows$slurm_state))))
+    ids <- unique(trimws(as.character(rows$job_id)))
+    paste0(sample, " — ", paste(states[nzchar(states)], collapse = ", "), " (job ", paste(ids[nzchar(ids)], collapse = ", "), ")")
+  }, character(1))
+  stats::setNames(samples, labels)
+}
+
+active_jobs_modal_table <- function(jobs) {
+  if (!NROW(jobs)) return(NULL)
+  columns <- intersect(c("sample", "job_id", "slurm_state"), names(jobs))
+  rows <- unique(jobs[, columns, drop = FALSE])
+  tags$table(
+    class = "table table-condensed table-striped",
+    tags$thead(tags$tr(lapply(columns, function(column) tags$th(gsub("_", " ", tools::toTitleCase(column)))))),
+    tags$tbody(lapply(seq_len(NROW(rows)), function(i) {
+      tags$tr(lapply(columns, function(column) tags$td(as.character(rows[[column]][i] %||% ""))))
+    }))
+  )
+}
+
 cancel_active_step_jobs <- function(project, step, samples = NULL) {
   if (Sys.which("scancel") == "") {
     return("ERROR: scancel was not found. Job cancellation must be run on the SLURM server.")
@@ -1519,23 +1571,23 @@ cancel_active_step_jobs <- function(project, step, samples = NULL) {
   if (!NROW(jobs) || !"job_id" %in% names(jobs) || !"step" %in% names(jobs) || !"slurm_state" %in% names(jobs)) {
     return(paste("No tracked jobs found for", step, "in this project."))
   }
-  active_states <- active_slurm_states()
-  hit <- jobs[
-    canonical_job_step(jobs$step) == canonical_job_step(step) &
-      jobs$slurm_state %in% active_states &
-      nzchar(jobs$job_id),
-    ,
-    drop = FALSE
-  ]
-  samples <- unique(as.character(samples %||% character(0)))
-  samples <- samples[nzchar(samples)]
-  if (length(samples) && canonical_job_step(step) %in% canonical_job_step(sample_level_pipeline_steps()) && "sample" %in% names(hit)) {
-    hit <- hit[nzchar(hit$sample) & hit$sample %in% samples, , drop = FALSE]
+  hit <- active_step_jobs_from_jobs(jobs, step)
+  selective_request <- !is.null(samples)
+  samples <- unique(trimws(as.character(samples %||% character(0))))
+  samples <- samples[nzchar(samples) & !is.na(samples)]
+  if (selective_request && canonical_job_step(step) %in% canonical_job_step(sample_level_pipeline_steps())) {
+    if (!length(samples)) return(paste("No samples were selected for", step, "cancellation."))
+    tracked <- active_step_samples_from_jobs(hit, step)
+    if (!length(tracked)) {
+      return(paste("No sample identities were recorded for the active", step, "jobs; selective cancellation was not attempted."))
+    }
+    hit <- filter_active_jobs_by_samples(hit, samples)
   }
   ids <- unique(as.character(hit$job_id))
   ids <- ids[nzchar(ids)]
   if (!length(ids)) {
-    return(paste("No active", step, "jobs were found for this project."))
+    suffix <- if (length(samples)) paste("for the selected sample(s):", paste(samples, collapse = ", ")) else "for this project."
+    return(paste("No active", step, "jobs were found", suffix))
   }
   out <- tryCatch(system2("scancel", ids, stdout = TRUE, stderr = TRUE), error = function(e) conditionMessage(e))
   for (id in ids) {
@@ -3255,11 +3307,50 @@ atac_postprocess_status_table <- function(project) {
   do.call(rbind, rows)
 }
 
+results_explorer_hero <- function(title) {
+  div(
+    class = "hero cutrun-results-hero",
+    div(
+      class = "hero-topbar",
+      div(
+        class = "hero-copy",
+        h1(class = "hero-title", title),
+        div(class = "hero-kicker", "Developed by CSHL's Bioinformatics Shared Resource")
+      ),
+      div(
+        class = "hero-logos",
+        if (file.exists(LOGO_CSL_PATH)) tags$img(class = "hero-logo", src = file.path("csl_logo", basename(LOGO_CSL_PATH))),
+        if (file.exists(LOGO_PATH)) tags$img(class = "hero-logo", src = file.path("codespring_logo", basename(LOGO_PATH)))
+      )
+    )
+  )
+}
+
+results_overview_contents <- function(refresh_id, note, status_description, design_description) {
+  tagList(
+    br(),
+    div(
+      class = "cutrun-results-actions",
+      span(class = "cutrun-updated-note", note),
+      actionButton(refresh_id, "Refresh results", class = "btn-primary")
+    ),
+    uiOutput("atac_summary_cards"),
+    div(class = "cutrun-section-heading", tags$h4("Pipeline status"), tags$p(status_description)),
+    table_output("results_overview"),
+    br(),
+    results_design_matrix_ui(design_description)
+  )
+}
+
 atac_results_explorer_ui <- function() {
   div(class = "native-results-host cutrun-results-host", div(class = "app-shell cutrun-results-shell",
-    div(class = "hero cutrun-results-hero", div(class = "hero-copy", h1(class = "hero-title", "ATAC-seq Results Explorer"), div(class = "hero-kicker", "GRCm39/GENCODE M39 accessibility analysis"))),
+    results_explorer_hero("ATAC-seq Results Explorer"),
     div(class = "main-tabs", tabsetPanel(id = "atac_results_tabs",
-      tabPanel("Overview", br(), actionButton("refresh_atac_results", "Refresh results", class = "btn-primary"), uiOutput("atac_summary_cards"), tags$h4("Pipeline status"), table_output("results_overview"), results_design_matrix_ui("Samples, conditions, cell types, and replicates used by ATAC-seq peak and differential-accessibility analyses.")),
+      tabPanel("Overview", results_overview_contents(
+        "refresh_atac_results", "Live summary of saved pipeline outputs",
+        "Completion state for every ATAC-seq analysis stage.",
+        "Samples, conditions, cell types, and replicates used by ATAC-seq peak and differential-accessibility analyses."
+      )),
       tabPanel("QC", br(), tabsetPanel(id = "atac_qc_tabs",
         tabPanel("Initial QC", br(), sidebarLayout(
           sidebarPanel(width = 2, uiOutput("atac_qc_sample_control"), uiOutput("atac_qc_mode_control"), tags$hr(), helpText("FastQC and FastQ Screen reports for raw or cutadapt-trimmed reads.")),
@@ -3273,7 +3364,7 @@ atac_results_explorer_ui <- function() {
         tabPanel("Alignment", br(), tags$h4("Alignment summary across samples"), table_output("atac_alignment_summary"), tags$hr(), tags$h4("Post-alignment output checks"), table_output("atac_postprocess_status")),
         tabPanel("Fragment Size", br(), tags$p(class = "muted small-note", "Inspect the paired-end insert-size distribution produced after duplicate removal."), uiOutput("atac_insert_size_ui"))
       )),
-      tabPanel("Peaks", br(), sidebarLayout(
+      tabPanel("Signal & Peaks", br(), sidebarLayout(
         sidebarPanel(width = 2, uiOutput("atac_peak_file_ui"), tags$hr(), helpText("Inspect MACS2 ATAC peak calls and the corresponding TSS-centered signal heatmap.")),
         mainPanel(width = 10, tabsetPanel(
           tabPanel("Peak Table", br(), table_output("atac_peak_table")),
@@ -3295,26 +3386,27 @@ atac_results_explorer_ui <- function() {
 
 chip_results_explorer_ui <- function() {
   div(class = "native-results-host cutrun-results-host", div(class = "app-shell cutrun-results-shell",
-    div(class = "hero cutrun-results-hero", div(class = "hero-copy",
-      h1(class = "hero-title", "ChIP-seq Results Explorer"),
-      div(class = "hero-kicker", "Alignment, peak calling, and differential binding results")
-    )),
+    results_explorer_hero("ChIP-seq Results Explorer"),
     div(class = "main-tabs", tabsetPanel(id = "chip_results_tabs",
-      tabPanel("Overview", br(),
-        actionButton("refresh_atac_results", "Refresh results", class = "btn-primary"),
-        uiOutput("atac_summary_cards"),
-        tags$h4("Pipeline status"),
-        table_output("results_overview"),
-        results_design_matrix_ui("Samples, targets, conditions, replicates, and matched input controls used by ChIP-seq analyses.")
-      ),
-      tabPanel("QC", br(),
-        tags$h4("Alignment summary across samples"),
-        table_output("atac_alignment_summary"),
-        tags$hr(),
-        tags$h4("Post-alignment output checks"),
-        table_output("atac_postprocess_status")
-      ),
-      tabPanel("Peaks", br(), tags$h4("Matched-input peak-calling summary"), table_output("chip_peak_summary"), tags$hr(), sidebarLayout(
+      tabPanel("Overview", results_overview_contents(
+        "refresh_atac_results", "Live summary of saved pipeline outputs",
+        "Completion state for every ChIP-seq analysis stage.",
+        "Samples, targets, conditions, replicates, and matched input controls used by ChIP-seq analyses."
+      )),
+      tabPanel("QC", br(), tabsetPanel(id = "chip_qc_tabs",
+        tabPanel("Initial QC", br(), sidebarLayout(
+          sidebarPanel(width = 2, uiOutput("atac_qc_sample_control"), uiOutput("atac_qc_mode_control"), tags$hr(), helpText("FastQC and FastQ Screen reports for raw or cutadapt-trimmed reads.")),
+          mainPanel(width = 10, uiOutput("atac_qc_status_ui"), tabsetPanel(
+            tabPanel("R1 FastQC", uiOutput("atac_r1_fastqc_ui")),
+            tabPanel("R1 Screen", uiOutput("atac_r1_screen_ui")),
+            tabPanel("R2 FastQC", uiOutput("atac_r2_fastqc_ui")),
+            tabPanel("R2 Screen", uiOutput("atac_r2_screen_ui"))
+          ))
+        )),
+        tabPanel("Alignment", br(), tags$h4("Alignment summary across samples"), table_output("atac_alignment_summary"), tags$hr(), tags$h4("Post-alignment output checks"), table_output("atac_postprocess_status")),
+        tabPanel("Fragment Size", br(), tags$p(class = "muted small-note", "Inspect the paired-end insert-size distribution produced after duplicate removal."), uiOutput("atac_insert_size_ui"))
+      )),
+      tabPanel("Signal & Peaks", br(), tags$h4("Matched-input peak-calling summary"), table_output("chip_peak_summary"), tags$hr(), sidebarLayout(
         sidebarPanel(width = 2, uiOutput("atac_peak_file_ui"), tags$hr(), helpText("Inspect MACS2 ChIP-seq peak calls.")),
         mainPanel(width = 10, table_output("atac_peak_table"))
       )),
@@ -3430,22 +3522,7 @@ cutrun_results_explorer_ui <- function() {
     class = "native-results-host cutrun-results-host",
     div(
       class = "app-shell cutrun-results-shell",
-      div(
-        class = "hero cutrun-results-hero",
-        div(
-          class = "hero-topbar",
-          div(
-            class = "hero-copy",
-            h1(class = "hero-title", "CUT&RUN Results Explorer"),
-            div(class = "hero-kicker", "Developed by CSHL's Bioinformatics Shared Resource")
-          ),
-          div(
-            class = "hero-logos",
-            if (file.exists(LOGO_CSL_PATH)) tags$img(class = "hero-logo", src = file.path("csl_logo", basename(LOGO_CSL_PATH))),
-            if (file.exists(LOGO_PATH)) tags$img(class = "hero-logo", src = file.path("codespring_logo", basename(LOGO_PATH)))
-          )
-        )
-      ),
+      results_explorer_hero("CUT&RUN Results Explorer"),
       div(
         class = "main-tabs",
         tabsetPanel(
@@ -6614,10 +6691,6 @@ tool_panel <- function(step, status, description, controls, button_id, button_la
   )
 }
 
-active_slurm_states <- function() {
-  c("PENDING", "CONFIGURING", "COMPLETING", "RUNNING", "SUSPENDED", "Submitted")
-}
-
 clean_run_label <- function(x, fallback = "") {
   x <- trimws(as.character(x %||% fallback))
   x <- gsub("[[:space:]]+", " ", x)
@@ -9085,10 +9158,12 @@ server <- function(input, output, session) {
       delete_samples_id <- tool_delete_data_samples_id(this_step)
       observeEvent(input[[button_id]], {
         p <- current_project()
-        samples <- project_samples(p)
-        sample_selector <- if (this_step %in% sample_level_pipeline_steps() && length(samples)) {
-          checkboxGroupInput(cancel_samples_id, "Samples to cancel", choices = samples, selected = samples, inline = FALSE)
+        active_jobs <- active_step_jobs_from_jobs(job_history(p), this_step)
+        sample_choices <- active_step_sample_choices(active_jobs, this_step)
+        sample_selector <- if (this_step %in% sample_level_pipeline_steps() && length(sample_choices)) {
+          checkboxGroupInput(cancel_samples_id, "Active samples to cancel", choices = sample_choices, selected = unname(sample_choices), inline = FALSE)
         } else NULL
+        job_rows <- if (NROW(active_jobs)) unique(active_jobs[, intersect(c("sample", "job_id", "slurm_state"), names(active_jobs)), drop = FALSE]) else data.frame()
         showModal(modalDialog(
           title = paste("Cancel active", this_step, "jobs?"),
           tags$p("This will cancel tracked active SLURM jobs for this step in the selected project only."),
@@ -9097,6 +9172,8 @@ server <- function(input, output, session) {
             tags$li(tags$strong("Step: "), this_step)
           ),
           sample_selector,
+          if (NROW(job_rows)) tagList(tags$p(tags$strong("Active tracked jobs:")), active_jobs_modal_table(job_rows)) else tags$p(class = "muted", "No active tracked jobs are currently visible for this step."),
+          if (this_step %in% sample_level_pipeline_steps() && NROW(active_jobs) && !length(sample_choices)) tags$p(class = "muted", "These legacy jobs do not record sample identities, so they can only be cancelled together."),
           tags$p(tags$strong("Running jobs will stop and may leave partial outputs.")),
           footer = tagList(
             modalButton("Keep jobs running"),
@@ -9106,10 +9183,11 @@ server <- function(input, output, session) {
         ))
       }, ignoreInit = TRUE)
       observeEvent(input[[confirm_id]], {
-        samples <- isolate(input[[cancel_samples_id]] %||% character(0))
-        if (this_step %in% sample_level_pipeline_steps() && !length(samples)) {
+        active_samples <- active_step_samples_from_jobs(job_history(current_project()), this_step)
+        samples <- if (length(active_samples)) isolate(input[[cancel_samples_id]] %||% character(0)) else NULL
+        if (this_step %in% sample_level_pipeline_steps() && length(active_samples) && !length(samples)) {
           removeModal()
-          run_message("Select at least one sample to cancel for this step.")
+          run_message("Select at least one active sample to cancel for this step.")
           return()
         }
         removeModal()
@@ -9169,6 +9247,7 @@ server <- function(input, output, session) {
 
   native_results_app <- reactive({
     native_results_refresh()
+    if (!isTRUE(existing_project_selected())) return(NULL)
     if (is_cutrun_project(current_project()) || is_atac_project(current_project()) || is_chip_project(current_project())) return(NULL)
     load_native_rnaseq_viewer(current_project())
   })
