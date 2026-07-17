@@ -385,13 +385,14 @@ for (sample in c("A2", "B1", "B2")) {
 }
 comparison_catalog <- app_env$genome_browser_comparison_catalog(chip_project)
 assert(NROW(comparison_catalog) == 1L, "genome browser discovers a completed differential comparison")
-assert(identical(comparison_catalog$samples[[1]], c("A1", "A2", "B1", "B2")), "comparison browser retains the exact sample-sheet order")
+assert(identical(comparison_catalog$samples[[1]], c("B1", "B2", "A1", "A2")), "comparison browser places the experimental condition above the reference condition")
+assert(identical(comparison_catalog$reference_condition[[1]], "A"), "comparison browser records the DiffBind reference condition")
 assert(identical(comparison_catalog$differential_bed[[1]], normalizePath(differential_bed)), "comparison browser selects the differential BED annotation")
 comparison_tracks <- app_env$genome_browser_preferred_signal_rows(
   chip_project, app_env$genome_browser_track_catalog(chip_project),
   comparison_catalog$samples[[1]], comparison_catalog$sample_metadata[[1]]
 )
-assert(NROW(comparison_tracks) == 4L && identical(comparison_tracks$sample, c("A1", "A2", "B1", "B2")), "comparison browser loads one bigWig per sample in sample-sheet order")
+assert(NROW(comparison_tracks) == 4L && identical(comparison_tracks$sample, c("B1", "B2", "A1", "A2")), "comparison browser loads reference signal tracks below experimental tracks")
 
 cutrun_comparison_dir <- file.path(root, "cutrun_diffbind", "Creb", "B_vs_A")
 dir.create(cutrun_comparison_dir, recursive = TRUE, showWarnings = FALSE)
@@ -403,6 +404,7 @@ cutrun_browser_project$analysis_key <- "cutrun"
 cutrun_browser_project$analysis <- "CUT&RUN"
 cutrun_comparisons <- app_env$genome_browser_comparison_catalog(cutrun_browser_project)
 assert(NROW(cutrun_comparisons) == 1L && basename(cutrun_comparisons$id[[1]]) == "B_vs_A", "genome browser discovers nested CUT&RUN differential comparisons")
+assert(identical(cutrun_comparisons$samples[[1]], c("B1", "B2", "A1", "A2")), "CUT&RUN genome browser places the reference condition below the comparison")
 
 atac_browser_root <- file.path(root, "atac_browser_case")
 atac_browser_samples <- paste0(rep(c("Control", "Treated"), each = 3), rep(1:3, 2))
@@ -430,7 +432,8 @@ atac_browser_project <- list(
   fastq_dir = atac_browser_root, fastq_dirs = atac_browser_root, paired_end = TRUE, genome = "mouse"
 )
 atac_comparisons <- app_env$genome_browser_comparison_catalog(atac_browser_project)
-assert(NROW(atac_comparisons) == 1L && identical(atac_comparisons$samples[[1]], atac_browser_samples), "existing ATAC comparisons recover all six samples from the saved run manifest")
+expected_atac_track_order <- c("Treated1", "Treated2", "Treated3", "Control1", "Control2", "Control3")
+assert(NROW(atac_comparisons) == 1L && identical(atac_comparisons$samples[[1]], expected_atac_track_order), "existing ATAC comparisons place vehicle/control tracks below treatment tracks")
 
 annotation_inputs <- app_env$peak_annotation_input_files(atac_project)
 assert(legacy_peak %in% annotation_inputs, "peak annotation discovers completed per-sample MACS2 peaks")

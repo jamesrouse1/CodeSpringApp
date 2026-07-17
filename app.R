@@ -3414,11 +3414,26 @@ normalize_genome_browser_sample_sheet <- function(sheet) {
 }
 
 genome_browser_diffbind_labels <- function(result_dir) {
-  files <- list.files(result_dir, pattern = "^DifferentialPeaks_.*(?:\\.with_stats\\.bed|\\.txt)$", full.names = FALSE)
-  if (!length(files)) return(c(comparison = "", reference = ""))
-  stem <- sub("(?:\\.with_stats\\.bed|\\.txt)$", "", files[[1]])
+  files <- list.files(result_dir, pattern = "^DifferentialPeaks_.*_ref(?:\\.with_stats\\.bed|\\.txt)$", full.names = FALSE)
+  stem <- if (length(files)) sub("(?:\\.with_stats\\.bed|\\.txt)$", "", files[[1]]) else basename(result_dir)
   match <- regmatches(stem, regexec("^DifferentialPeaks_(.*)_vs_(.*)_ref$", stem))[[1]]
+  if (length(match) == 3L) return(c(comparison = match[[2]], reference = match[[3]]))
+  match <- regmatches(stem, regexec("(?:^|__)([^_]+)_vs_([^_]+)$", stem, perl = TRUE))[[1]]
   if (length(match) == 3L) c(comparison = match[[2]], reference = match[[3]]) else c(comparison = "", reference = "")
+}
+
+order_genome_browser_comparison_sheet <- function(sheet, labels = c(comparison = "", reference = "")) {
+  if (!NROW(sheet) || !"condition" %in% names(sheet)) return(sheet)
+  condition_key <- tolower(clean_name(trimws(as.character(sheet$condition)), "condition"))
+  comparison_key <- tolower(clean_name(as.character(labels[["comparison"]] %||% ""), "condition"))
+  reference_key <- tolower(clean_name(as.character(labels[["reference"]] %||% ""), "condition"))
+  is_reference <- nzchar(reference_key) & condition_key == reference_key
+  if (!any(is_reference)) {
+    is_reference <- grepl("^(veh|vehicle|control|ctrl|untreated|ut|mock|input|igg)$", condition_key)
+  }
+  is_comparison <- nzchar(comparison_key) & condition_key == comparison_key
+  priority <- ifelse(is_reference, 2L, ifelse(is_comparison, 0L, 1L))
+  sheet[order(priority, seq_len(NROW(sheet))), , drop = FALSE]
 }
 
 genome_browser_atac_manifest_sheet <- function(project, result_dir) {
@@ -3482,10 +3497,14 @@ genome_browser_comparison_catalog <- function(project) {
     if (!NROW(sheet)) return(NULL)
     sheet <- sheet[sheet$sample %in% project_samples(project), , drop = FALSE]
     if (!NROW(sheet)) return(NULL)
+    condition_labels <- genome_browser_diffbind_labels(result_dir)
+    sheet <- order_genome_browser_comparison_sheet(sheet, condition_labels)
     label <- trimws(gsub("_+", " ", basename(result_dir)))
     data.frame(
       id = normalizePath(result_dir, winslash = "/", mustWork = TRUE),
       label = label,
+      comparison_condition = unname(condition_labels[["comparison"]]),
+      reference_condition = unname(condition_labels[["reference"]]),
       differential_bed = bed,
       samples = I(list(as.character(sheet$sample))),
       sample_metadata = I(list(sheet)),
@@ -10573,6 +10592,7 @@ server <- function(input, output, session) {
           "genome_browser_show_differential_peaks", "Show differential peaks as bottom track",
           value = if (is.null(input$genome_browser_show_differential_peaks)) TRUE else isTRUE(input$genome_browser_show_differential_peaks)
         ),
+        div(class = "muted small-note", "Track order: experimental samples first, reference/control samples below them, differential peaks last."),
         div(class = "muted small-note", paste("Differential BED:", basename(comparison$differential_bed[[1]])))
       ))
     } else {
