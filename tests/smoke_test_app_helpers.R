@@ -42,6 +42,26 @@ assert(identical(mouse_chip_ref$genome_version, "mouse_gencodeM39") && grepl("mo
 assert(identical(human_chip_ref$genome_version, "human_gencode50") && grepl("human_gencode50", human_chip_ref$bowtie2_index), "ChIP human reference uses GRCh38/GENCODE v50")
 assert(length(app_env$genome_reference_choices("mouse", "ChIP-seq")) == 1L, "ChIP setup offers only the current mouse reference")
 assert(length(app_env$genome_reference_choices("human", "ChIP-seq")) == 1L, "ChIP setup offers only the current human reference")
+for (project_variant in list(
+  RNA = within(chip_project, { analysis_key <- "rna"; analysis <- "RNA-seq" }),
+  CUTRUN = within(chip_project, { analysis_key <- "cutrun"; analysis <- "CUT&RUN" }),
+  ATAC = within(chip_project, { analysis_key <- "atac"; analysis <- "ATAC-seq" }),
+  ChIP = chip_project
+)) {
+  step_meta <- app_env$run_step_meta(project_variant)
+  assert(NROW(step_meta) == length(app_env$pipeline_order(project_variant)), paste(project_variant$analysis, "stepper descriptions match its pipeline"))
+}
+
+blank_editor <- app_env$blank_design_matrix_rows(c("condition", "replicate"), rows = 3)
+assert(NROW(blank_editor) == 3L && all(!blank_editor$include), "blank design setup provides editable excluded rows")
+blank_form <- as.character(app_env$design_form_table_ui(blank_editor))
+assert(grepl("design_form_1_sample", blank_form, fixed = TRUE) && grepl("design_form_1_filename", blank_form, fixed = TRUE), "blank design setup renders visible text inputs")
+provided_editor <- app_env$design_editor_from_project(chip_project)
+form_values <- list()
+form_values[[app_env$design_form_input_id(1, "treatment")]] <- "edited_treatment"
+form_values[[app_env$design_form_input_id(1, "include")]] <- FALSE
+edited_design <- app_env$apply_design_form_values(provided_editor, form_values)
+assert(identical(edited_design$treatment[[1]], "edited_treatment") && !edited_design$include[[1]], "provided design matrices remain editable through visible form controls")
 
 duplicate_design <- data.frame(
   include = TRUE, sample = c("sample-A", "sample A"), cell_type = "", condition = c("A", "B"),
@@ -99,6 +119,25 @@ assert(all(nzchar(cutrun_example$control_sample[cutrun_targets])), "CUT&RUN exam
 atac_project <- chip_project
 atac_project$analysis_key <- "atac"
 atac_project$analysis <- "ATAC-seq"
+initial_progress <- app_env$sample_progress(atac_project, jobs = data.frame())$table
+initial_a1_bowtie <- initial_progress$status[initial_progress$sample == "A1" & initial_progress$step == "Bowtie2"]
+assert(identical(initial_a1_bowtie, "Not started"), "untouched samples start as Not started")
+partial_targets <- app_env$sample_step_targets(atac_project, "A1", "Bowtie2")
+dir.create(dirname(partial_targets[[1]]), recursive = TRUE, showWarnings = FALSE)
+writeLines("partial", partial_targets[[1]])
+partial_progress <- app_env$sample_progress(atac_project, jobs = data.frame())$table
+partial_a1_bowtie <- partial_progress$status[partial_progress$sample == "A1" & partial_progress$step == "Bowtie2"]
+assert(identical(partial_a1_bowtie, "Not started"), "partial files do not imply failure before a terminal job state")
+unlink(partial_targets[[1]])
+running_job <- data.frame(step = "Bowtie2", sample = "A1", slurm_state = "RUNNING", elapsed = "00:00:05", stderr = "", stringsAsFactors = FALSE)
+running_progress <- app_env$sample_progress(atac_project, jobs = running_job)$table
+assert(identical(running_progress$status[running_progress$sample == "A1" & running_progress$step == "Bowtie2"], "Running"), "active jobs are not marked failed while outputs are incomplete")
+finished_job <- running_job
+finished_job$slurm_state <- "COMPLETED"
+finished_progress <- app_env$sample_progress(atac_project, jobs = finished_job)$table
+assert(identical(finished_progress$status[finished_progress$sample == "A1" & finished_progress$step == "Bowtie2"], "Likely failed"), "missing outputs are classified only after a job completes")
+retry_ui <- as.character(app_env$sample_retry_ui(atac_project, finished_progress, "Bowtie2"))
+assert(grepl("atac_bowtie2_samples", retry_ui, fixed = TRUE) && grepl('wanted=[&quot;A1&quot;]', retry_ui, fixed = TRUE), "retry action selects only terminally incomplete samples before submission")
 sample_dir <- file.path(root, "macs2", "A1")
 dir.create(sample_dir, recursive = TRUE)
 legacy_peak <- file.path(sample_dir, "A1_peaks.narrowPeak")
@@ -120,7 +159,7 @@ assert(identical(app_env$chip_macs2_peak_file(chip_project, "A1"), legacy_peak),
 chip_peaks <- app_env$chip_peak_summary_table(chip_project)
 assert(NROW(chip_peaks) == 4L && chip_peaks$status[chip_peaks$sample == "A1"] == "Completed", "ChIP matched-input peak summary reports completion")
 alignment_dir <- file.path(root, "bowtie2", "A1")
-dir.create(alignment_dir, recursive = TRUE)
+dir.create(alignment_dir, recursive = TRUE, showWarnings = FALSE)
 writeLines(c("sample\tA1", "mapped_reads\t100", "deduplicated_reads\t80", "bigwig_normalization\tCPM"), file.path(alignment_dir, "A1_alignment_summary.txt"))
 signal_file <- file.path(alignment_dir, "A1Aligned.sortedByCoord_removeDup.out.bw")
 writeLines("fake bigWig", signal_file)
@@ -193,6 +232,22 @@ for (step in assay_jobs$step) {
   expected <- assay_jobs$sample[assay_jobs$step == step]
   assert(identical(unname(app_env$active_step_sample_choices(assay_jobs, step)), expected), paste(step, "supports active sample cancellation"))
 }
+
+sample_aware_submitters <- c(
+  "submit_cutadapt_jobs", "submit_fastqc_jobs", "submit_star_jobs", "submit_featurecounts_jobs", "submit_rsem_jobs", "submit_kallisto_jobs",
+  "submit_cutrun_bowtie2_jobs", "submit_cutrun_seacr_jobs", "submit_cutrun_macs2_jobs",
+  "submit_atac_bowtie2_jobs", "submit_atac_macs2_jobs", "submit_chip_bowtie2_jobs", "submit_chip_macs2_jobs"
+)
+for (function_name in sample_aware_submitters) {
+  assert("samples" %in% names(formals(app_env[[function_name]])), paste(function_name, "accepts explicit sample selection"))
+}
+assert(identical(app_env$requested_sample_subset(atac_project, c("A1", "A2"), "A2", "test step"), "A2"), "unchecked samples are excluded from submission")
+cutrun_example_project <- chip_project
+cutrun_example_project$analysis_key <- "cutrun"
+cutrun_example_project$analysis <- "CUT&RUN"
+cutrun_example_project$design_matrix_path <- file.path(app_env$example_dataset_paths("cutrun")$design_dir, "design_matrix.txt")
+cutrun_targets <- app_env$pipeline_step_sample_candidates(cutrun_example_project, targets_only = TRUE)
+assert(length(cutrun_targets) == 4L && !any(grepl("IgG", cutrun_targets)), "CUT&RUN peak-step selectors contain targets but not controls")
 
 assert(system2("bash", c("-n", shQuote(file.path(repo_root, "run_codespringweb.sh")))) == 0L, "CodeSpringApp launcher shell syntax is valid")
 

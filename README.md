@@ -78,7 +78,9 @@ Example launcher output. The port in your terminal may differ if the default por
 - Builds and edits design matrices from FASTQ folders.
 - Submits real SLURM `sbatch` jobs for RNA-seq tools plus ATAC-seq, CUT&RUN, and ChIP-seq Bowtie2/peak-calling/differential workflows.
 - Supports explicit sample selection for sample-level runs and cancellations across RNA-seq, ATAC-seq, CUT&RUN, and ChIP-seq, plus explicit target-to-control pairing for ChIP-seq.
+- Shows checked sample lists inside every sample-level tool card; unchecking a sample excludes it from that step without changing the saved experimental design.
 - Tracks per-sample and per-comparison progress with completed, running, cancelled, deleted, and likely failed states.
+- Keeps untouched or partial sample outputs at `Not started` until SLURM reports a terminal job state; only a finished unsuccessful or incomplete job is classified as failed.
 - Resubmits only failed, cancelled, missing, or deleted samples while skipping active and completed jobs.
 - Embeds the native CodeSpringLab RNA-seq Results Explorer and provides consistently branded ATAC-seq, CUT&RUN, and ChIP-seq explorers with Overview, QC, Signal & Peaks, differential results, and Files navigation.
 - Keeps every result-file view scoped to the currently selected project, including after switching between projects, and reports bigWig/bedGraph normalization in the ATAC-seq, CUT&RUN, and ChIP-seq signal-track views.
@@ -102,7 +104,7 @@ Create new projects, select species/reference builds, browse server folders, and
 
 ### Design Matrix
 
-Scan FASTQ folders, include/exclude samples, rename samples, and edit metadata columns directly in the app.
+Scan FASTQ folders, include/exclude samples, rename samples, and edit metadata columns directly in the app. A provided matrix loads into the same visible input grid. Projects without a matrix receive blank editable rows, with a button to add five more rows at a time.
 
 ![Design matrix editor](docs/assets/design_matrix.png)
 
