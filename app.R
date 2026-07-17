@@ -5661,6 +5661,20 @@ append_plan_message <- function(messages, plan) {
   if (nzchar(notes)) c(messages, notes) else messages
 }
 
+completed_samples_for_step <- function(project, step, samples) {
+  samples <- unique(trimws(as.character(samples %||% character(0))))
+  samples <- samples[!is.na(samples) & nzchar(samples)]
+  if (!length(samples)) return(character(0))
+  raw_pairs <- if (step %in% c("Cutadapt", "FastQC")) sample_fastq_pairs(project, FALSE) else NULL
+  trimmed_pairs <- if (identical(step, "FastQC")) sample_fastq_pairs(project, TRUE) else NULL
+  targets <- stats::setNames(lapply(samples, function(sample) {
+    sample_step_targets(project, sample, step, raw_pairs = raw_pairs, trimmed_pairs = trimmed_pairs)
+  }), samples)
+  targets <- targets[vapply(targets, length, integer(1)) > 0L]
+  if (!length(targets)) return(character(0))
+  intersect(samples, sample_submission_plan(project, step, targets)$complete)
+}
+
 target_outputs_ready_or_planned <- function(target_list, planned_samples = character(0), min_size = 1) {
   if (!length(target_list) || is.null(names(target_list))) return(FALSE)
   planned_samples <- unique(as.character(planned_samples %||% character(0)))
@@ -9882,39 +9896,42 @@ server <- function(input, output, session) {
     project_level_step_summary_ui(current_project(), job_history_state(), "GSEA")
   })
 
-  step_sample_selector <- function(input_id, label, targets_only = FALSE) {
+  step_sample_selector <- function(input_id, label, step, targets_only = FALSE) {
     p <- current_project()
     samples <- pipeline_step_sample_candidates(p, targets_only)
     if (!length(samples)) return(div(class = "empty-box", "No included samples were found in the saved design matrix."))
+    completed <- tryCatch(completed_samples_for_step(p, step, samples), error = function(e) character(0))
+    incomplete <- setdiff(samples, completed)
     current <- isolate(input[[input_id]])
-    selected <- if (is.null(current)) samples else intersect(as.character(current), samples)
-    if (!is.null(current) && length(current) > 0 && !length(selected)) selected <- samples
+    selected <- if (is.null(current)) incomplete else intersect(as.character(current), incomplete)
+    choice_labels <- ifelse(samples %in% completed, paste0(samples, " — complete"), samples)
+    choices <- stats::setNames(samples, choice_labels)
     div(
       class = "step-sample-selector",
-      checkboxGroupInput(input_id, label, choices = samples, selected = selected, inline = FALSE),
-      tags$p(class = "muted small-note", "Uncheck any sample that should not run in this step. Completed or active selected samples are still skipped safely.")
+      checkboxGroupInput(input_id, label, choices = choices, selected = selected, inline = FALSE),
+      tags$p(class = "muted small-note", "Successfully completed samples are automatically unchecked. Delete that sample's results for this step before intentionally rerunning it; active jobs are still skipped safely.")
     )
   }
 
-  output$rna_cutadapt_samples_ui <- renderUI(step_sample_selector("rna_cutadapt_samples", "Samples to trim"))
-  output$rna_fastqc_samples_ui <- renderUI(step_sample_selector("rna_fastqc_samples", "Samples for QC"))
-  output$rna_star_samples_ui <- renderUI(step_sample_selector("rna_star_samples", "Samples to align"))
-  output$rna_featurecounts_samples_ui <- renderUI(step_sample_selector("rna_featurecounts_samples", "Samples to count"))
-  output$rna_rsem_samples_ui <- renderUI(step_sample_selector("rna_rsem_samples", "Samples for RSEM"))
-  output$rna_kallisto_samples_ui <- renderUI(step_sample_selector("rna_kallisto_samples", "Samples for Kallisto"))
-  output$cutrun_cutadapt_samples_ui <- renderUI(step_sample_selector("cutrun_cutadapt_samples", "Samples to trim"))
-  output$cutrun_fastqc_samples_ui <- renderUI(step_sample_selector("cutrun_fastqc_samples", "Samples for QC"))
-  output$cutrun_bowtie2_samples_ui <- renderUI(step_sample_selector("cutrun_bowtie2_samples", "Targets and controls to align"))
-  output$cutrun_seacr_samples_ui <- renderUI(step_sample_selector("cutrun_seacr_samples", "Target samples for SEACR", targets_only = TRUE))
-  output$cutrun_macs2_samples_ui <- renderUI(step_sample_selector("cutrun_macs2_samples", "Target samples for MACS2", targets_only = TRUE))
-  output$atac_cutadapt_samples_ui <- renderUI(step_sample_selector("atac_cutadapt_samples", "Samples to trim"))
-  output$atac_fastqc_samples_ui <- renderUI(step_sample_selector("atac_fastqc_samples", "Samples for QC"))
-  output$atac_bowtie2_samples_ui <- renderUI(step_sample_selector("atac_bowtie2_samples", "Samples to align"))
-  output$atac_macs2_samples_ui <- renderUI(step_sample_selector("atac_macs2_samples", "Samples for peak calling"))
-  output$chip_cutadapt_samples_ui <- renderUI(step_sample_selector("chip_cutadapt_samples", "Samples to trim"))
-  output$chip_fastqc_samples_ui <- renderUI(step_sample_selector("chip_fastqc_samples", "Samples for QC"))
-  output$chip_bowtie2_samples_ui <- renderUI(step_sample_selector("chip_bowtie2_samples", "ChIP and input samples to align"))
-  output$chip_macs2_samples_ui <- renderUI(step_sample_selector("chip_macs2_samples", "ChIP targets for peak calling", targets_only = TRUE))
+  output$rna_cutadapt_samples_ui <- renderUI(step_sample_selector("rna_cutadapt_samples", "Samples to trim", "Cutadapt"))
+  output$rna_fastqc_samples_ui <- renderUI(step_sample_selector("rna_fastqc_samples", "Samples for QC", "FastQC"))
+  output$rna_star_samples_ui <- renderUI(step_sample_selector("rna_star_samples", "Samples to align", "STAR"))
+  output$rna_featurecounts_samples_ui <- renderUI(step_sample_selector("rna_featurecounts_samples", "Samples to count", "featureCounts"))
+  output$rna_rsem_samples_ui <- renderUI(step_sample_selector("rna_rsem_samples", "Samples for RSEM", "RSEM (optional)"))
+  output$rna_kallisto_samples_ui <- renderUI(step_sample_selector("rna_kallisto_samples", "Samples for Kallisto", "Kallisto (optional)"))
+  output$cutrun_cutadapt_samples_ui <- renderUI(step_sample_selector("cutrun_cutadapt_samples", "Samples to trim", "Cutadapt"))
+  output$cutrun_fastqc_samples_ui <- renderUI(step_sample_selector("cutrun_fastqc_samples", "Samples for QC", "FastQC"))
+  output$cutrun_bowtie2_samples_ui <- renderUI(step_sample_selector("cutrun_bowtie2_samples", "Targets and controls to align", "Bowtie2"))
+  output$cutrun_seacr_samples_ui <- renderUI(step_sample_selector("cutrun_seacr_samples", "Target samples for SEACR", "SEACR", targets_only = TRUE))
+  output$cutrun_macs2_samples_ui <- renderUI(step_sample_selector("cutrun_macs2_samples", "Target samples for MACS2", "MACS2 (optional)", targets_only = TRUE))
+  output$atac_cutadapt_samples_ui <- renderUI(step_sample_selector("atac_cutadapt_samples", "Samples to trim", "Cutadapt"))
+  output$atac_fastqc_samples_ui <- renderUI(step_sample_selector("atac_fastqc_samples", "Samples for QC", "FastQC"))
+  output$atac_bowtie2_samples_ui <- renderUI(step_sample_selector("atac_bowtie2_samples", "Samples to align", "Bowtie2"))
+  output$atac_macs2_samples_ui <- renderUI(step_sample_selector("atac_macs2_samples", "Samples for peak calling", "MACS2 Peaks"))
+  output$chip_cutadapt_samples_ui <- renderUI(step_sample_selector("chip_cutadapt_samples", "Samples to trim", "Cutadapt"))
+  output$chip_fastqc_samples_ui <- renderUI(step_sample_selector("chip_fastqc_samples", "Samples for QC", "FastQC"))
+  output$chip_bowtie2_samples_ui <- renderUI(step_sample_selector("chip_bowtie2_samples", "ChIP and input samples to align", "Bowtie2"))
+  output$chip_macs2_samples_ui <- renderUI(step_sample_selector("chip_macs2_samples", "ChIP targets for peak calling", "MACS2 Peaks", targets_only = TRUE))
 
   observeEvent(input$run_fastqc, {
     trimmed <- isTRUE(input$fastqc_use_trimmed)

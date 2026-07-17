@@ -161,6 +161,8 @@ marker <- file.path(sample_dir, "A1_macs2_complete.txt")
 writeLines("chr1\t1\t2", legacy_peak)
 assert(identical(app_env$atac_macs2_completion_target(atac_project, "A1"), legacy_peak), "legacy ATAC peaks remain recognized")
 writeLines(c("chr1\t1\t200\tpeak1", "chr1\t300\t500\tpeak2"), legacy_peak)
+completed_selector_samples <- app_env$completed_samples_for_step(atac_project, "MACS2 Peaks", c("A1", "A2"))
+assert("A1" %in% completed_selector_samples && !"A2" %in% completed_selector_samples, "sample selectors identify completed samples without unchecking unfinished samples")
 failed_macs_job <- data.frame(step = "MACS2 Peaks", sample = "A1", slurm_state = "FAILED", elapsed = "00:01:00", stderr = "", stringsAsFactors = FALSE)
 legacy_peak_progress <- app_env$sample_progress(atac_project, jobs = failed_macs_job)$table
 legacy_peak_status <- legacy_peak_progress$status[legacy_peak_progress$sample == "A1" & legacy_peak_progress$step == "MACS2 Peaks"]
