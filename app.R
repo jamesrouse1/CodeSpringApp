@@ -3602,12 +3602,25 @@ genome_browser_comparison_navigation <- function(result_dir, project = NULL, max
   }
 
   gene_choices <- setNames(character(0), character(0))
+  peak_gene_context <- setNames(character(0), character(0))
   if (length(annotation_files)) {
     annotation <- safe_read_result_table(annotation_files[[1]], max_rows)
     annotation <- rank_differential_peak_rows(annotation, max_peaks)
     gene_columns <- names(annotation)[gsub("[^a-z0-9]+", "", tolower(names(annotation))) %in% c("genename", "genesymbol", "symbol")]
     if (length(gene_columns) && NROW(annotation)) {
-      genes <- trimws(as.character(annotation[[gene_columns[[1]]]]))
+      annotation_genes <- trimws(as.character(annotation[[gene_columns[[1]]]]))
+      peak_id_columns <- names(annotation)[gsub("[^a-z0-9]+", "", tolower(names(annotation))) %in% c("peakid", "peak")]
+      if (length(peak_id_columns)) {
+        annotation_intervals <- sub("\\|.*$", "", trimws(as.character(annotation[[peak_id_columns[[1]]]])))
+        valid_context <- grepl("^[^:[:space:]]+:[0-9]+-[0-9]+$", annotation_intervals) &
+          nzchar(annotation_genes) & !is.na(annotation_genes) &
+          !tolower(annotation_genes) %in% c("na", "nan", "none", "intergenic", ".", "-")
+        if (any(valid_context)) {
+          contexts <- split(annotation_genes[valid_context], annotation_intervals[valid_context])
+          peak_gene_context <- vapply(contexts, function(x) paste(unique(x), collapse = ", "), character(1))
+        }
+      }
+      genes <- annotation_genes
       genes <- unlist(strsplit(genes[nzchar(genes) & !is.na(genes)], "[,;]", perl = TRUE), use.names = FALSE)
       genes <- trimws(genes)
       genes <- genes[nzchar(genes) & !tolower(genes) %in% c("na", "nan", "none", "intergenic", ".", "-")]
@@ -3638,6 +3651,9 @@ genome_browser_comparison_navigation <- function(result_dir, project = NULL, max
         interval <- paste0(peaks$chrom, ":", format(start, scientific = FALSE, trim = TRUE), "-", format(end, scientific = FALSE, trim = TRUE))
         locus <- interval
         label <- paste0(seq_len(NROW(peaks)), ". ", interval)
+        gene_context <- unname(peak_gene_context[interval])
+        gene_context[is.na(gene_context)] <- ""
+        label <- paste0(label, ifelse(nzchar(gene_context), paste0(" — ", gene_context), ""))
         if ("Fold" %in% names(peaks)) label <- paste0(label, " — Fold ", format(signif(suppressWarnings(as.numeric(peaks$Fold)), 4), trim = TRUE))
         if ("p.value" %in% names(peaks)) label <- paste0(label, " — p ", format(signif(suppressWarnings(as.numeric(peaks[["p.value"]])), 3), scientific = TRUE, trim = TRUE))
         if ("FDR" %in% names(peaks)) label <- paste0(label, " — FDR ", format(signif(suppressWarnings(as.numeric(peaks$FDR)), 3), scientific = TRUE, trim = TRUE))
