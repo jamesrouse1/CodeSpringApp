@@ -5151,6 +5151,18 @@ adapter_choices_r2 <- function() {
   )
 }
 
+default_adapter_pair <- function(project) {
+  if (is_atac_project(project)) {
+    c(r1 = unname(adapter_choices_r1()[["Nextera Transposase ATAC"]]), r2 = unname(adapter_choices_r2()[["Nextera Transposase ATAC"]]))
+  } else {
+    c(r1 = unname(adapter_choices_r1()[["Illumina Universal TruSeq RNA"]]), r2 = unname(adapter_choices_r2()[["Illumina Universal TruSeq RNA"]]))
+  }
+}
+
+adapter_input_prefix <- function(project) {
+  if (is_atac_project(project)) "atac" else if (is_chip_project(project)) "chip" else if (is_cutrun_project(project)) "cutrun" else "rna"
+}
+
 selected_adapter_value <- function(selected, custom) {
   selected <- selected %||% ""
   if (identical(selected, "__custom__")) return(trimws(custom %||% ""))
@@ -9521,12 +9533,15 @@ server <- function(input, output, session) {
     status <- status[order(step_order(status$step)), , drop = FALSE]
     r1_choices <- adapter_choices_r1()
     r2_choices <- adapter_choices_r2()
+    adapter_defaults <- default_adapter_pair(p)
     if (is_chip_project(p)) {
       return(div(class = "run-grid",
         tool_panel("Cutadapt", status, "Trim adapters and short reads from selected ChIP-seq FASTQs.", tagList(
           uiOutput("chip_cutadapt_samples_ui"),
-          selectInput("cutadapt_adapter1", "R1/read adapter", choices = r1_choices, selected = selected_choice(input$cutadapt_adapter1, r1_choices, r1_choices[[1]]), selectize = FALSE),
-          selectInput("cutadapt_adapter2", "R2 adapter", choices = r2_choices, selected = selected_choice(input$cutadapt_adapter2, r2_choices, r2_choices[[1]]), selectize = FALSE),
+          selectInput("chip_cutadapt_adapter1", "R1/read adapter", choices = r1_choices, selected = selected_choice(input$chip_cutadapt_adapter1, r1_choices, adapter_defaults[["r1"]]), selectize = FALSE),
+          conditionalPanel("input.chip_cutadapt_adapter1 == '__custom__'", textInput("chip_cutadapt_adapter1_custom", "Custom R1/read adapter sequence", value = input$chip_cutadapt_adapter1_custom %||% "")),
+          selectInput("chip_cutadapt_adapter2", "R2 adapter", choices = r2_choices, selected = selected_choice(input$chip_cutadapt_adapter2, r2_choices, adapter_defaults[["r2"]]), selectize = FALSE),
+          conditionalPanel("input.chip_cutadapt_adapter2 == '__custom__'", textInput("chip_cutadapt_adapter2_custom", "Custom R2 adapter sequence", value = input$chip_cutadapt_adapter2_custom %||% "")),
           textInput("cutadapt_min_length", "Minimum read length", value = input$cutadapt_min_length %||% "20")
         ), "run_cutadapt", "Submit cutadapt"),
         tool_panel("FastQC", status, "Quality reports for selected raw or trimmed ChIP-seq reads.", tagList(
@@ -9562,10 +9577,10 @@ server <- function(input, output, session) {
         tool_panel("Cutadapt", status, "Trim adapters and short reads from raw CUT&RUN FASTQs.",
           tagList(
             uiOutput("cutrun_cutadapt_samples_ui"),
-            selectInput("cutadapt_adapter1", "R1/read1 adapter", choices = r1_choices, selected = selected_choice(input$cutadapt_adapter1, r1_choices, r1_choices[[1]]), width = "100%", selectize = FALSE),
-            conditionalPanel("input.cutadapt_adapter1 == '__custom__'", textInput("cutadapt_adapter1_custom", "Custom R1/read1 adapter sequence", value = input$cutadapt_adapter1_custom %||% "", width = "100%")),
-            selectInput("cutadapt_adapter2", "R2/read2 adapter", choices = r2_choices, selected = selected_choice(input$cutadapt_adapter2, r2_choices, r2_choices[[1]]), width = "100%", selectize = FALSE),
-            conditionalPanel("input.cutadapt_adapter2 == '__custom__'", textInput("cutadapt_adapter2_custom", "Custom R2/read2 adapter sequence", value = input$cutadapt_adapter2_custom %||% "", width = "100%")),
+            selectInput("cutrun_cutadapt_adapter1", "R1/read1 adapter", choices = r1_choices, selected = selected_choice(input$cutrun_cutadapt_adapter1, r1_choices, adapter_defaults[["r1"]]), width = "100%", selectize = FALSE),
+            conditionalPanel("input.cutrun_cutadapt_adapter1 == '__custom__'", textInput("cutrun_cutadapt_adapter1_custom", "Custom R1/read1 adapter sequence", value = input$cutrun_cutadapt_adapter1_custom %||% "", width = "100%")),
+            selectInput("cutrun_cutadapt_adapter2", "R2/read2 adapter", choices = r2_choices, selected = selected_choice(input$cutrun_cutadapt_adapter2, r2_choices, adapter_defaults[["r2"]]), width = "100%", selectize = FALSE),
+            conditionalPanel("input.cutrun_cutadapt_adapter2 == '__custom__'", textInput("cutrun_cutadapt_adapter2_custom", "Custom R2/read2 adapter sequence", value = input$cutrun_cutadapt_adapter2_custom %||% "", width = "100%")),
             textInput("cutadapt_min_length", "Minimum read length", value = input$cutadapt_min_length %||% "20")
           ),
           "run_cutadapt", "Submit cutadapt"),
@@ -9651,12 +9666,13 @@ server <- function(input, output, session) {
       ))
     }
     if (is_atac_project(p)) {
-      nextera1 <- unname(r1_choices[["Nextera Transposase ATAC"]]); nextera2 <- unname(r2_choices[["Nextera Transposase ATAC"]])
       return(div(class = "run-grid",
         tool_panel("Cutadapt", status, "Trim ATAC-seq adapters and short reads.", tagList(
           uiOutput("atac_cutadapt_samples_ui"),
-          selectInput("cutadapt_adapter1", "R1 adapter", choices = r1_choices, selected = selected_choice(input$cutadapt_adapter1, r1_choices, nextera1), selectize = FALSE),
-          selectInput("cutadapt_adapter2", "R2 adapter", choices = r2_choices, selected = selected_choice(input$cutadapt_adapter2, r2_choices, nextera2), selectize = FALSE),
+          selectInput("atac_cutadapt_adapter1", "R1 adapter", choices = r1_choices, selected = selected_choice(input$atac_cutadapt_adapter1, r1_choices, adapter_defaults[["r1"]]), selectize = FALSE),
+          conditionalPanel("input.atac_cutadapt_adapter1 == '__custom__'", textInput("atac_cutadapt_adapter1_custom", "Custom R1 adapter sequence", value = input$atac_cutadapt_adapter1_custom %||% "")),
+          selectInput("atac_cutadapt_adapter2", "R2 adapter", choices = r2_choices, selected = selected_choice(input$atac_cutadapt_adapter2, r2_choices, adapter_defaults[["r2"]]), selectize = FALSE),
+          conditionalPanel("input.atac_cutadapt_adapter2 == '__custom__'", textInput("atac_cutadapt_adapter2_custom", "Custom R2 adapter sequence", value = input$atac_cutadapt_adapter2_custom %||% "")),
           textInput("cutadapt_min_length", "Minimum read length", value = input$cutadapt_min_length %||% "20")
         ), "run_cutadapt", "Submit cutadapt"),
         tool_panel("FastQC", status, "Quality reports for raw or trimmed ATAC-seq reads.", tagList(uiOutput("atac_fastqc_samples_ui"), checkboxInput("fastqc_use_trimmed", "Use trimmed reads", value = trimmed_checkbox_default(p, isolate(input$fastqc_use_trimmed)))), "run_fastqc", "Submit FastQC"),
@@ -9677,10 +9693,10 @@ server <- function(input, output, session) {
       tool_panel("Cutadapt", status, "Trim adapters and short reads from raw FASTQs.",
         tagList(
           uiOutput("rna_cutadapt_samples_ui"),
-          selectInput("cutadapt_adapter1", "R1/read1 adapter", choices = r1_choices, selected = selected_choice(input$cutadapt_adapter1, r1_choices, r1_choices[[1]]), width = "100%", selectize = FALSE),
-          conditionalPanel("input.cutadapt_adapter1 == '__custom__'", textInput("cutadapt_adapter1_custom", "Custom R1/read1 adapter sequence", value = input$cutadapt_adapter1_custom %||% "", width = "100%")),
-          selectInput("cutadapt_adapter2", "R2/read2 adapter", choices = r2_choices, selected = selected_choice(input$cutadapt_adapter2, r2_choices, r2_choices[[1]]), width = "100%", selectize = FALSE),
-          conditionalPanel("input.cutadapt_adapter2 == '__custom__'", textInput("cutadapt_adapter2_custom", "Custom R2/read2 adapter sequence", value = input$cutadapt_adapter2_custom %||% "", width = "100%")),
+          selectInput("rna_cutadapt_adapter1", "R1/read1 adapter", choices = r1_choices, selected = selected_choice(input$rna_cutadapt_adapter1, r1_choices, adapter_defaults[["r1"]]), width = "100%", selectize = FALSE),
+          conditionalPanel("input.rna_cutadapt_adapter1 == '__custom__'", textInput("rna_cutadapt_adapter1_custom", "Custom R1/read1 adapter sequence", value = input$rna_cutadapt_adapter1_custom %||% "", width = "100%")),
+          selectInput("rna_cutadapt_adapter2", "R2/read2 adapter", choices = r2_choices, selected = selected_choice(input$rna_cutadapt_adapter2, r2_choices, adapter_defaults[["r2"]]), width = "100%", selectize = FALSE),
+          conditionalPanel("input.rna_cutadapt_adapter2 == '__custom__'", textInput("rna_cutadapt_adapter2_custom", "Custom R2/read2 adapter sequence", value = input$rna_cutadapt_adapter2_custom %||% "", width = "100%")),
           textInput("cutadapt_min_length", "Minimum read length", value = input$cutadapt_min_length %||% "20")
         ),
         "run_cutadapt", "Submit cutadapt"),
@@ -9940,15 +9956,22 @@ server <- function(input, output, session) {
     run_submission("FastQC", submit_fastqc_jobs(p, trimmed, samples), if (trimmed) "trimmed reads" else "raw reads", samples = samples)
   })
   observeEvent(input$run_cutadapt, {
-    adapter1 <- selected_adapter_value(input$cutadapt_adapter1, input$cutadapt_adapter1_custom)
-    adapter2 <- selected_adapter_value(input$cutadapt_adapter2, input$cutadapt_adapter2_custom)
+    p <- current_project()
+    adapter_prefix <- adapter_input_prefix(p)
+    adapter1 <- selected_adapter_value(
+      input[[paste0(adapter_prefix, "_cutadapt_adapter1")]],
+      input[[paste0(adapter_prefix, "_cutadapt_adapter1_custom")]]
+    )
+    adapter2 <- selected_adapter_value(
+      input[[paste0(adapter_prefix, "_cutadapt_adapter2")]],
+      input[[paste0(adapter_prefix, "_cutadapt_adapter2_custom")]]
+    )
     if (!nzchar(adapter1) || !nzchar(adapter2)) {
       msg <- "ERROR: Not submitted. Custom adapter sequences cannot be blank."
       run_message(msg)
       set_tool_message("Cutadapt", "")
       finish_submit_refresh()
     } else {
-      p <- current_project()
       samples <- if (is_atac_project(p)) input$atac_cutadapt_samples %||% character(0) else if (is_chip_project(p)) input$chip_cutadapt_samples %||% character(0) else if (is_cutrun_project(p)) input$cutrun_cutadapt_samples %||% character(0) else input$rna_cutadapt_samples %||% character(0)
       run_submission("Cutadapt", submit_cutadapt_jobs(p, adapter1, adapter2, input$cutadapt_min_length, samples), "raw reads", samples = samples)
       updateCheckboxInput(session, "fastqc_use_trimmed", value = TRUE)
