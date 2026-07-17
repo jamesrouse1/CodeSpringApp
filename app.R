@@ -249,6 +249,8 @@ PROJECT_CONFIG_ROOT <- file.path(APP_HOME, "project_configs")
 DEFAULT_RESULTS_ROOT <- normalizePath(file.path(CURRENT_HOME, "csl_results"), winslash = "/", mustWork = FALSE)
 RNA_EXAMPLE_FASTQ_DIR <- normalizePath(file.path(SCRIPTS_DIR, "test", "fastq"), winslash = "/", mustWork = FALSE)
 RNA_EXAMPLE_DESIGN_DIR <- normalizePath(file.path(SCRIPTS_DIR, "test", "manifest"), winslash = "/", mustWork = FALSE)
+CUTRUN_EXAMPLE_FASTQ_DIR <- RNA_EXAMPLE_FASTQ_DIR
+CUTRUN_EXAMPLE_DESIGN_DIR <- normalizePath(file.path(SCRIPTS_DIR, "test", "manifest_cutrun"), winslash = "/", mustWork = FALSE)
 ATAC_EXAMPLE_FASTQ_DIR <- normalizePath(file.path(SCRIPTS_DIR, "test", "fastq_atac"), winslash = "/", mustWork = FALSE)
 ATAC_EXAMPLE_DESIGN_DIR <- normalizePath(file.path(SCRIPTS_DIR, "test", "manifest_atac"), winslash = "/", mustWork = FALSE)
 CHIP_EXAMPLE_FASTQ_DIR <- normalizePath(file.path(SCRIPTS_DIR, "test", "fastq_chip"), winslash = "/", mustWork = FALSE)
@@ -523,6 +525,7 @@ example_dataset_paths <- function(key) {
   switch(
     analysis_key(key),
     rna = list(name = "example_rnaseq", fastq_dir = RNA_EXAMPLE_FASTQ_DIR, design_dir = RNA_EXAMPLE_DESIGN_DIR),
+    cutrun = list(name = "example_cutrun", fastq_dir = CUTRUN_EXAMPLE_FASTQ_DIR, design_dir = CUTRUN_EXAMPLE_DESIGN_DIR),
     atac = list(name = "example_atac", fastq_dir = ATAC_EXAMPLE_FASTQ_DIR, design_dir = ATAC_EXAMPLE_DESIGN_DIR),
     chip = list(name = "example_chip", fastq_dir = CHIP_EXAMPLE_FASTQ_DIR, design_dir = CHIP_EXAMPLE_DESIGN_DIR),
     NULL
@@ -532,7 +535,7 @@ example_dataset_paths <- function(key) {
 is_bundled_example_design <- function(path) {
   path <- normalizePath(path %||% "", winslash = "/", mustWork = FALSE)
   examples <- normalizePath(
-    c(file.path(RNA_EXAMPLE_DESIGN_DIR, "design_matrix.txt"), file.path(ATAC_EXAMPLE_DESIGN_DIR, "design_matrix.txt"), file.path(CHIP_EXAMPLE_DESIGN_DIR, "design_matrix.txt")),
+    c(file.path(RNA_EXAMPLE_DESIGN_DIR, "design_matrix.txt"), file.path(CUTRUN_EXAMPLE_DESIGN_DIR, "design_matrix.txt"), file.path(ATAC_EXAMPLE_DESIGN_DIR, "design_matrix.txt"), file.path(CHIP_EXAMPLE_DESIGN_DIR, "design_matrix.txt")),
     winslash = "/", mustWork = FALSE
   )
   nzchar(path) && path %in% examples
@@ -8084,7 +8087,7 @@ server <- function(input, output, session) {
     example <- example_dataset_paths(key)
     if (is.null(example)) return()
     current_name <- trimws(input$new_project_name %||% "")
-    if (!nzchar(current_name) || grepl("^example_(rnaseq|atac|chip)$", current_name)) {
+    if (!nzchar(current_name) || grepl("^example_(rnaseq|cutrun|atac|chip)$", current_name)) {
       updateTextInput(session, "new_project_name", value = example$name)
     }
     new_fastq_folders(character(0))

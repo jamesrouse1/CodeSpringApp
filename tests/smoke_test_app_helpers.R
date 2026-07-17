@@ -74,7 +74,7 @@ unsafe_design$condition <- "A\tB"
 unsafe_error <- tryCatch({ app_env$write_design_matrix(atac_design_project, unsafe_design, c("condition", "replicate")); "" }, error = conditionMessage)
 assert(grepl("tabs or line breaks", unsafe_error), "tab characters rejected before TSV save")
 
-for (key in c("rna", "atac", "chip")) {
+for (key in c("rna", "cutrun", "atac", "chip")) {
   example <- app_env$example_dataset_paths(key)
   example_design <- file.path(example$design_dir, "design_matrix.txt")
   assert(dir.exists(example$fastq_dir) && file.exists(example_design), paste(key, "bundled example paths exist"))
@@ -90,6 +90,11 @@ for (key in c("rna", "atac", "chip")) {
   }, logical(1))
   assert(all(readable), paste(key, "bundled example FASTQs are readable gzip data"))
 }
+cutrun_example <- app_env$safe_read_table(file.path(app_env$example_dataset_paths("cutrun")$design_dir, "design_matrix.txt"))
+assert(sum(cutrun_example$target_class == "control") == 2L, "CUT&RUN example has explicit matched controls")
+assert(all(c("cell_type", "mark", "target_class", "condition", "replicate", "control_sample") %in% names(cutrun_example)), "CUT&RUN example contains the editable assay metadata")
+cutrun_targets <- cutrun_example$target_class != "control"
+assert(all(nzchar(cutrun_example$control_sample[cutrun_targets])), "CUT&RUN example assigns every target to an IgG control")
 
 atac_project <- chip_project
 atac_project$analysis_key <- "atac"

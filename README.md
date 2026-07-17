@@ -27,9 +27,10 @@ Saved project configurations, job history, logs, and last-project selection are 
 
 ## Bundled Example Datasets
 
-The New Project panel provides a **Use Example Dataset** button for RNA-seq, ATAC-seq, and ChIP-seq. The examples use the small FASTQ and manifest files bundled under `CodeSpringLab/scripts_DoNotTouch/test`:
+The New Project panel provides a **Use Example Dataset** button for all four analyses. The examples use the small FASTQ and manifest files bundled under `CodeSpringLab/scripts_DoNotTouch/test`:
 
 - RNA-seq: `test/fastq` and `test/manifest`
+- CUT&RUN: `test/fastq` and `test/manifest_cutrun` (paired targets with explicit matched IgG controls)
 - ATAC-seq: `test/fastq_atac` and `test/manifest_atac`
 - ChIP-seq: `test/fastq_chip` and `test/manifest_chip`
 
@@ -143,7 +144,7 @@ CodeSpringApp stores and discovers project configs separately for each user unde
 
 Project configs inside the cloned CodeSpringLab or CodeSpringApp repositories are not displayed. This prevents example, test, or another user's projects from being distributed with the application.
 
-For a new RNA-seq project, the initial FASTQ and design-matrix fields point to CodeSpringLab's bundled RNA-seq example. The **Use Example Dataset** button loads the matching bundled paths for RNA-seq, ATAC-seq, or ChIP-seq. Replace either path when creating a real project.
+For a new RNA-seq project, the initial FASTQ and design-matrix fields point to CodeSpringLab's bundled RNA-seq example. The **Use Example Dataset** button loads the matching bundled paths for RNA-seq, CUT&RUN, ATAC-seq, or ChIP-seq. Replace either path when creating a real project.
 
 For new projects, it creates project-local outputs under:
 
