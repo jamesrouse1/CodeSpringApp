@@ -10653,7 +10653,7 @@ server <- function(input, output, session) {
       updateSelectizeInput(session, "genome_browser_gene", selected = "")
     }
   }, ignoreInit = TRUE)
-  send_genome_browser <- function() {
+  send_genome_browser <- function(comparison_override = "", samples_override = NULL) {
     p <- current_project()
     if (!is_atac_project(p) && !is_chip_project(p) && !is_cutrun_project(p)) return(invisible(NULL))
     catalog <- genome_browser_track_catalog(p)
@@ -10676,10 +10676,12 @@ server <- function(input, output, session) {
     comparison_label <- ""
     differential_loaded <- FALSE
     if (comparison_mode) {
-      comparison_id <- selected_choice(input$genome_browser_comparison, comparisons$id, comparisons$id[[1]])
+      requested_comparison <- if (nzchar(as.character(comparison_override %||% ""))) comparison_override else input$genome_browser_comparison
+      comparison_id <- selected_choice(requested_comparison, comparisons$id, comparisons$id[[1]])
       comparison <- comparisons[match(comparison_id, comparisons$id), , drop = FALSE]
       allowed_samples <- comparison$samples[[1]]
-      selected_samples <- intersect(as.character(input$genome_browser_samples %||% character(0)), allowed_samples)
+      requested_samples <- if (!is.null(samples_override)) samples_override else input$genome_browser_samples
+      selected_samples <- intersect(as.character(requested_samples %||% character(0)), allowed_samples)
       if (!length(selected_samples)) selected_samples <- allowed_samples
       metadata <- comparison$sample_metadata[[1]]
       tracks <- genome_browser_preferred_signal_rows(p, catalog, selected_samples, metadata)
@@ -10760,6 +10762,25 @@ server <- function(input, output, session) {
     ))
     invisible(NULL)
   }
+  observeEvent(input$genome_browser_comparison, {
+    comparison_id <- as.character(input$genome_browser_comparison %||% "")
+    if (!nzchar(comparison_id)) return(invisible(NULL))
+    p <- current_project()
+    comparisons <- genome_browser_comparison_catalog(p)
+    hit <- match(comparison_id, comparisons$id)
+    if (is.na(hit)) return(invisible(NULL))
+    comparison <- comparisons[hit, , drop = FALSE]
+    catalog <- genome_browser_track_catalog(p)
+    available <- comparison$samples[[1]]
+    available <- available[available %in% unique(as.character(catalog$sample))]
+    updateSelectizeInput(session, "genome_browser_samples", choices = available, selected = available, server = FALSE)
+    updateSelectizeInput(session, "genome_browser_gene", selected = "")
+    updateSelectizeInput(session, "genome_browser_peak", selected = "")
+    session$onFlushed(function() {
+      updateSelectizeInput(session, "genome_browser_samples", choices = available, selected = available, server = FALSE)
+    }, once = TRUE)
+    send_genome_browser(comparison_override = comparison_id, samples_override = available)
+  }, ignoreInit = TRUE)
   observeEvent(input$load_genome_browser, send_genome_browser(), ignoreInit = TRUE)
   observeEvent(input$genome_browser_ready, send_genome_browser(), ignoreInit = TRUE)
   output$atac_diffbind_dir_ui <- renderUI({
