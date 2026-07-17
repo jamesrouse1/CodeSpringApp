@@ -3551,32 +3551,13 @@ rank_differential_peak_rows <- function(peaks, limit = 200L) {
   peaks[utils::head(ranked, max(1L, as.integer(limit))), , drop = FALSE]
 }
 
-genome_browser_reference_gene_choices <- function(project, limit = 100000L) {
-  if (is.null(project)) return(setNames(character(0), character(0)))
-  resources <- if (is_atac_project(project)) atac_reference_resources(project) else if (is_chip_project(project)) chip_reference_resources(project) else if (is_cutrun_project(project)) cutrun_reference_resources(project) else list()
-  path <- as.character(resources$tss_bed %||% "")
-  if (!nzchar(path) || !file.exists(path) || file_size_for(path) <= 0) return(setNames(character(0), character(0)))
-  info <- file.info(path)
-  cache_key <- paste("reference_genes", normalizePath(path, winslash = "/", mustWork = TRUE), info$size, as.numeric(info$mtime), limit, sep = "\r")
-  if (exists(cache_key, envir = GENOME_BROWSER_NAV_CACHE, inherits = FALSE)) return(get(cache_key, envir = GENOME_BROWSER_NAV_CACHE, inherits = FALSE))
-  table <- tryCatch(utils::read.delim(path, header = FALSE, sep = "\t", quote = "", comment.char = "", stringsAsFactors = FALSE, nrows = 200000L), error = function(e) data.frame())
-  genes <- if (NROW(table) && NCOL(table) >= 4L) sub("\\|.*$", "", trimws(as.character(table[[4]]))) else character(0)
-  genes <- sort(unique(genes[nzchar(genes) & !is.na(genes) & !tolower(genes) %in% c("na", "nan", "none", ".", "-")]))
-  genes <- utils::head(genes, max(1L, as.integer(limit)))
-  value <- stats::setNames(genes, genes)
-  assign(cache_key, value, envir = GENOME_BROWSER_NAV_CACHE)
-  value
-}
-
-genome_browser_comparison_navigation <- function(result_dir, project = NULL, max_rows = 50000L, max_peaks = 200L) {
+genome_browser_comparison_navigation <- function(result_dir, project = NULL, max_rows = 10000L, max_peaks = 200L) {
   empty <- list(genes = setNames(character(0), character(0)), peaks = setNames(character(0), character(0)))
   if (!dir.exists(result_dir)) return(empty)
   bed_files <- list.files(result_dir, pattern = "^DifferentialPeaks_.*\\.with_stats\\.bed$", full.names = TRUE)
   annotation_files <- list.files(result_dir, pattern = "^DifferentialPeaks_.*_annotated.*\\.txt$", full.names = TRUE)
   source_files <- c(bed_files, annotation_files)
-  reference_genes <- genome_browser_reference_gene_choices(project)
-  reference_signature <- paste(project$id %||% "", length(reference_genes), utils::head(unname(reference_genes), 1L), utils::tail(unname(reference_genes), 1L), sep = ":")
-  cache_key <- paste(normalizePath(result_dir, winslash = "/", mustWork = TRUE), max_rows, max_peaks, reference_signature, sep = "\r")
+  cache_key <- paste(normalizePath(result_dir, winslash = "/", mustWork = TRUE), max_rows, max_peaks, sep = "\r")
   signature <- if (length(source_files)) {
     info <- file.info(source_files)
     paste(source_files, info$size, as.numeric(info$mtime), collapse = "|")
@@ -3589,6 +3570,7 @@ genome_browser_comparison_navigation <- function(result_dir, project = NULL, max
   gene_choices <- setNames(character(0), character(0))
   if (length(annotation_files)) {
     annotation <- safe_read_result_table(annotation_files[[1]], max_rows)
+    annotation <- rank_differential_peak_rows(annotation, max_peaks)
     gene_columns <- names(annotation)[gsub("[^a-z0-9]+", "", tolower(names(annotation))) %in% c("genename", "genesymbol", "symbol")]
     if (length(gene_columns) && NROW(annotation)) {
       genes <- trimws(as.character(annotation[[gene_columns[[1]]]]))
@@ -3603,11 +3585,6 @@ genome_browser_comparison_navigation <- function(result_dir, project = NULL, max
       }
     }
   }
-  if (length(reference_genes)) {
-    reference_genes <- reference_genes[!unname(reference_genes) %in% unname(gene_choices)]
-    gene_choices <- c(gene_choices, reference_genes)
-  }
-
   peak_choices <- setNames(character(0), character(0))
   if (length(bed_files)) {
     peaks <- safe_read_result_table(bed_files[[1]], max_rows)
@@ -3625,11 +3602,7 @@ genome_browser_comparison_navigation <- function(result_dir, project = NULL, max
         start <- start[selected_rows]
         end <- end[selected_rows]
         interval <- paste0(peaks$chrom, ":", format(start, scientific = FALSE, trim = TRUE), "-", format(end, scientific = FALSE, trim = TRUE))
-        margin <- pmax(1000, round((end - start + 1) * 2))
-        locus <- paste0(
-          peaks$chrom, ":", format(pmax(1, start - margin), scientific = FALSE, trim = TRUE), "-",
-          format(end + margin, scientific = FALSE, trim = TRUE)
-        )
+        locus <- interval
         label <- paste0(seq_len(NROW(peaks)), ". ", interval)
         if ("Fold" %in% names(peaks)) label <- paste0(label, " — Fold ", format(signif(suppressWarnings(as.numeric(peaks$Fold)), 4), trim = TRUE))
         if ("p.value" %in% names(peaks)) label <- paste0(label, " — p ", format(signif(suppressWarnings(as.numeric(peaks[["p.value"]])), 3), scientific = TRUE, trim = TRUE))
@@ -10570,8 +10543,8 @@ server <- function(input, output, session) {
         tags$h5("Navigate to"),
         if (length(navigation$genes)) selectizeInput(
           "genome_browser_gene", "Gene", choices = gene_choices, selected = selected_gene,
-          options = list(placeholder = "Search gene name", maxOptions = 5000L)
-        ) else div(class = "muted small-note", "No reference or annotated differential-peak genes are available yet."),
+          options = list(placeholder = "Search the DiffBind Gene Name column", maxOptions = 200L)
+        ) else div(class = "muted small-note", "No Gene Name values were found in the annotated DiffBind results."),
         if (length(navigation$peaks)) selectizeInput(
           "genome_browser_peak", "Top 200 differential peaks", choices = peak_choices, selected = selected_peak,
           options = list(placeholder = "Ranked by FDR, p-value, then absolute Fold", maxOptions = 200L)
