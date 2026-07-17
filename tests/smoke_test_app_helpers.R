@@ -328,7 +328,12 @@ writeLines("status\tcomplete", file.path(comparison_dir, "_COMPLETE"))
 assert(app_env$diffbind_comparison_complete(comparison_dir), "final DiffBind marker accepted")
 
 differential_bed <- file.path(comparison_dir, "DifferentialPeaks_B_vs_A_ref.with_stats.bed")
-writeLines(c("chr1\t100\t220\tpeak_1\t2.5", "chr1\t500\t650\tpeak_2\t-1.8"), differential_bed)
+writeLines(c(
+  "chr1\t100\t220\tpeak_1|Fold=2.5|p.value=0.0002|FDR=0.004\t2.5",
+  "chr1\t500\t650\tpeak_2|Fold=-1.8|p.value=0.003|FDR=0.02\t-1.8"
+), differential_bed)
+expanded_bed <- app_env$safe_read_result_table(differential_bed)
+assert(all(c("Fold", "p.value", "FDR") %in% names(expanded_bed)), "ATAC with-stats BED exposes p-value and FDR columns in the Results Explorer")
 chip_sheet_dir <- file.path(root, "manifest", "chip_diffbind", basename(comparison_dir))
 dir.create(chip_sheet_dir, recursive = TRUE, showWarnings = FALSE)
 comparison_samples <- data.frame(
@@ -403,7 +408,10 @@ writeLines("status\trunning", file.path(annotation_root, "_RUN_STARTED"))
 assert(identical(app_env$peak_annotation_status(atac_project, data.frame()), "Likely failed"), "orphaned annotation run marker reports an incomplete job")
 unlink(file.path(annotation_root, "_RUN_STARTED"))
 annotated_peak <- file.path(sample_dir, "A1_peaks_annotated.txt")
-writeLines("PeakID\tAnnotation\npeak1\tPromoter", annotated_peak)
+writeLines("PeakID\tAnnotation\npeak1|Fold=2.1|p.value=0.0004|FDR=0.008\tPromoter", annotated_peak)
+expanded_annotation <- app_env$safe_read_result_table(annotated_peak)
+assert(all(c("Fold", "p.value", "FDR") %in% names(expanded_annotation)), "embedded peak statistics expand into explicit result columns")
+assert(is.numeric(expanded_annotation$p.value) && identical(expanded_annotation$p.value[[1]], 0.0004), "expanded ATAC differential p-value remains numeric")
 write.table(data.frame(
   result_type = "MACS2", sample_or_comparison = "A1", peak_count = 2,
   source_peak_file = legacy_peak, annotated_file = annotated_peak, status = "complete",

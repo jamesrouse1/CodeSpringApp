@@ -890,6 +890,32 @@ read_key_value_table <- function(path, key_name = "Metric", value_name = "Value"
   out
 }
 
+expand_peakid_stats_table <- function(x) {
+  if (!NROW(x) || !NCOL(x)) return(x)
+  peak_columns <- names(x)[grepl("^PeakID(?:[[:space:](]|$)|^(name|V4)$", names(x), ignore.case = TRUE, perl = TRUE)]
+  if (!length(peak_columns)) return(x)
+  peak_column <- peak_columns[[1]]
+  ids <- as.character(x[[peak_column]])
+  parsed <- lapply(strsplit(ids, "|", fixed = TRUE), function(parts) {
+    fields <- parts[grepl("=", parts, fixed = TRUE)]
+    if (!length(fields)) return(character(0))
+    positions <- regexpr("=", fields, fixed = TRUE)
+    keys <- trimws(substr(fields, 1L, positions - 1L))
+    values <- substr(fields, positions + 1L, nchar(fields))
+    keep <- nzchar(keys) & !duplicated(keys)
+    stats::setNames(values[keep], keys[keep])
+  })
+  stat_names <- unique(unlist(lapply(parsed, names), use.names = FALSE))
+  stat_names <- stat_names[nzchar(stat_names)]
+  if (!length(stat_names)) return(x)
+  for (name in stat_names) {
+    if (name %in% names(x)) next
+    values <- vapply(parsed, function(row) if (name %in% names(row)) row[[name]] else NA_character_, character(1))
+    x[[name]] <- utils::type.convert(values, as.is = TRUE, na.strings = c("NA", "NaN", ""))
+  }
+  x
+}
+
 safe_read_result_table <- function(path, n = 5000) {
   if (!file.exists(path)) return(data.frame())
   ext <- tolower(tools::file_ext(path))
@@ -902,9 +928,9 @@ safe_read_result_table <- function(path, n = 5000) {
       if (ext == "narrowpeak" && NCOL(x) >= 10) names(x)[1:10] <- c("chrom", "start", "end", "name", "score", "strand", "signalValue", "pValue", "qValue", "peak")
       if (ext == "broadpeak" && NCOL(x) >= 9) names(x)[1:9] <- c("chrom", "start", "end", "name", "score", "strand", "signalValue", "pValue", "qValue")
     }
-    return(x)
+    return(expand_peakid_stats_table(x))
   }
-  safe_read_table(path, n)
+  expand_peakid_stats_table(safe_read_table(path, n))
 }
 
 render_data_table <- function(df, page_length = 50, height = NULL) {
@@ -3577,7 +3603,7 @@ peak_annotation_results_ui <- function() {
       width = 3,
       uiOutput("peak_annotation_file_ui"),
       tags$hr(),
-      helpText("HOMER reports the nearest gene/TSS and genomic annotation. Peak statistics from MACS2 or differential analysis are retained in PeakID.")
+      helpText("HOMER reports the nearest gene/TSS and genomic annotation. Encoded peak statistics are expanded into explicit columns, including differential p.value and FDR when available.")
     ),
     mainPanel(
       width = 9,
@@ -9491,7 +9517,7 @@ server <- function(input, output, session) {
           "run_cutrun_macs2", "Submit MACS2"),
         tool_panel("Peak Annotation", status, "Annotate every completed CUT&RUN MACS2 and differential peak file with nearby genes.", tagList(
           tags$p(class = "muted small-note", "This project-level final step scans all completed samples and differential comparisons. Both all-peak and significant differential result files are annotated."),
-          tags$p(class = "muted small-note", "Peak statistics are retained in the HOMER PeakID field, and a project summary records every source and annotated file.")
+          tags$p(class = "muted small-note", "Peak statistics are shown as explicit columns—including differential p.value and FDR when available—and a project summary records every source and annotated file.")
         ), "run_peak_annotation", "Annotate all completed peaks", show_sample_progress = FALSE)
       ))
     }
