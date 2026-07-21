@@ -72,6 +72,9 @@ assert(identical(app_env$numeric_sort_kind(c("9", "100", "2.5")), "numeric"), "n
 assert(identical(app_env$numeric_sort_kind(c("00:09:00", "01:00:00")), "duration"), "elapsed times receive duration sorting")
 size_defs <- app_env$smart_table_column_defs(data.frame(size = c("900 KB", "1.2 GB"), stringsAsFactors = FALSE))
 assert(any(vapply(size_defs, function(def) identical(if (is.null(def$type)) "" else def$type, "num") && !is.null(def$render) && grepl("Math.pow(1024", as.character(def$render), fixed = TRUE), logical(1))), "table renderer uses byte-aware numeric sort values")
+rough_table <- structure(list(c(1, 2), I(list(c("a", "b"), "c"))), names = c("", ""), class = "data.frame", row.names = c(NA_integer_, -2L))
+normalized_table <- app_env$normalize_csl_table_data(rough_table)
+assert(!anyDuplicated(names(normalized_table)) && all(nzchar(names(normalized_table))) && !any(vapply(normalized_table, is.list, logical(1))), "table renderer sanitizes blank/duplicate names and list columns before DT serialization")
 for (project_variant in list(
   RNA = within(chip_project, { analysis_key <- "rna"; analysis <- "RNA-seq" }),
   CUTRUN = within(chip_project, { analysis_key <- "cutrun"; analysis <- "CUT&RUN" }),
@@ -545,6 +548,7 @@ assert(identical(app_env$completed_cutrun_seacr_samples(seacr_selector_project, 
 assert(identical(app_env$completed_cutrun_seacr_samples(seacr_selector_project, c("S1", "S2"), "non", "stringent"), "S2"), "SEACR non completion does not hide samples from the norm selector")
 app_source_text <- paste(readLines(file.path(repo_root, "app.R"), warn = FALSE), collapse = "\n")
 assert(grepl("Select all samples", app_source_text, fixed = TRUE) && grepl("Clear selection", app_source_text, fixed = TRUE), "sample-level step selectors expose select-all and clear controls")
+assert(grepl("cslRestoreToolPanels", app_source_text, fixed = TRUE) && grepl("server = TRUE", app_source_text, fixed = TRUE), "pipeline panels preserve open state and tables use server-side rendering")
 
 assert(system2("bash", c("-n", shQuote(file.path(repo_root, "run_codespringweb.sh")))) == 0L, "CodeSpringApp launcher shell syntax is valid")
 

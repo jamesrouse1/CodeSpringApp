@@ -100,15 +100,41 @@ format_pvalues_for_display <- function(df, digits = 3) {
   df
 }
 
+normalize_csl_table_data <- function(df) {
+  if (is.null(df)) return(data.frame())
+  df <- as.data.frame(df, stringsAsFactors = FALSE, check.names = FALSE)
+  if (!NCOL(df)) return(df)
+  blank <- !nzchar(trimws(names(df)))
+  names(df)[blank] <- paste0("column_", which(blank))
+  names(df) <- make.unique(names(df), sep = "_")
+  list_columns <- vapply(df, is.list, logical(1))
+  if (any(list_columns)) {
+    df[list_columns] <- lapply(df[list_columns], function(column) {
+      vapply(column, function(value) paste(as.character(value %||% ""), collapse = ", "), character(1))
+    })
+  }
+  df
+}
+
 render_csl_table <- function(expr, page_length = 50, editable = FALSE, scroll_y = "520px", escape = TRUE) {
   expr_call <- substitute(expr)
   expr_env <- parent.frame()
   if (DT_AVAILABLE) {
     DT::renderDataTable({
-      df <- eval(expr_call, envir = expr_env)
+      df <- tryCatch(
+        eval(expr_call, envir = expr_env),
+        error = function(e) data.frame(Message = paste("Unable to render this table:", conditionMessage(e)), check.names = FALSE)
+      )
+      df <- normalize_csl_table_data(df)
       if (!NROW(df)) df <- data.frame()
       pvalue_cols_all <- pvalue_columns(df)
       column_defs <- smart_table_column_defs(df)
+      large_table <- NROW(df) > 2000L
+      length_menu <- if (large_table) {
+        list(c(25, 50, 100, 250, 500), c("25", "50", "100", "250", "500"))
+      } else {
+        list(c(25, 50, 100, -1), c("25", "50", "100", "All"))
+      }
       widget <- DT::datatable(
         df,
         editable = editable,
@@ -118,11 +144,14 @@ render_csl_table <- function(expr, page_length = 50, editable = FALSE, scroll_y 
           scrollX = TRUE,
           scrollY = scroll_y,
           pageLength = page_length,
-          lengthMenu = list(c(25, 50, 100, -1), c("25", "50", "100", "All")),
+          lengthMenu = length_menu,
           paging = TRUE,
           pagingType = "full_numbers",
           dom = "lfrtip",
           autoWidth = FALSE,
+          deferRender = TRUE,
+          processing = large_table,
+          searchDelay = 350,
           columnDefs = column_defs
         )
       )
@@ -139,10 +168,14 @@ render_csl_table <- function(expr, page_length = 50, editable = FALSE, scroll_y 
         if (length(pvalue_cols)) widget <- DT::formatSignif(widget, columns = pvalue_cols, digits = 3)
       }
       widget
-    }, server = FALSE)
+    }, server = TRUE)
   } else {
     renderTable({
-      df <- eval(expr_call, envir = expr_env)
+      df <- tryCatch(
+        eval(expr_call, envir = expr_env),
+        error = function(e) data.frame(Message = paste("Unable to render this table:", conditionMessage(e)), check.names = FALSE)
+      )
+      df <- normalize_csl_table_data(df)
       if (!NROW(df)) return(data.frame())
       df <- format_pvalues_for_display(df)
       utils::head(df, 50)
@@ -7678,6 +7711,7 @@ tool_panel <- function(step, status, description, controls, button_id, button_la
   mode <- status$input[match(status_step, status$step)] %||% ""
   cls <- status_css_key(st)
   tags$details(
+    id = paste0("tool_panel_", tolower(clean_name(step))),
     class = paste("tool-panel", cls),
     open = if (identical(st, "Active") || identical(st, "Not started")) TRUE else NULL,
     tags$summary(
@@ -8107,6 +8141,7 @@ body { background:#eef3f8; color:#17202f; }
 .tool-body { padding:0 16px 16px 16px; border-top:1px solid #edf1f6; }
 .tool-body .form-group { margin-bottom:10px; }
 .step-sample-selector { margin:0 0 14px 0; padding:10px 12px; background:#f6f9fc; border:1px solid #d8e1eb; border-radius:8px; }
+.step-sample-actions { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px; }
 .step-sample-selector .form-group { margin-bottom:4px; }
 .step-sample-selector .shiny-options-group { max-height:210px; overflow:auto; padding:4px 8px; background:white; border:1px solid #e1e7ef; border-radius:6px; }
 .step-sample-selector .checkbox { margin-top:5px; margin-bottom:5px; }
@@ -8703,6 +8738,38 @@ ui <- fluidPage(
               Shiny.setInputValue('genome_browser_ready', Date.now(), {priority: 'event'});
             }
           }, 150);
+        }
+      });
+      function cslToolPanelKey(panel) {
+        var project = ($('#project_id').val() || 'no-project').toString();
+        return 'codespring-tool-panel:' + project + ':' + (panel.id || 'panel');
+      }
+      function cslRestoreToolPanels(root) {
+        $(root || document).find('details.tool-panel').addBack('details.tool-panel').each(function() {
+          if (this.dataset.cslOpenRestored === '1') return;
+          this.dataset.cslOpenRestored = '1';
+          try {
+            var saved = window.sessionStorage.getItem(cslToolPanelKey(this));
+            if (saved === 'open') this.open = true;
+            if (saved === 'closed') this.open = false;
+          } catch (error) {}
+        });
+      }
+      $(document).on('toggle', 'details.tool-panel', function() {
+        try {
+          window.sessionStorage.setItem(cslToolPanelKey(this), this.open ? 'open' : 'closed');
+        } catch (error) {}
+      });
+      $(function() {
+        cslRestoreToolPanels(document);
+        if (window.MutationObserver && document.body) {
+          new MutationObserver(function(mutations) {
+            mutations.forEach(function(mutation) {
+              mutation.addedNodes.forEach(function(node) {
+                if (node.nodeType === 1) cslRestoreToolPanels(node);
+              });
+            });
+          }).observe(document.body, {childList: true, subtree: true});
         }
       });
       function cslLoadGenomeBrowser(message, attempt) {
@@ -9355,6 +9422,7 @@ server <- function(input, output, session) {
     native_registered_id("")
     native_results_loaded_project("")
     p <- current_project()
+    run_cards_refresh(Sys.time())
     updateTextInput(session, "metadata_cols", value = paste(project_metadata_cols(p), collapse = ", "))
     if (isTRUE(existing_project_selected()) && cutadapt_outputs_available(p)) {
       updateCheckboxInput(session, "fastqc_use_trimmed", value = TRUE)
@@ -9738,6 +9806,7 @@ server <- function(input, output, session) {
 
   output$run_step_cards <- renderUI({
     run_cards_refresh()
+    isolate({
     if (!isTRUE(existing_project_selected())) return(div(class = "empty-box", "Create or select a project to enable pipeline tools."))
     p <- current_project()
     status <- isolate(project_status_state())
@@ -9937,6 +10006,7 @@ server <- function(input, output, session) {
         tagList(uiOutput("rna_kallisto_samples_ui"), checkboxInput("kallisto_use_trimmed", "Use trimmed reads", value = trimmed_checkbox_default(p, isolate(input$kallisto_use_trimmed)))),
         "run_kallisto", "Submit Kallisto")
     )
+    })
   })
 
   output$cutrun_diffbind_reference_ui <- renderUI({
