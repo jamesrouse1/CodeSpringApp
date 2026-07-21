@@ -5914,11 +5914,7 @@ submit_fastqc_jobs <- function(project, trimmed = FALSE, samples = NULL) {
   missing_scripts <- c(script, runner)
   missing_scripts <- missing_scripts[!file.exists(missing_scripts)]
   if (length(missing_scripts)) return(record_preflight_failure(project, "FastQC", paste("Required FastQC scripts are missing:", paste(missing_scripts, collapse = ", ")), "fastQC"))
-  input_mode <- if (identical(tolower(normalization_mode), "spikein")) {
-    if (trimmed) "trimmed reads" else "raw reads"
-  } else {
-    "existing aligned BAMs"
-  }
+  input_mode <- if (isTRUE(trimmed)) "trimmed reads" else "raw reads"
   commands <- vapply(seq_len(NROW(pairs)), function(i) {
     reads <- unique(unlist(lapply(c(pairs$r1[i], if (project$paired_end) pairs$r2[i] else character(0)), split_fastq_path_list), use.names = FALSE))
     reads <- reads[nzchar(reads)]
