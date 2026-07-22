@@ -3959,33 +3959,6 @@ cutrun_browser_signal_rows <- function(catalog, samples, mode) {
   if (length(rows)) do.call(rbind, rows) else signal[0, , drop = FALSE]
 }
 
-# Alignment tracks are deliberately available only for the two tracks in the
-# individual CUT&RUN view.  BAMs are indexed and streamed by genomic range, but
-# are still substantially heavier than bigWigs, so they must remain opt-in.
-cutrun_browser_alignment_rows <- function(project, samples, target_sample) {
-  rows <- lapply(samples, function(sample) {
-    bam <- cutrun_bowtie2_signal_bam(project, sample)
-    index <- paste0(bam, ".bai")
-    if (!file.exists(bam) || file_size_for(bam) <= 0 || !file.exists(index) || file_size_for(index) <= 0) return(NULL)
-    data.frame(
-      sample = sample,
-      kind = "alignment",
-      format = "bam",
-      label = paste(sample, if (identical(sample, target_sample)) "target reads" else "matched IgG reads", sep = " — "),
-      path = bam,
-      index_path = index,
-      stringsAsFactors = FALSE,
-      check.names = FALSE
-    )
-  })
-  rows <- Filter(Negate(is.null), rows)
-  if (length(rows)) do.call(rbind, rows) else data.frame(
-    sample = character(0), kind = character(0), format = character(0),
-    label = character(0), path = character(0), index_path = character(0),
-    stringsAsFactors = FALSE, check.names = FALSE
-  )
-}
-
 cutrun_browser_signal_modes <- function(catalog, samples) {
   signal <- catalog[catalog$kind == "signal" & catalog$sample %in% samples, , drop = FALSE]
   by_sample <- lapply(samples, function(sample) {
@@ -4099,7 +4072,7 @@ register_genome_browser_track <- function(session, project, path, index = 1L) {
   path <- validated_project_result_path(project, path)
   if (!nzchar(path)) stop("Genome-browser track is outside the selected project.")
   ext <- tolower(tools::file_ext(path))
-  content_type <- if (ext %in% c("bw", "bigwig", "bam", "bai")) "application/octet-stream" else "text/plain; charset=utf-8"
+  content_type <- if (ext %in% c("bw", "bigwig")) "application/octet-stream" else "text/plain; charset=utf-8"
   key <- paste0("igv_", clean_name(basename(path), "track"), "_", index)
   session$registerDataObj(key, list(path = path, content_type = content_type), genome_browser_range_response)
 }
@@ -11195,7 +11168,6 @@ server <- function(input, output, session) {
       signal_modes <- cutrun_browser_signal_modes_for_peak_call(signal_modes, selected_tool, selected_parameters)
       default_signal_mode <- if (identical(selected_tool, "MACS2") && "cpm" %in% signal_modes) "cpm" else if (identical(requested_normalization, "spikein") && "spikein" %in% signal_modes) "spikein" else signal_modes[[1]]
       selected_signal_mode <- selected_choice(input$genome_browser_cutrun_signal_normalization, signal_modes, default_signal_mode)
-      alignment_rows <- cutrun_browser_alignment_rows(p, signal_samples, target_sample)
       controls <- c(controls, list(
         selectInput(
           "genome_browser_cutrun_sample", "Target sample",
@@ -11214,10 +11186,6 @@ server <- function(input, output, session) {
           choices = stats::setNames(signal_modes, vapply(signal_modes, cutrun_browser_signal_mode_label, character(1))),
           selected = selected_signal_mode, selectize = FALSE
         ),
-        if (NROW(alignment_rows)) checkboxInput(
-          "genome_browser_cutrun_show_alignments", "Show read alignments (BAM; slower)",
-          value = if (is.null(input$genome_browser_cutrun_show_alignments)) FALSE else isTRUE(input$genome_browser_cutrun_show_alignments)
-        ) else div(class = "muted small-note", "Read alignments are unavailable because one or both selected BAM indexes are missing."),
         if (length(navigation$peaks)) selectizeInput(
           "genome_browser_cutrun_peak", "Peak interval",
           choices = peak_loci, selected = selected_locus,
@@ -11232,7 +11200,7 @@ server <- function(input, output, session) {
           if (nzchar(matched_igg)) paste0("Matched IgG: ", matched_igg, ".") else "No matched IgG was found in the CUT&RUN design.",
           if (navigation$total > navigation$shown) paste0(" Menu shows ", format(navigation$shown, big.mark = ","), " high-signal candidate peaks from a fast preview of ", format(navigation$total, big.mark = ","), " called peaks. Choosing one centers IGV on that interval without loading a peak BED.") else ""
         ),
-        div(class = "muted small-note", "Target is above IgG; their signal tracks use the same y-axis scale. BigWigs are the default. If enabled, the two indexed BAMs are streamed only for the current locus and appear below the signal tracks.")
+        div(class = "muted small-note", "Target is above IgG; their signal tracks use the same y-axis scale. The browser loads only these two signal tracks.")
       ))
     } else if (identical(mode, "comparison") && NROW(comparisons)) {
       comparison_choices <- stats::setNames(comparisons$id, make.unique(comparisons$label, sep = " — "))
@@ -11344,7 +11312,6 @@ server <- function(input, output, session) {
     comparison_default_locus <- ""
     differential_loaded <- FALSE
     matched_igg <- ""
-    alignment_loaded <- FALSE
     if (cutrun_peak_mode) {
       target_samples <- unique(as.character(catalog$sample[catalog$kind == "peaks"]))
       design_order <- project_samples(p)
@@ -11373,14 +11340,6 @@ server <- function(input, output, session) {
           paste(target_sample, "target signal", sep = " — "),
           paste(tracks$sample, "matched IgG signal", sep = " — ")
         )
-      }
-      if (isTRUE(input$genome_browser_cutrun_show_alignments)) {
-        alignment_tracks <- cutrun_browser_alignment_rows(p, selected_samples, target_sample)
-        if (NROW(alignment_tracks)) {
-          tracks$index_path <- ""
-          tracks <- rbind(tracks, alignment_tracks)
-          alignment_loaded <- TRUE
-        }
       }
       navigation <- cutrun_individual_peak_navigation(peak_path, max_peaks = 250L)
       selected_peak_locus <- trimws(as.character(locus_override %||% input$genome_browser_cutrun_peak %||% ""))
@@ -11440,9 +11399,6 @@ server <- function(input, output, session) {
       base <- list(name = row$label[[1]], url = url, format = row$format[[1]], color = color)
       if (identical(row$kind[[1]], "signal")) {
         c(base, genome_browser_signal_display_config(comparison_mode || cutrun_peak_mode, shared_signal_scale))
-      } else if (identical(row$kind[[1]], "alignment")) {
-        index_url <- register_genome_browser_track(session, p, row$index_path[[1]], paste0(i, "_index"))
-        c(base, list(type = "alignment", indexURL = index_url, showCoverage = TRUE, coverageTrackHeight = 40L, height = 220L))
       } else if (identical(row$kind[[1]], "differential")) {
         c(base, list(type = "annotation", displayMode = "EXPANDED", indexed = FALSE, height = 120L))
       } else {
@@ -11464,8 +11420,7 @@ server <- function(input, output, session) {
         " Target: ", if (length(selected_samples)) selected_samples[[1]] else "none", ".",
         if (nzchar(matched_igg)) paste0(" Matched IgG: ", matched_igg, ".") else " No matched IgG track was found.",
         " Signal normalization: ", cutrun_browser_signal_mode_label(selected_signal_mode), ".",
-        " Target and IgG share one y-axis scale.",
-        if (alignment_loaded) " Indexed target and IgG BAM read alignments are shown below the signal tracks." else ""
+        " Target and IgG share one y-axis scale."
       ) else if (comparison_mode) paste0(
         " Comparison: ", comparison_label, ".",
         if (shared_signal_scale) " Signal tracks share one y-axis scale." else "",

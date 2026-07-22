@@ -240,33 +240,10 @@ assert(
     identical(app_env$cutrun_browser_signal_modes_for_peak_call(c("spikein", "cpm", "raw"), "MACS2", "narrow peaks; q ≤ 0.01"), c("cpm", "raw")),
   "individual browser derives available signal modes from the selected peak-calling method"
 )
-for (sample in c("target", "igg")) {
-  bam_dir <- file.path(root, "bowtie2", sample)
-  dir.create(bam_dir, recursive = TRUE, showWarnings = FALSE)
-  bam <- file.path(bam_dir, paste0(sample, "Aligned.sortedByCoord.out.bam"))
-  writeBin(as.raw(rep(1L, 32L)), bam)
-  writeBin(as.raw(rep(2L, 16L)), paste0(bam, ".bai"))
-}
-alignment_rows <- app_env$cutrun_browser_alignment_rows(
-  within(chip_project, { analysis_key <- "cutrun"; analysis <- "CUT&RUN" }),
-  c("target", "igg"), "target"
-)
-assert(
-  NROW(alignment_rows) == 2L &&
-    all(alignment_rows$kind == "alignment") &&
-    all(file.exists(alignment_rows$index_path)) &&
-    grepl("target reads", alignment_rows$label[[1]], fixed = TRUE),
-  "individual CUT&RUN browser offers only indexed target and matched-IgG BAM alignment tracks"
-)
 assert(
   grepl("cutrun_peak_mode", server_source, fixed = TRUE) &&
     grepl("cutrun_control_sample_for(p, target_sample)", server_source, fixed = TRUE),
   "CUT&RUN individual browser mode pairs each target with its matched IgG"
-)
-assert(
-  grepl("genome_browser_cutrun_show_alignments", server_source, fixed = TRUE) &&
-    grepl("indexURL", server_source, fixed = TRUE),
-  "CUT&RUN browser keeps BAM alignment viewing opt-in and indexed"
 )
 assert(
   grepl("observeEvent(input$genome_browser_cutrun_sample", server_source, fixed = TRUE) &&
