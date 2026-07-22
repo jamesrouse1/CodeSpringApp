@@ -11497,6 +11497,14 @@ server <- function(input, output, session) {
     updateTextInput(session, "genome_browser_locus", value = locus)
     session$sendCustomMessage("codespring-igv-locus", list(locus = locus))
   }, ignoreInit = TRUE)
+  # Changing the target is a material track change (including its matched IgG),
+  # rather than just a navigation change, so rebuild the small CUT&RUN view
+  # immediately.  Other controls can still be adjusted before using Load.
+  observeEvent(input$genome_browser_cutrun_sample, {
+    p <- current_project()
+    if (!is_cutrun_project(p) || !identical(input$genome_browser_mode %||% "", "cutrun_peak")) return(invisible(NULL))
+    send_genome_browser()
+  }, ignoreInit = TRUE)
   observeEvent(input$genome_browser_comparison, {
     comparison_id <- as.character(input$genome_browser_comparison %||% "")
     if (!nzchar(comparison_id)) return(invisible(NULL))

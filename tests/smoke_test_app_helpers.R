@@ -268,6 +268,11 @@ assert(
     grepl("indexURL", server_source, fixed = TRUE),
   "CUT&RUN browser keeps BAM alignment viewing opt-in and indexed"
 )
+assert(
+  grepl("observeEvent(input$genome_browser_cutrun_sample", server_source, fixed = TRUE) &&
+    grepl("send_genome_browser()", server_source, fixed = TRUE),
+  "changing a CUT&RUN browser target immediately reloads its target and matched-IgG tracks"
+)
 
 atac_project <- chip_project
 atac_project$analysis_key <- "atac"
