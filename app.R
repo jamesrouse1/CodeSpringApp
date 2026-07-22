@@ -10217,7 +10217,11 @@ server <- function(input, output, session) {
             completed_cutrun_seacr_samples(project, samples, config$norm, stringency, config$track),
             error = function(e) character(0)
           )
-          return(sample_retry_ui(project, sample_progress_state(), this_step, setdiff(samples, completed)))
+          candidates <- union(
+            setdiff(samples, completed),
+            sample_retry_candidates(sample_progress_state(), this_step)
+          )
+          return(sample_retry_ui(project, sample_progress_state(), this_step, candidates))
         }
         sample_retry_ui(project, sample_progress_state(), this_step)
       })
