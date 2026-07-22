@@ -3385,6 +3385,18 @@ cutrun_seacr_peak_summary_table <- function(project) {
     }
   }
 
+  macs_root <- file.path(project$data_dir, "macs2")
+  macs_summaries <- if (dir.exists(macs_root)) list.files(macs_root, pattern = "_macs2_summary\\.txt$", recursive = TRUE, full.names = TRUE) else character(0)
+  if (length(macs_summaries)) {
+    macs_counts <- vapply(samples, function(sample) {
+      path <- file.path(macs_root, sample, paste0(sample, "_macs2_summary.txt"))
+      values <- metric_file_to_named_list(path)
+      value <- values[["peak_count"]] %||% NA_character_
+      as.character(value)
+    }, character(1))
+    if (any(!is.na(macs_counts) & nzchar(macs_counts))) out[["MACS2 Peaks"]] <- macs_counts
+  }
+
   alignment <- cutrun_alignment_summary_table(project)
   alignment_columns <- c(`E. coli Mapped Reads` = "spikein_mapped_reads", `Spike-in Scale Factor` = "spikein_scale_factor", `Mapped Reads` = "mapped_reads", `Deduplicated Reads` = "deduplicated_reads", `Signal Fragments` = "fragments_used_for_signal")
   if (NROW(alignment) && "sample" %in% names(alignment)) {
