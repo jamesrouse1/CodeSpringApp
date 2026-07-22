@@ -2080,7 +2080,14 @@ cutrun_macs_fatal_error_signal <- function(project, jobs, step, sample = "") {
   has_fatal_text(as.character(tail(hit, 1)$stderr[1] %||% ""))
 }
 
-sample_step_data_paths <- function(project, step, samples) {
+cutrun_seacr_method_dirs <- function(project) {
+  root <- file.path(project$data_dir, "seacr")
+  if (!dir.exists(root)) return(character(0))
+  dirs <- list.dirs(root, recursive = FALSE, full.names = FALSE)
+  dirs[grepl("^((spikein|cpm)_non|raw_norm|norm|non)_(stringent|relaxed)$", dirs)]
+}
+
+sample_step_data_paths <- function(project, step, samples, method = "") {
   data_dir <- project$data_dir
   samples <- unique(as.character(samples %||% character(0)))
   samples <- samples[nzchar(samples)]
@@ -2108,6 +2115,11 @@ sample_step_data_paths <- function(project, step, samples) {
       "Bowtie2" = file.path(data_dir, "bowtie2", sample),
       "SEACR" = {
         root <- file.path(data_dir, "seacr")
+        if (is_cutrun_project(project) && nzchar(method %||% "")) {
+          available <- cutrun_seacr_method_dirs(project)
+          if (!method %in% available) return(character(0))
+          root <- file.path(root, method)
+        }
         dirs <- if (dir.exists(root)) list.dirs(root, recursive = TRUE, full.names = TRUE) else character(0)
         hits <- dirs[basename(dirs) == sample]
         if (length(hits)) hits else file.path(root, sample)
@@ -2128,9 +2140,9 @@ sample_step_data_paths <- function(project, step, samples) {
   unique(out[nzchar(out)])
 }
 
-step_data_paths <- function(project, step, samples = NULL) {
+step_data_paths <- function(project, step, samples = NULL, method = "") {
   if (canonical_job_step(step) %in% canonical_job_step(sample_level_pipeline_steps())) {
-    sample_paths <- sample_step_data_paths(project, step, samples)
+    sample_paths <- sample_step_data_paths(project, step, samples, method = method)
     if (length(sample_paths)) return(sample_paths)
   }
   data_dir <- project$data_dir
@@ -2163,7 +2175,7 @@ step_data_paths <- function(project, step, samples = NULL) {
   )
 }
 
-delete_step_data <- function(project, step, samples = NULL) {
+delete_step_data <- function(project, step, samples = NULL, method = "") {
   data_dir <- project$data_dir %||% ""
   if (!nzchar(data_dir) || !dir.exists(data_dir)) {
     return("Project data folder does not exist.")
@@ -2171,7 +2183,10 @@ delete_step_data <- function(project, step, samples = NULL) {
   data_root <- normalizePath(data_dir, winslash = "/", mustWork = TRUE)
   samples <- unique(as.character(samples %||% character(0)))
   samples <- samples[nzchar(samples)]
-  paths <- unique(step_data_paths(project, step, samples))
+  if (is_cutrun_project(project) && identical(canonical_job_step(step), "SEACR") && !nzchar(method %||% "")) {
+    return("Select one SEACR method folder to delete.")
+  }
+  paths <- unique(step_data_paths(project, step, samples, method = method))
   paths <- paths[nzchar(paths) & file.exists(paths)]
   if (!length(paths)) return(paste("No existing data outputs found for", step, "in this project."))
   normalized <- normalizePath(paths, winslash = "/", mustWork = TRUE)
@@ -4851,6 +4866,10 @@ tool_delete_data_confirm_id <- function(step) {
 
 tool_delete_data_samples_id <- function(step) {
   paste0("delete_data_samples_", tolower(gsub("[^A-Za-z0-9]+", "_", step)))
+}
+
+tool_delete_data_method_id <- function(step) {
+  paste0("delete_data_method_", tolower(gsub("[^A-Za-z0-9]+", "_", step)))
 }
 
 sample_level_pipeline_steps <- function() {
@@ -10625,6 +10644,7 @@ server <- function(input, output, session) {
       delete_button_id <- tool_delete_data_button_id(this_step)
       delete_confirm_id <- tool_delete_data_confirm_id(this_step)
       delete_samples_id <- tool_delete_data_samples_id(this_step)
+      delete_method_id <- tool_delete_data_method_id(this_step)
       observeEvent(input[[button_id]], {
         p <- current_project()
         active_jobs <- active_step_jobs_from_jobs(job_history(p), this_step)
@@ -10670,10 +10690,26 @@ server <- function(input, output, session) {
       observeEvent(input[[delete_button_id]], {
         p <- current_project()
         samples <- project_samples(p)
+        methods <- if (identical(this_step, "SEACR") && is_cutrun_project(p)) cutrun_seacr_method_dirs(p) else character(0)
+        selected_method <- if (length(methods)) {
+          active_config <- cutrun_seacr_config(input$cutrun_seacr_config %||% "spikein_non")
+          requested <- paste(active_config$key, input$cutrun_seacr_stringency %||% "stringent", sep = "_")
+          if (requested %in% methods) requested else methods[[1]]
+        } else ""
+        method_selector <- if (length(methods)) {
+          selectInput(delete_method_id, "SEACR method folder to delete", choices = methods, selected = selected_method, selectize = FALSE)
+        } else NULL
         sample_selector <- if (this_step %in% sample_level_pipeline_steps() && length(samples)) {
           checkboxGroupInput(delete_samples_id, "Samples to delete", choices = samples, selected = samples, inline = FALSE)
         } else NULL
-        paths <- unique(step_data_paths(p, this_step, if (this_step %in% sample_level_pipeline_steps()) samples else NULL))
+        paths <- unique(step_data_paths(p, this_step, if (this_step %in% sample_level_pipeline_steps()) samples else NULL, method = selected_method))
+        path_preview <- if (length(methods)) {
+          tags$p(class = "muted", "Only the selected SEACR method folder will be deleted; all other SEACR method folders will be preserved.")
+        } else if (length(paths)) {
+          tagList(tags$p("Data paths:"), tags$ul(lapply(paths, function(path) tags$li(code(path)))))
+        } else {
+          tags$p("No expected data paths were found for this step.")
+        }
         showModal(modalDialog(
           title = paste("Delete", this_step, "data outputs?"),
           tags$p("This will delete this step's output data for the selected project. It will not delete the whole project folder."),
@@ -10681,8 +10717,9 @@ server <- function(input, output, session) {
             tags$li(tags$strong("Project: "), p$label %||% p$name),
             tags$li(tags$strong("Step: "), this_step)
           ),
+          method_selector,
           sample_selector,
-          if (length(paths)) tagList(tags$p("Data paths:"), tags$ul(lapply(paths, function(path) tags$li(code(path))))) else tags$p("No expected data paths were found for this step."),
+          path_preview,
           tags$p(tags$strong("This cannot be undone.")),
           footer = tagList(
             modalButton("Cancel"),
@@ -10693,6 +10730,7 @@ server <- function(input, output, session) {
       }, ignoreInit = TRUE)
       observeEvent(input[[delete_confirm_id]], {
         samples <- isolate(input[[delete_samples_id]] %||% character(0))
+        method <- if (identical(this_step, "SEACR") && is_cutrun_project(current_project())) isolate(input[[delete_method_id]] %||% "") else ""
         if (this_step %in% sample_level_pipeline_steps() && !length(samples)) {
           removeModal()
           run_message("Select at least one sample to delete for this step.")
@@ -10701,7 +10739,7 @@ server <- function(input, output, session) {
         removeModal()
         run_message(paste("Deleting", this_step, "data outputs..."))
         set_tool_message(this_step, "")
-        msg <- tryCatch(delete_step_data(current_project(), this_step, samples), error = function(e) paste("ERROR deleting", this_step, "data outputs:", conditionMessage(e)))
+        msg <- tryCatch(delete_step_data(current_project(), this_step, samples, method = method), error = function(e) paste("ERROR deleting", this_step, "data outputs:", conditionMessage(e)))
         run_message(msg)
         set_tool_message(this_step, "")
         safe_refresh_progress_now("delete data")
