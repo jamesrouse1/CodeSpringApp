@@ -11156,7 +11156,8 @@ server <- function(input, output, session) {
       target_sample <- selected_choice(input$genome_browser_cutrun_sample, target_samples, target_samples[[1]])
       peak_rows <- cutrun_browser_peak_rows(p, catalog, target_sample)
       tool_choices <- sort(unique(peak_rows$tool))
-      selected_tool <- selected_choice(input$genome_browser_cutrun_tool, tool_choices, tool_choices[[1]])
+      default_tool <- if ("SEACR" %in% tool_choices) "SEACR" else tool_choices[[1]]
+      selected_tool <- selected_choice(input$genome_browser_cutrun_tool, tool_choices, default_tool)
       parameter_rows <- peak_rows[peak_rows$tool == selected_tool, , drop = FALSE]
       parameter_rows <- parameter_rows[order(parameter_rows$parameters, parameter_rows$path), , drop = FALSE]
       parameter_choices <- stats::setNames(parameter_rows$path, make.unique(parameter_rows$parameters, sep = " — "))
@@ -11325,7 +11326,8 @@ server <- function(input, output, session) {
       target_sample <- selected_choice(input$genome_browser_cutrun_sample, target_samples, target_samples[[1]])
       peak_rows <- cutrun_browser_peak_rows(p, catalog, target_sample)
       tool_choices <- sort(unique(peak_rows$tool))
-      selected_tool <- selected_choice(input$genome_browser_cutrun_tool, tool_choices, tool_choices[[1]])
+      default_tool <- if ("SEACR" %in% tool_choices) "SEACR" else tool_choices[[1]]
+      selected_tool <- selected_choice(input$genome_browser_cutrun_tool, tool_choices, default_tool)
       peak_rows <- peak_rows[peak_rows$tool == selected_tool, , drop = FALSE]
       peak_rows <- peak_rows[order(peak_rows$parameters, peak_rows$path), , drop = FALSE]
       peak_path <- selected_choice(input$genome_browser_cutrun_parameters, peak_rows$path, peak_rows$path[[1]])
@@ -11463,6 +11465,16 @@ server <- function(input, output, session) {
     updateTextInput(session, "genome_browser_locus", value = locus)
     if (isTRUE(genome_browser_loaded())) send_genome_browser(locus_override = locus)
   }, ignoreInit = TRUE)
+  observeEvent(list(
+    input$genome_browser_cutrun_sample,
+    input$genome_browser_cutrun_tool,
+    input$genome_browser_cutrun_parameters,
+    input$genome_browser_cutrun_signal_normalization
+  ), {
+    if (is_cutrun_project(current_project()) && isTRUE(genome_browser_loaded())) {
+      send_genome_browser()
+    }
+  }, ignoreInit = TRUE)
   observeEvent(input$genome_browser_comparison, {
     comparison_id <- as.character(input$genome_browser_comparison %||% "")
     if (!nzchar(comparison_id)) return(invisible(NULL))
@@ -11492,6 +11504,12 @@ server <- function(input, output, session) {
   observeEvent(input$load_genome_browser, {
     genome_browser_loaded(TRUE)
     send_genome_browser()
+  }, ignoreInit = TRUE)
+  observeEvent(input$genome_browser_ready, {
+    session$onFlushed(function() {
+      genome_browser_loaded(TRUE)
+      send_genome_browser()
+    }, once = TRUE)
   }, ignoreInit = TRUE)
   output$atac_diffbind_dir_ui <- renderUI({
     progress_refresh(); root <- file.path(current_project()$data_dir, "diffbind"); dirs <- if (dir.exists(root)) list.dirs(root, recursive = FALSE, full.names = TRUE) else character(0); dirs <- dirs[vapply(dirs, diffbind_comparison_complete, logical(1))]

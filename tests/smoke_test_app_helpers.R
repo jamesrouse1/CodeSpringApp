@@ -19,8 +19,9 @@ assert(!any(grepl(owner_path_pattern, runtime_text, ignore.case = TRUE)), "runti
 assert(grepl("observeEvent(input$genome_browser_comparison", server_source, fixed = TRUE) && grepl("samples_override = available", server_source, fixed = TRUE), "changing a genome-browser comparison resets its samples and reloads the selected comparison")
 assert(
   grepl("genome_browser_loaded <- reactiveVal(FALSE)", server_source, fixed = TRUE) &&
-    !grepl("observeEvent(input$genome_browser_ready, send_genome_browser()", server_source, fixed = TRUE),
-  "genome browser waits for explicit Load tracks action instead of auto-initializing on tab open"
+    grepl("observeEvent(input$genome_browser_ready", server_source, fixed = TRUE) &&
+    grepl("session$onFlushed(function()", server_source, fixed = TRUE),
+  "genome browser loads only after its controls have rendered on tab open"
 )
 assert(any(grepl("codespringIgvLoadPromise", runtime_text, fixed = TRUE)), "IGV replacements are serialized so repeated reload events cannot create duplicate browsers")
 assert(grepl("comparison_default_locus", server_source, fixed = TRUE) && grepl("locus_override = top_peak", server_source, fixed = TRUE), "each differential comparison defaults IGV to its most significant ranked peak")
