@@ -201,6 +201,22 @@ assert(
     identical(individual_navigation$total, 3L) && identical(individual_navigation$shown, 2L),
   "individual CUT&RUN peak navigation exposes bounded peak choices ordered by signal while retaining total peak count"
 )
+browser_peak_root <- file.path(root, "seacr", "spikein_non_stringent", "target")
+dir.create(browser_peak_root, recursive = TRUE)
+browser_peak_catalog <- data.frame(
+  sample = c("target", "target"), kind = c("peaks", "peaks"), format = c("bed", "narrowPeak"),
+  label = c("SEACR", "MACS2"),
+  path = c(file.path(browser_peak_root, "target.stringent.bed"), file.path(root, "macs2", "target", "target_peaks.narrowPeak")),
+  stringsAsFactors = FALSE
+)
+browser_peak_rows <- app_env$cutrun_browser_peak_rows(
+  within(chip_project, { analysis_key <- "cutrun"; analysis <- "CUT&RUN" }), browser_peak_catalog, "target"
+)
+assert(
+  identical(sort(browser_peak_rows$tool), c("MACS2", "SEACR")) &&
+    any(grepl("Spike-in-scaled", browser_peak_rows$parameters, fixed = TRUE)),
+  "CUT&RUN individual browser separates peak-calling tool from the selected parameter set"
+)
 assert(
   grepl("cutrun_peak_mode", server_source, fixed = TRUE) &&
     grepl("cutrun_control_sample_for(p, target_sample)", server_source, fixed = TRUE),

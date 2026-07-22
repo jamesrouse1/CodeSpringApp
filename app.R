@@ -3902,6 +3902,29 @@ cutrun_individual_peak_navigation <- function(path, max_peaks = 5000L) {
   value
 }
 
+cutrun_browser_peak_rows <- function(project, catalog, sample) {
+  rows <- catalog[catalog$kind == "peaks" & catalog$sample == sample, , drop = FALSE]
+  if (!NROW(rows)) return(rows)
+  seacr_root <- normalizePath(file.path(project$data_dir, "seacr"), winslash = "/", mustWork = FALSE)
+  # `normalizePath(..., mustWork = FALSE)` may retain a doubled temporary-path
+  # separator on macOS, so identify the explicit result-folder component instead.
+  is_seacr <- grepl("/seacr/", rows$path, fixed = TRUE)
+  rows$tool <- ifelse(is_seacr, "SEACR", "MACS2")
+  rows$parameters <- vapply(seq_len(NROW(rows)), function(i) {
+    if (is_seacr[[i]]) {
+      parts <- strsplit(rows$path[[i]], "/", fixed = TRUE)[[1]]
+      method_hits <- parts[grepl("^((spikein|cpm)_non|raw_norm|norm|non)_(stringent|relaxed)$", parts)]
+      method <- if (length(method_hits)) method_hits[[length(method_hits)]] else "legacy"
+      return(cutrun_seacr_method_label(method))
+    }
+    summary <- metric_file_to_named_list(file.path(dirname(rows$path[[i]]), paste0(sample, "_macs2_summary.txt")))
+    peak_type <- trimws(as.character(summary$peak_type %||% if (identical(rows$format[[i]], "broadPeak")) "broad" else "narrow"))
+    qvalue <- trimws(as.character(summary$qvalue %||% "0.01"))
+    paste0(peak_type, " peaks; q ≤ ", qvalue)
+  }, character(1))
+  rows
+}
+
 genome_browser_preferred_signal_rows <- function(project, catalog, samples, metadata = data.frame()) {
   signal <- catalog[catalog$kind == "signal" & catalog$sample %in% samples, , drop = FALSE]
   if (!NROW(signal)) return(signal)
@@ -11064,10 +11087,13 @@ server <- function(input, output, session) {
       target_samples <- unique(as.character(catalog$sample[catalog$kind == "peaks"]))
       target_samples <- unique(c(design_order[design_order %in% target_samples], sort(setdiff(target_samples, design_order))))
       target_sample <- selected_choice(input$genome_browser_cutrun_sample, target_samples, target_samples[[1]])
-      peak_rows <- catalog[catalog$kind == "peaks" & catalog$sample == target_sample, , drop = FALSE]
-      peak_rows <- peak_rows[order(peak_rows$label), , drop = FALSE]
-      peak_choices <- stats::setNames(peak_rows$path, peak_rows$label)
-      peak_path <- selected_choice(input$genome_browser_cutrun_peak_file, peak_choices, peak_rows$path[[1]])
+      peak_rows <- cutrun_browser_peak_rows(p, catalog, target_sample)
+      tool_choices <- sort(unique(peak_rows$tool))
+      selected_tool <- selected_choice(input$genome_browser_cutrun_tool, tool_choices, tool_choices[[1]])
+      parameter_rows <- peak_rows[peak_rows$tool == selected_tool, , drop = FALSE]
+      parameter_rows <- parameter_rows[order(parameter_rows$parameters, parameter_rows$path), , drop = FALSE]
+      parameter_choices <- stats::setNames(parameter_rows$path, make.unique(parameter_rows$parameters, sep = " — "))
+      peak_path <- selected_choice(input$genome_browser_cutrun_parameters, parameter_choices, parameter_rows$path[[1]])
       navigation <- cutrun_individual_peak_navigation(peak_path, max_peaks = 5000L)
       peak_loci <- c("Choose a peak..." = "", navigation$peaks)
       selected_locus <- as.character(input$genome_browser_cutrun_peak %||% "")
@@ -11079,8 +11105,12 @@ server <- function(input, output, session) {
           choices = target_samples, selected = target_sample, selectize = FALSE
         ),
         selectInput(
-          "genome_browser_cutrun_peak_file", "Peak caller / method",
-          choices = peak_choices, selected = peak_path, selectize = FALSE
+          "genome_browser_cutrun_tool", "Peak-calling tool",
+          choices = tool_choices, selected = selected_tool, selectize = FALSE
+        ),
+        selectInput(
+          "genome_browser_cutrun_parameters", "Parameters",
+          choices = parameter_choices, selected = peak_path, selectize = FALSE
         ),
         if (length(navigation$peaks)) selectizeInput(
           "genome_browser_cutrun_peak", "Peak interval",
@@ -11214,9 +11244,12 @@ server <- function(input, output, session) {
       design_order <- project_samples(p)
       target_samples <- unique(c(design_order[design_order %in% target_samples], sort(setdiff(target_samples, design_order))))
       target_sample <- selected_choice(input$genome_browser_cutrun_sample, target_samples, target_samples[[1]])
-      peak_rows <- catalog[catalog$kind == "peaks" & catalog$sample == target_sample, , drop = FALSE]
-      peak_rows <- peak_rows[order(peak_rows$label), , drop = FALSE]
-      peak_path <- selected_choice(input$genome_browser_cutrun_peak_file, peak_rows$path, peak_rows$path[[1]])
+      peak_rows <- cutrun_browser_peak_rows(p, catalog, target_sample)
+      tool_choices <- sort(unique(peak_rows$tool))
+      selected_tool <- selected_choice(input$genome_browser_cutrun_tool, tool_choices, tool_choices[[1]])
+      peak_rows <- peak_rows[peak_rows$tool == selected_tool, , drop = FALSE]
+      peak_rows <- peak_rows[order(peak_rows$parameters, peak_rows$path), , drop = FALSE]
+      peak_path <- selected_choice(input$genome_browser_cutrun_parameters, peak_rows$path, peak_rows$path[[1]])
       peak_row <- peak_rows[match(peak_path, peak_rows$path), , drop = FALSE]
       matched_igg <- cutrun_control_sample_for(p, target_sample)
       selected_samples <- c(target_sample, if (nzchar(matched_igg)) matched_igg)
