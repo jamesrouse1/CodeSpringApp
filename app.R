@@ -8982,9 +8982,7 @@ ui <- fluidPage(
   tags$head(
     tags$title("CodeSpringApp"),
     tags$style(HTML(app_css)),
-    # Bundle IGV with the app: a browser on a cluster laptop should not need a
-    # separate internet request before the local Shiny genome browser can load.
-    tags$script(src = "genome-viewer.min.js"),
+    tags$script(src = "https://cdn.jsdelivr.net/npm/igv@3.0.2/dist/igv.min.js"),
     tags$script(HTML("
       function cslFormatElapsed(total) {
         total = Math.max(0, Math.floor(total || 0));
@@ -11121,16 +11119,6 @@ server <- function(input, output, session) {
     progress_refresh()
     peak_signal_track_table(current_project())
   }, page_length = 50, scroll_y = "600px")
-  # Load one settled browser configuration, then navigate it in place.  Rebuilding
-  # IGV on every dynamic control update makes the Results Explorer appear busy.
-  genome_browser_loaded <- reactiveVal(FALSE)
-  cutrun_browser_settings <- reactive(list(
-    sample = input$genome_browser_cutrun_sample %||% "",
-    tool = input$genome_browser_cutrun_tool %||% "",
-    parameters = input$genome_browser_cutrun_parameters %||% "",
-    normalization = input$genome_browser_cutrun_signal_normalization %||% ""
-  ))
-  cutrun_browser_settings_stable <- shiny::debounce(cutrun_browser_settings, 350L)
   output$genome_browser_controls_ui <- renderUI({
     req(identical(input$web_main_tabs %||% "", "Results Explorer"))
     progress_refresh()
@@ -11462,14 +11450,7 @@ server <- function(input, output, session) {
     locus <- trimws(as.character(input$genome_browser_cutrun_peak %||% ""))
     if (!nzchar(locus)) return(invisible(NULL))
     updateTextInput(session, "genome_browser_locus", value = locus)
-    if (isTRUE(genome_browser_loaded())) {
-      session$sendCustomMessage("codespring-igv-locus", list(locus = locus))
-    }
-  }, ignoreInit = TRUE)
-  observeEvent(cutrun_browser_settings_stable(), {
-    if (is_cutrun_project(current_project()) && isTRUE(genome_browser_loaded())) {
-      send_genome_browser()
-    }
+    session$sendCustomMessage("codespring-igv-locus", list(locus = locus))
   }, ignoreInit = TRUE)
   observeEvent(input$genome_browser_comparison, {
     comparison_id <- as.character(input$genome_browser_comparison %||% "")
@@ -11493,20 +11474,10 @@ server <- function(input, output, session) {
       updateSelectizeInput(session, "genome_browser_gene", selected = "")
       updateSelectizeInput(session, "genome_browser_peak", selected = top_peak)
     }, once = TRUE)
-    if (isTRUE(genome_browser_loaded())) {
-      send_genome_browser(comparison_override = comparison_id, samples_override = available, locus_override = top_peak)
-    }
+    send_genome_browser(comparison_override = comparison_id, samples_override = available, locus_override = top_peak)
   }, ignoreInit = TRUE)
-  observeEvent(input$load_genome_browser, {
-    genome_browser_loaded(TRUE)
-    send_genome_browser()
-  }, ignoreInit = TRUE)
-  observeEvent(input$genome_browser_ready, {
-    session$onFlushed(function() {
-      genome_browser_loaded(TRUE)
-      send_genome_browser()
-    }, once = TRUE)
-  }, ignoreInit = TRUE)
+  observeEvent(input$load_genome_browser, send_genome_browser(), ignoreInit = TRUE)
+  observeEvent(input$genome_browser_ready, send_genome_browser(), ignoreInit = TRUE)
   output$atac_diffbind_dir_ui <- renderUI({
     progress_refresh(); root <- file.path(current_project()$data_dir, "diffbind"); dirs <- if (dir.exists(root)) list.dirs(root, recursive = FALSE, full.names = TRUE) else character(0); dirs <- dirs[vapply(dirs, diffbind_comparison_complete, logical(1))]
     if (!length(dirs)) return(div(class = "empty-box", "No DiffBind comparison found yet.")); selectInput("atac_diffbind_dir", "Comparison", choices = stats::setNames(dirs, basename(dirs)), selected = selected_choice(input$atac_diffbind_dir, dirs, dirs[[1]]), selectize = FALSE)

@@ -18,15 +18,13 @@ owner_path_pattern <- "(/grid/bsr/home/rouse|/home/rouse|/Users/rouse|rouse@bamd
 assert(!any(grepl(owner_path_pattern, runtime_text, ignore.case = TRUE)), "runtime code contains no hardcoded rouse home, login, or server path")
 assert(grepl("observeEvent(input$genome_browser_comparison", server_source, fixed = TRUE) && grepl("samples_override = available", server_source, fixed = TRUE), "changing a genome-browser comparison resets its samples and reloads the selected comparison")
 assert(
-  grepl("genome_browser_loaded <- reactiveVal(FALSE)", server_source, fixed = TRUE) &&
-    grepl("observeEvent(input$genome_browser_ready", server_source, fixed = TRUE) &&
-    grepl("session$onFlushed(function()", server_source, fixed = TRUE),
-  "genome browser loads only after its controls have rendered on tab open"
+  grepl("observeEvent(input$genome_browser_ready, send_genome_browser()", server_source, fixed = TRUE) &&
+    !grepl("genome_browser_loaded <- reactiveVal(FALSE)", server_source, fixed = TRUE),
+  "genome browser uses the established immediate-load behavior"
 )
 assert(
-  grepl("cutrun_browser_settings_stable <- shiny::debounce", server_source, fixed = TRUE) &&
-    grepl("codespring-igv-locus", server_source, fixed = TRUE),
-  "CUT&RUN peak selection navigates one IGV instance instead of rebuilding it repeatedly"
+  grepl("codespring-igv-locus", server_source, fixed = TRUE),
+  "CUT&RUN peak selection navigates the established IGV instance"
 )
 assert(any(grepl("codespringIgvLoadPromise", runtime_text, fixed = TRUE)), "IGV replacements are serialized so repeated reload events cannot create duplicate browsers")
 assert(grepl("comparison_default_locus", server_source, fixed = TRUE) && grepl("locus_override = top_peak", server_source, fixed = TRUE), "each differential comparison defaults IGV to its most significant ranked peak")
