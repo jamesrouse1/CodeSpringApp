@@ -832,12 +832,25 @@ for (scope in c("AKP", "AKPS")) {
     stringsAsFactors = FALSE
   )
   write.table(scoped_design, file.path(scoped_manifest_dir, "design_matrix.txt"), sep = "\t", row.names = FALSE, quote = FALSE)
+  for (sample in scoped_samples) {
+    sample_signal_dir <- file.path(atac_browser_root, "bowtie2", sample)
+    dir.create(sample_signal_dir, recursive = TRUE, showWarnings = FALSE)
+    writeBin(as.raw(seq_len(64)), file.path(sample_signal_dir, paste0(sample, "Aligned.sortedByCoord_removeDup.out.bw")))
+  }
 }
 akps_comparison_dir <- file.path(atac_browser_root, "diffbind", "AKPS_AA_vs_AKPS_Veh")
 dir.create(akps_comparison_dir, recursive = TRUE, showWarnings = FALSE)
 writeLines("chr1\t300\t420\tpeak_akps\t4", file.path(akps_comparison_dir, "DifferentialPeaks_AA_vs_Veh_ref.with_stats.bed"))
 akps_manifest_sheet <- app_env$genome_browser_atac_manifest_sheet(atac_browser_project, akps_comparison_dir)
 assert(NROW(akps_manifest_sheet) == 4L && all(startsWith(akps_manifest_sheet$sample, "AKPS_")), "ATAC comparison scope matches AKPS exactly and never falls back to the AKP prefix")
+external_atac_project <- atac_browser_project
+external_atac_project$design_matrix_path <- file.path(atac_browser_root, "manifest", "missing_design_matrix.txt")
+external_atac_project$fastq_dir <- ""
+external_atac_project$fastq_dirs <- character(0)
+external_atac_sheet <- app_env$genome_browser_infer_atac_comparison_sheet(external_atac_project, akps_comparison_dir)
+assert(NROW(external_atac_sheet) == 4L && all(startsWith(external_atac_sheet$sample, "AKPS_")), "completed ATAC import infers the exact AKPS samples from its comparison directory")
+assert(identical(external_atac_sheet$condition, c("AKPS_AA", "AKPS_AA", "AKPS_Veh", "AKPS_Veh")), "completed ATAC import keeps AA signal tracks above Veh tracks")
+assert(identical(app_env$validate_completed_atac_results(atac_browser_root), normalizePath(atac_browser_root, winslash = "/", mustWork = TRUE)), "completed ATAC import validates BigWigs and DiffBind BED output before registration")
 
 annotation_inputs <- app_env$peak_annotation_input_files(atac_project)
 assert(legacy_peak %in% annotation_inputs, "peak annotation discovers completed per-sample MACS2 peaks")

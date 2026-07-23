@@ -606,6 +606,7 @@ legacy_project_from_config <- function(path) {
     fastq_dir = fastq_dir,
     fastq_dirs = fastq_dirs,
     design_matrix_path = design_path_from_dir(inpath_design),
+    external_results = tolower(vals$external_results %||% "false") %in% c("true", "t", "yes", "y", "1"),
     source_config = normalizePath(path, winslash = "/", mustWork = FALSE),
     source = "CodeSpringLab config"
   )
@@ -691,18 +692,26 @@ new_project_from_inputs <- function(input) {
   key <- analysis_key(input$new_project_analysis %||% input$analysis %||% "RNA-seq")
   project_name <- clean_name(input$new_project_name %||% paste0("new_", key, "_project"), paste0("new_", key, "_project"))
   label <- input$new_project_name %||% project_name
-  results_root <- normalizePath(path.expand(input$new_results_root %||% DEFAULT_RESULTS_ROOT), winslash = "/", mustWork = FALSE)
-  data_dir <- file.path(results_root, project_name, "data")
-  design_path <- trimws(input$new_design_matrix_path %||% "")
-  if (!nzchar(design_path)) design_path <- file.path(data_dir, "manifest", "design_matrix.txt")
-  else if (dir.exists(path.expand(design_path))) {
-    design_path <- file.path(normalizePath(path.expand(design_path), winslash = "/", mustWork = FALSE), "design_matrix.txt")
-  } else if (basename(design_path) != "design_matrix.txt") {
-    design_path <- file.path(normalizePath(dirname(path.expand(design_path)), winslash = "/", mustWork = FALSE), "design_matrix.txt")
+  existing_atac <- identical(key, "atac") && identical(input$new_project_mode %||% "new", "existing_atac")
+  if (existing_atac) {
+    data_dir <- normalizePath(path.expand(trimws(input$new_existing_results_path %||% "")), winslash = "/", mustWork = FALSE)
+    results_root <- dirname(data_dir)
+    design_path <- file.path(data_dir, "manifest", "design_matrix.txt")
+    fastq_dirs <- character(0)
+  } else {
+    results_root <- normalizePath(path.expand(input$new_results_root %||% DEFAULT_RESULTS_ROOT), winslash = "/", mustWork = FALSE)
+    data_dir <- file.path(results_root, project_name, "data")
+    design_path <- trimws(input$new_design_matrix_path %||% "")
+    if (!nzchar(design_path)) design_path <- file.path(data_dir, "manifest", "design_matrix.txt")
+    else if (dir.exists(path.expand(design_path))) {
+      design_path <- file.path(normalizePath(path.expand(design_path), winslash = "/", mustWork = FALSE), "design_matrix.txt")
+    } else if (basename(design_path) != "design_matrix.txt") {
+      design_path <- file.path(normalizePath(dirname(path.expand(design_path)), winslash = "/", mustWork = FALSE), "design_matrix.txt")
+    }
+    design_path <- normalizePath(path.expand(design_path), winslash = "/", mustWork = FALSE)
+    fastq_mode <- tolower(input$new_fastq_location_mode %||% "one")
+    fastq_dirs <- if (identical(fastq_mode, "multiple")) parse_fastq_dirs(input$new_fastq_dirs %||% "") else parse_fastq_dirs(input$new_fastq_dir %||% "")
   }
-  design_path <- normalizePath(path.expand(design_path), winslash = "/", mustWork = FALSE)
-  fastq_mode <- tolower(input$new_fastq_location_mode %||% "one")
-  fastq_dirs <- if (identical(fastq_mode, "multiple")) parse_fastq_dirs(input$new_fastq_dirs %||% "") else parse_fastq_dirs(input$new_fastq_dir %||% "")
   fastq_dir <- if (length(fastq_dirs)) fastq_dirs[[1]] else ""
   paired <- !tolower(input$new_paired_end %||% "paired") %in% c("single", "se", "n", "no", "false")
   list(
@@ -719,9 +728,22 @@ new_project_from_inputs <- function(input) {
     fastq_dir = fastq_dir,
     fastq_dirs = fastq_dirs,
     design_matrix_path = design_path,
+    external_results = existing_atac,
     source_config = "",
     source = "new project"
   )
+}
+
+validate_completed_atac_results <- function(path) {
+  if (!nzchar(path) || !dir.exists(path)) stop("Choose the completed ATAC-seq results folder.")
+  path <- normalizePath(path, winslash = "/", mustWork = TRUE)
+  missing <- c("bowtie2", "diffbind")[!dir.exists(file.path(path, c("bowtie2", "diffbind")))]
+  if (length(missing)) stop("This does not look like a completed ATAC-seq results folder. Missing: ", paste(missing, collapse = ", "))
+  signals <- list.files(file.path(path, "bowtie2"), pattern = "\\.(bw|bigwig)$", recursive = TRUE, full.names = TRUE, ignore.case = TRUE)
+  if (!length(signals)) stop("No BigWig files were found below: ", file.path(path, "bowtie2"))
+  differential <- list.files(file.path(path, "diffbind"), pattern = "DifferentialPeaks_.*\\.with_stats\\.bed$", recursive = TRUE, full.names = TRUE)
+  if (!length(differential)) stop("No DiffBind differential-peak BED files were found below: ", file.path(path, "diffbind"))
+  invisible(path)
 }
 
 project_config_dir <- function(key) {
@@ -831,7 +853,8 @@ write_project_config <- function(project) {
     sprintf("read_paths = %s", deparse(paste(project_fastq_dirs(project), collapse = ";"))),
     sprintf("genome = %s", deparse(project$genome)),
     sprintf("genome_version = %s", deparse(genome_reference_key(project))),
-    sprintf("pairing = %s", deparse(if (isTRUE(project$paired_end)) "y" else "n"))
+    sprintf("pairing = %s", deparse(if (isTRUE(project$paired_end)) "y" else "n")),
+    sprintf("external_results = %s", deparse(isTRUE(project$external_results)))
   )
   if (is_atac_project(project)) {
     ref <- atac_reference_resources(project)
@@ -3684,6 +3707,34 @@ genome_browser_atac_manifest_sheet <- function(project, result_dir) {
   candidates[[order(-scores, sizes)[[1]]]]$sheet
 }
 
+genome_browser_infer_atac_comparison_sheet <- function(project, result_dir) {
+  labels <- genome_browser_diffbind_labels(result_dir)
+  comparison <- trimws(labels[["comparison"]] %||% "")
+  reference <- trimws(labels[["reference"]] %||% "")
+  # Older DiffBind output names can record only AA_vs_Veh in the BED filename.
+  # The comparison directory retains the full biological scope (e.g. AKPS_AA_vs_AKPS_Veh).
+  dir_match <- regmatches(basename(result_dir), regexec("^(.*)_vs_(.*)$", basename(result_dir)))[[1]]
+  if (length(dir_match) == 3L && !grepl("_", comparison, fixed = TRUE) && !grepl("_", reference, fixed = TRUE)) {
+    comparison <- dir_match[[2]]
+    reference <- dir_match[[3]]
+  }
+  if (!nzchar(comparison) || !nzchar(reference)) return(data.frame())
+  signal_root <- file.path(project$data_dir, "bowtie2")
+  if (!dir.exists(signal_root)) return(data.frame())
+  samples <- basename(list.dirs(signal_root, recursive = FALSE, full.names = TRUE))
+  samples <- samples[nzchar(samples) & !duplicated(samples)]
+  if (!length(samples)) return(data.frame())
+  is_comparison <- startsWith(samples, comparison)
+  is_reference <- startsWith(samples, reference)
+  keep <- is_comparison | is_reference
+  if (!any(keep)) return(data.frame())
+  normalize_genome_browser_sample_sheet(data.frame(
+    SampleID = samples[keep],
+    Condition = ifelse(is_comparison[keep], comparison, reference),
+    stringsAsFactors = FALSE
+  ))
+}
+
 genome_browser_comparison_sheet <- function(project, result_dir) {
   direct <- file.path(result_dir, "diffbind_sample_sheet.tsv")
   marker <- file.path(result_dir, "_DIFFBIND_COMPLETE")
@@ -3695,7 +3746,11 @@ genome_browser_comparison_sheet <- function(project, result_dir) {
     sheet <- normalize_genome_browser_sample_sheet(safe_read_table(candidates[[1]]))
     if (NROW(sheet)) return(sheet)
   }
-  if (is_atac_project(project)) return(genome_browser_atac_manifest_sheet(project, result_dir))
+  if (is_atac_project(project)) {
+    sheet <- genome_browser_atac_manifest_sheet(project, result_dir)
+    if (NROW(sheet)) return(sheet)
+    return(genome_browser_infer_atac_comparison_sheet(project, result_dir))
+  }
   data.frame()
 }
 
@@ -3708,7 +3763,8 @@ genome_browser_comparison_catalog <- function(project) {
     if (!nzchar(bed)) return(NULL)
     sheet <- genome_browser_comparison_sheet(project, result_dir)
     if (!NROW(sheet)) return(NULL)
-    sheet <- sheet[sheet$sample %in% project_samples(project), , drop = FALSE]
+    configured_samples <- project_samples(project)
+    if (length(configured_samples)) sheet <- sheet[sheet$sample %in% configured_samples, , drop = FALSE]
     if (!NROW(sheet)) return(NULL)
     condition_labels <- genome_browser_diffbind_labels(result_dir)
     sheet <- order_genome_browser_comparison_sheet(sheet, condition_labels)
@@ -9698,6 +9754,10 @@ server <- function(input, output, session) {
   }
 
   run_submission <- function(label, expr, input_mode = "", samples = NULL) {
+    if (isTRUE(current_project()$external_results)) {
+      run_message("This is a read-only completed-results project. Pipeline submission is disabled; use Results Explorer to review the existing tracks and results.")
+      return(invisible(NULL))
+    }
     step <- submission_step(label)
     run_message(paste("Submitting", label, "..."))
     set_tool_message(step, "")
@@ -9844,6 +9904,10 @@ server <- function(input, output, session) {
     open_server_browser("new_results_root", "dir", input$new_results_root %||% "")
   })
 
+  observeEvent(input$browse_new_existing_results_path, {
+    open_server_browser("new_existing_results_path", "dir", input$new_existing_results_path %||% "")
+  })
+
   observeEvent(input$browse_new_design_matrix_path, {
     open_server_browser("new_design_matrix_path", "dir", input$new_design_matrix_path %||% "")
   })
@@ -9928,9 +9992,22 @@ server <- function(input, output, session) {
       textInput("new_project_name", "Project name", value = "", placeholder = "e.g. my_project"),
       selectInput("new_project_analysis", "Analysis type", choices = analysis_choices(), selected = input$analysis, selectize = FALSE),
       tags$p(class = "muted small-note", analysis_description(new_analysis_key)),
+      if (identical(new_analysis_key, "atac")) radioButtons(
+        "new_project_mode", "ATAC project source",
+        choices = c("Start a new analysis" = "new", "Open completed ATAC-seq results (read-only)" = "existing_atac"),
+        selected = "new"
+      ) else NULL,
       selectInput("new_species", "Species", choices = c("Mouse" = "mouse", "Human" = "human"), selected = "mouse", selectize = FALSE),
       uiOutput("new_genome_version_ui"),
       radioButtons("new_paired_end", "Reads", choices = c("Paired-end" = "paired", "Single-end" = "single"), selected = "paired"),
+      if (identical(new_analysis_key, "atac")) conditionalPanel(
+        "input.new_project_mode == 'existing_atac'",
+        div(class = "new-project-path-control",
+            textInput("new_existing_results_path", "Completed ATAC-seq results folder", value = "/grid/beyaz/data_norepl/beyaz-bioinformatics/atac_seq", placeholder = "Folder containing bowtie2/, macs2/, diffbind/, and manifest/"),
+            actionButton("browse_new_existing_results_path", "Browse server", class = "btn-default"),
+            tags$p(class = "muted", "Registers this completed analysis without moving, deleting, or rerunning data. The Results Explorer will use its BigWigs and completed DiffBind comparisons.")
+        )
+      ) else NULL,
       radioButtons(
         "new_fastq_location_mode", "Where are the raw FASTQs?",
         choices = c("One folder" = "one", "Multiple folders (treat as one input pool)" = "multiple"),
@@ -10164,6 +10241,21 @@ server <- function(input, output, session) {
     }
     p <- new_project_from_inputs(new_project_input_values())
     msg <- tryCatch({
+      if (isTRUE(p$external_results)) {
+        p$data_dir <- validate_completed_atac_results(p$data_dir)
+        p$results_root <- dirname(p$data_dir)
+        p$design_matrix_path <- file.path(p$data_dir, "manifest", "design_matrix.txt")
+        cfg <- write_project_config(p)
+        refreshed <- discover_projects()
+        projects(refreshed)
+        write_last_project_id(p$id)
+        updateSelectInput(session, "project_id", choices = project_select_choices(refreshed, p$analysis), selected = p$id)
+        paste(
+          "Registered completed ATAC-seq results (read-only):", p$data_dir,
+          "\nSaved project file:", cfg,
+          "\nOpen Results Explorer → Genome Browser to review the BigWigs and differential peaks."
+        )
+      } else {
       fastq_dirs <- project_fastq_dirs(p)
       if (!length(fastq_dirs)) stop("Choose at least one raw FASTQ folder before creating the project.")
       missing_fastq_dirs <- fastq_dirs[!dir.exists(fastq_dirs)]
@@ -10208,6 +10300,7 @@ server <- function(input, output, session) {
         if (nzchar(example_design_copied)) example_design_copied,
         paste("Saved project file:", cfg)
       ), collapse = "\n")
+      }
     }, error = function(e) paste("ERROR:", conditionMessage(e)))
     output$create_project_status <- renderText(msg)
   })
@@ -10320,6 +10413,10 @@ server <- function(input, output, session) {
   output$design_save_status <- renderText("")
   observeEvent(input$save_design, {
     p <- current_project()
+    if (isTRUE(p$external_results)) {
+      output$design_save_status <- renderText("This completed-results project is read-only. Its original design matrix was not modified.")
+      return()
+    }
     if (identical(input$project_id, "__new__") && !nzchar(trimws(input$new_project_name %||% ""))) {
       output$design_save_status <- renderText("ERROR: Enter a project name before saving a new project design matrix.")
       return()
@@ -10333,6 +10430,10 @@ server <- function(input, output, session) {
   output$results_design_save_status <- renderText("")
   observeEvent(input$save_results_design, {
     p <- current_project()
+    if (isTRUE(p$external_results)) {
+      output$results_design_save_status <- renderText("This completed-results project is read-only. Its original design matrix was not modified.")
+      return()
+    }
     msg <- tryCatch(save_design_state(p, FALSE), error = function(e) paste("ERROR:", conditionMessage(e)))
     output$results_design_save_status <- renderText(msg)
   })
