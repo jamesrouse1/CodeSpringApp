@@ -692,8 +692,8 @@ new_project_from_inputs <- function(input) {
   key <- analysis_key(input$new_project_analysis %||% input$analysis %||% "RNA-seq")
   project_name <- clean_name(input$new_project_name %||% paste0("new_", key, "_project"), paste0("new_", key, "_project"))
   label <- input$new_project_name %||% project_name
-  existing_atac <- identical(key, "atac") && identical(input$new_project_mode %||% "new", "existing_atac")
-  if (existing_atac) {
+  existing_results <- identical(input$new_project_mode %||% "new", "existing_results")
+  if (existing_results) {
     data_dir <- normalizePath(path.expand(trimws(input$new_existing_results_path %||% "")), winslash = "/", mustWork = FALSE)
     results_root <- dirname(data_dir)
     design_path <- file.path(data_dir, "manifest", "design_matrix.txt")
@@ -728,23 +728,44 @@ new_project_from_inputs <- function(input) {
     fastq_dir = fastq_dir,
     fastq_dirs = fastq_dirs,
     design_matrix_path = design_path,
-    external_results = existing_atac,
+    external_results = existing_results,
     source_config = "",
     source = "new project"
   )
 }
 
-validate_completed_atac_results <- function(path) {
-  if (!nzchar(path) || !dir.exists(path)) stop("Choose the completed ATAC-seq results folder.")
+validate_completed_results <- function(path, key = "atac") {
+  key <- analysis_key(key)
+  if (!nzchar(path) || !dir.exists(path)) stop("Choose the completed results folder.")
   path <- normalizePath(path, winslash = "/", mustWork = TRUE)
-  missing <- c("bowtie2", "diffbind")[!dir.exists(file.path(path, c("bowtie2", "diffbind")))]
-  if (length(missing)) stop("This does not look like a completed ATAC-seq results folder. Missing: ", paste(missing, collapse = ", "))
-  signals <- list.files(file.path(path, "bowtie2"), pattern = "\\.(bw|bigwig)$", recursive = TRUE, full.names = TRUE, ignore.case = TRUE)
-  if (!length(signals)) stop("No BigWig files were found below: ", file.path(path, "bowtie2"))
-  differential <- list.files(file.path(path, "diffbind"), pattern = "DifferentialPeaks_.*\\.with_stats\\.bed$", recursive = TRUE, full.names = TRUE)
-  if (!length(differential)) stop("No DiffBind differential-peak BED files were found below: ", file.path(path, "diffbind"))
+  required <- switch(key,
+    atac = c("bowtie2", "diffbind"),
+    chip = c("bowtie2", "diffbind"),
+    cutrun = c("bowtie2"),
+    rna = c("star"),
+    character(0)
+  )
+  missing <- required[!dir.exists(file.path(path, required))]
+  if (length(missing)) stop("This does not look like completed ", analysis_label(key), " output. Missing: ", paste(missing, collapse = ", "))
+  if (key %in% c("atac", "chip")) {
+    signals <- list.files(file.path(path, "bowtie2"), pattern = "\\.(bw|bigwig)$", recursive = TRUE, full.names = TRUE, ignore.case = TRUE)
+    if (!length(signals)) stop("No BigWig files were found below: ", file.path(path, "bowtie2"))
+    differential <- list.files(file.path(path, "diffbind"), pattern = "DifferentialPeaks_.*\\.with_stats\\.bed$", recursive = TRUE, full.names = TRUE)
+    if (!length(differential)) stop("No DiffBind differential-peak BED files were found below: ", file.path(path, "diffbind"))
+  }
+  if (identical(key, "cutrun")) {
+    signals <- list.files(file.path(path, "bowtie2"), pattern = "\\.(bw|bigwig|bedgraph)$", recursive = TRUE, full.names = TRUE, ignore.case = TRUE)
+    if (!length(signals)) stop("No signal tracks were found below: ", file.path(path, "bowtie2"))
+  }
+  if (identical(key, "rna")) {
+    counts <- list.files(file.path(path, "counts"), pattern = "count_matrix\\.txt$", recursive = TRUE, full.names = TRUE)
+    deseq <- list.files(file.path(path, "deseq2"), pattern = "\\.(txt|csv)$", recursive = TRUE, full.names = TRUE)
+    if (!length(counts) && !length(deseq)) stop("No completed RNA-seq count matrix or DESeq2 table was found below: ", path)
+  }
   invisible(path)
 }
+
+validate_completed_atac_results <- function(path) validate_completed_results(path, "atac")
 
 project_config_dir <- function(key) {
   file.path(PROJECT_CONFIG_ROOT, analysis_key(key))
@@ -9992,22 +10013,24 @@ server <- function(input, output, session) {
       textInput("new_project_name", "Project name", value = "", placeholder = "e.g. my_project"),
       selectInput("new_project_analysis", "Analysis type", choices = analysis_choices(), selected = input$analysis, selectize = FALSE),
       tags$p(class = "muted small-note", analysis_description(new_analysis_key)),
-      if (identical(new_analysis_key, "atac")) radioButtons(
-        "new_project_mode", "ATAC project source",
-        choices = c("Start a new analysis" = "new", "Open completed ATAC-seq results (read-only)" = "existing_atac"),
-        selected = "new"
-      ) else NULL,
       selectInput("new_species", "Species", choices = c("Mouse" = "mouse", "Human" = "human"), selected = "mouse", selectize = FALSE),
       uiOutput("new_genome_version_ui"),
       radioButtons("new_paired_end", "Reads", choices = c("Paired-end" = "paired", "Single-end" = "single"), selected = "paired"),
-      if (identical(new_analysis_key, "atac")) conditionalPanel(
-        "input.new_project_mode == 'existing_atac'",
+      radioButtons(
+        "new_project_mode", "Project source",
+        choices = c("Start a new analysis" = "new", "Open completed results (read-only)" = "existing_results"),
+        selected = "new"
+      ),
+      conditionalPanel(
+        "input.new_project_mode == 'existing_results'",
         div(class = "new-project-path-control",
-            textInput("new_existing_results_path", "Completed ATAC-seq results folder", value = "/grid/beyaz/data_norepl/beyaz-bioinformatics/atac_seq", placeholder = "Folder containing bowtie2/, macs2/, diffbind/, and manifest/"),
+            textInput("new_existing_results_path", "Completed results folder", value = "", placeholder = "Choose or paste the completed pipeline-output folder"),
             actionButton("browse_new_existing_results_path", "Browse server", class = "btn-default"),
-            tags$p(class = "muted", "Registers this completed analysis without moving, deleting, or rerunning data. The Results Explorer will use its BigWigs and completed DiffBind comparisons.")
+            tags$p(class = "muted", "Registers the completed analysis without moving, deleting, or rerunning data. Only its Results Explorer is available; pipeline and design edits are disabled.")
         )
-      ) else NULL,
+      ),
+      conditionalPanel(
+        "input.new_project_mode != 'existing_results'",
       radioButtons(
         "new_fastq_location_mode", "Where are the raw FASTQs?",
         choices = c("One folder" = "one", "Multiple folders (treat as one input pool)" = "multiple"),
@@ -10037,6 +10060,7 @@ server <- function(input, output, session) {
           tags$p(class = "muted", "Leave this blank to create the design matrix in the Design Matrix tab after the project is created.")
       ),
       checkboxInput("new_clear_existing_results", "Clear existing results if this project folder already exists", value = FALSE),
+      ),
       actionButton("create_project_config", "Create project", class = "btn-primary"),
       textOutput("create_project_status")
     )
@@ -10242,7 +10266,7 @@ server <- function(input, output, session) {
     p <- new_project_from_inputs(new_project_input_values())
     msg <- tryCatch({
       if (isTRUE(p$external_results)) {
-        p$data_dir <- validate_completed_atac_results(p$data_dir)
+        p$data_dir <- validate_completed_results(p$data_dir, p$analysis_key)
         p$results_root <- dirname(p$data_dir)
         p$design_matrix_path <- file.path(p$data_dir, "manifest", "design_matrix.txt")
         cfg <- write_project_config(p)
@@ -10251,7 +10275,7 @@ server <- function(input, output, session) {
         write_last_project_id(p$id)
         updateSelectInput(session, "project_id", choices = project_select_choices(refreshed, p$analysis), selected = p$id)
         paste(
-          "Registered completed ATAC-seq results (read-only):", p$data_dir,
+          "Registered completed", analysis_label(p$analysis_key), "results (read-only):", p$data_dir,
           "\nSaved project file:", cfg,
           "\nOpen Results Explorer → Genome Browser to review the BigWigs and differential peaks."
         )
