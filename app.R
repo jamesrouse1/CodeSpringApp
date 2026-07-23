@@ -4512,10 +4512,10 @@ results_overview_contents <- function(refresh_id, note, status_description, desi
   )
 }
 
-atac_results_explorer_ui <- function() {
+atac_results_explorer_ui <- function(initial_tab = "Overview") {
   div(class = "native-results-host cutrun-results-host", div(class = "app-shell cutrun-results-shell",
     results_explorer_hero("ATAC-seq Results Explorer"),
-    div(class = "main-tabs", tabsetPanel(id = "atac_results_tabs",
+    div(class = "main-tabs", tabsetPanel(id = "atac_results_tabs", selected = initial_tab,
       tabPanel("Overview", results_overview_contents(
         "refresh_atac_results", "Live summary of saved pipeline outputs",
         "Completion state for every ATAC-seq analysis stage.",
@@ -11521,7 +11521,10 @@ server <- function(input, output, session) {
     if (is_cutrun_project(current_project())) {
       return(cutrun_results_explorer_ui())
     }
-    if (is_atac_project(current_project())) return(atac_results_explorer_ui())
+    if (is_atac_project(current_project())) {
+      initial_tab <- if (isTRUE(current_project()$external_results)) "Genome Browser" else "Overview"
+      return(atac_results_explorer_ui(initial_tab))
+    }
     if (is_chip_project(current_project())) return(chip_results_explorer_ui())
     err <- native_results_error()
     if (nzchar(err)) {
