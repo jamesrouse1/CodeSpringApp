@@ -1788,10 +1788,19 @@ included_design_table <- function(project) {
   design
 }
 
+completed_result_samples <- function(project) {
+  root_name <- if (identical(analysis_key(project$analysis_key %||% project$analysis), "rna")) "star" else "bowtie2"
+  root <- file.path(project$data_dir, root_name)
+  if (!dir.exists(root)) return(character(0))
+  samples <- basename(list.dirs(root, recursive = FALSE, full.names = TRUE))
+  sort(unique(samples[nzchar(samples) & !startsWith(samples, ".")]))
+}
+
 project_samples <- function(project) {
   design <- included_design_table(project)
-  if (!NROW(design) || !"sample" %in% names(design)) return(character(0))
-  unique(as.character(design$sample[nzchar(as.character(design$sample))]))
+  if (NROW(design) && "sample" %in% names(design)) return(unique(as.character(design$sample[nzchar(as.character(design$sample))])))
+  if (isTRUE(project$external_results)) return(completed_result_samples(project))
+  character(0)
 }
 
 pipeline_step_sample_candidates <- function(project, targets_only = FALSE) {
@@ -4374,6 +4383,9 @@ chip_peak_summary_table <- function(project) {
 
 atac_summary_cards_ui <- function(project) {
   design <- project_design_df(project)
+  detected_samples <- project_samples(project)
+  sample_count <- if (isTRUE(project$external_results)) length(detected_samples) else NROW(design)
+  sample_note <- if (isTRUE(project$external_results)) "Detected from completed Bowtie2 output" else "Included in the saved design matrix"
   alignment <- atac_alignment_summary_table(project)
   mapped <- if (NROW(alignment) && "mapped_reads" %in% names(alignment)) clean_metric_number(alignment$mapped_reads) else numeric(0)
   mapped <- mapped[is.finite(mapped)]
@@ -4397,7 +4409,7 @@ atac_summary_cards_ui <- function(project) {
     ))
   }
   div(class = "cutrun-metric-grid",
-    cutrun_metric_card("Samples", format_metric_value(NROW(design)), "Included in the saved design matrix", "blue"),
+    cutrun_metric_card("Samples", format_metric_value(sample_count), sample_note, "blue"),
     cutrun_metric_card("Alignment summaries", format_metric_value(NROW(alignment)), paste(assay, "Bowtie2 outputs"), "green"),
     cutrun_metric_card("Median mapped reads", if (length(mapped)) format_metric_value(stats::median(mapped)) else "—", paste(length(mapped), "completed summaries"), "gold"),
     cutrun_metric_card("Post-alignment complete", format_metric_value(completed_postprocess), "Validated sample output sets", "purple"),
