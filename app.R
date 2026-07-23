@@ -738,6 +738,9 @@ validate_completed_results <- function(path, key = "atac") {
   key <- analysis_key(key)
   if (!nzchar(path) || !dir.exists(path)) stop("Choose the completed results folder.")
   path <- normalizePath(path, winslash = "/", mustWork = TRUE)
+  if (file.access(path, mode = 5) != 0) {
+    stop("CodeSpringApp is running as ", CURRENT_USER, " and cannot read/enter this results folder. Grant that Unix user read and execute access to the folder tree, then try again.")
+  }
   required <- switch(key,
     atac = c("bowtie2", "diffbind"),
     chip = c("bowtie2", "diffbind"),
@@ -752,15 +755,22 @@ validate_completed_results <- function(path, key = "atac") {
     if (!length(signals)) stop("No BigWig files were found below: ", file.path(path, "bowtie2"))
     differential <- list.files(file.path(path, "diffbind"), pattern = "DifferentialPeaks_.*\\.with_stats\\.bed$", recursive = TRUE, full.names = TRUE)
     if (!length(differential)) stop("No DiffBind differential-peak BED files were found below: ", file.path(path, "diffbind"))
+    unreadable <- c(signals, differential)[file.access(c(signals, differential), mode = 4) != 0]
+    if (length(unreadable)) stop("The app user ", CURRENT_USER, " cannot read completed output file(s), for example: ", unreadable[[1]])
   }
   if (identical(key, "cutrun")) {
     signals <- list.files(file.path(path, "bowtie2"), pattern = "\\.(bw|bigwig|bedgraph)$", recursive = TRUE, full.names = TRUE, ignore.case = TRUE)
     if (!length(signals)) stop("No signal tracks were found below: ", file.path(path, "bowtie2"))
+    unreadable <- signals[file.access(signals, mode = 4) != 0]
+    if (length(unreadable)) stop("The app user ", CURRENT_USER, " cannot read completed signal track(s), for example: ", unreadable[[1]])
   }
   if (identical(key, "rna")) {
     counts <- list.files(file.path(path, "counts"), pattern = "count_matrix\\.txt$", recursive = TRUE, full.names = TRUE)
     deseq <- list.files(file.path(path, "deseq2"), pattern = "\\.(txt|csv)$", recursive = TRUE, full.names = TRUE)
     if (!length(counts) && !length(deseq)) stop("No completed RNA-seq count matrix or DESeq2 table was found below: ", path)
+    readable_outputs <- c(counts, deseq)
+    unreadable <- readable_outputs[file.access(readable_outputs, mode = 4) != 0]
+    if (length(unreadable)) stop("The app user ", CURRENT_USER, " cannot read completed RNA-seq output file(s), for example: ", unreadable[[1]])
   }
   invisible(path)
 }
