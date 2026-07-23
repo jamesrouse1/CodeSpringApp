@@ -3975,6 +3975,62 @@ genome_browser_comparison_navigation <- function(result_dir, project = NULL, max
   value
 }
 
+# Recreate the combined caller-rank sidecar for older shared-overlap results.
+# New overlap jobs write this sidecar themselves; this read-only fallback keeps
+# old three-column BEDs from appearing in chromosome/position order.
+cutrun_overlap_rank_fallback <- function(overlaps, summary_path) {
+  summary <- metric_file_to_named_list(summary_path)
+  source_paths <- unname(unlist(summary[c("source_a", "source_b")], use.names = FALSE))
+  if (length(source_paths) != 2L || any(!file.exists(source_paths))) return(data.frame())
+  rank_source <- function(path) {
+    x <- safe_read_result_table(path, -1L)
+    if (!NROW(x) || !all(c("chrom", "start", "end") %in% names(x))) return(data.frame())
+    start <- suppressWarnings(as.numeric(x$start)); end <- suppressWarnings(as.numeric(x$end))
+    keep <- nzchar(as.character(x$chrom)) & is.finite(start) & is.finite(end) & end > start
+    x <- x[keep, , drop = FALSE]; start <- start[keep]; end <- end[keep]
+    if (!NROW(x)) return(data.frame())
+    score <- rep(NA_real_, NROW(x))
+    for (column in intersect(c("qValue", "pValue", "signalValue", "score", "V5", "V4"), names(x))) {
+      candidate <- suppressWarnings(as.numeric(x[[column]]))
+      score[!is.finite(score) & is.finite(candidate)] <- candidate[!is.finite(score) & is.finite(candidate)]
+    }
+    ranking <- order(-replace(score, !is.finite(score), -Inf), as.character(x$chrom), start, end)
+    data.frame(chrom = as.character(x$chrom), start = start, end = end, score = score, rank = match(seq_len(NROW(x)), ranking), stringsAsFactors = FALSE)
+  }
+  best_rank <- function(source) {
+    result <- rep(NA_integer_, NROW(overlaps))
+    result_score <- rep(NA_real_, NROW(overlaps))
+    for (chrom in intersect(unique(as.character(overlaps$chrom)), unique(source$chrom))) {
+      oi <- which(as.character(overlaps$chrom) == chrom)
+      si <- which(source$chrom == chrom)
+      oi <- oi[order(overlaps$start[oi], overlaps$end[oi])]
+      si <- si[order(source$start[si], source$end[si])]
+      active <- integer(0); cursor <- 1L
+      for (index in oi) {
+        while (cursor <= length(si) && source$start[si[[cursor]]] < overlaps$end[[index]]) {
+          active <- c(active, si[[cursor]]); cursor <- cursor + 1L
+        }
+        active <- active[source$end[active] > overlaps$start[[index]]]
+        if (length(active)) {
+          winner <- active[[which.min(source$rank[active])]]
+          result[[index]] <- source$rank[[winner]]
+          result_score[[index]] <- source$score[[winner]]
+        }
+      }
+    }
+    list(rank = result, score = result_score)
+  }
+  a <- rank_source(source_paths[[1]]); b <- rank_source(source_paths[[2]])
+  if (!NROW(a) || !NROW(b)) return(data.frame())
+  a_best <- best_rank(a); b_best <- best_rank(b)
+  data.frame(
+    combined_evidence_rank = a_best$rank + b_best$rank,
+    source_a_rank = a_best$rank, source_b_rank = b_best$rank,
+    source_a_evidence_score = a_best$score, source_b_evidence_score = b_best$score,
+    stringsAsFactors = FALSE
+  )
+}
+
 # Read a bounded set of intervals for the individual CUT&RUN peak browser.
 # The menu is intentionally bounded so a very large peak set cannot make the
 # Results Explorer unresponsive; selecting an interval only moves the locus.
@@ -4008,17 +4064,21 @@ cutrun_individual_peak_navigation <- function(path, max_peaks = 250L, scan_limit
     peaks <- peaks[keep, , drop = FALSE]
     start <- start[keep]
     end <- end[keep]
+    is_overlap <- grepl("/peak_overlap/", path, fixed = TRUE)
+    fallback_ranking <- if (is_overlap && !ranking_available) cutrun_overlap_rank_fallback(peaks, sub("\\.bed$", "_summary.txt", path)) else data.frame()
+    if (NROW(fallback_ranking) == NROW(peaks)) peaks <- cbind(peaks, fallback_ranking)
+    ranked_overlap <- ranking_available || NROW(fallback_ranking) == NROW(peaks)
     interval <- paste0(
       as.character(peaks$chrom), ":", format(start, scientific = FALSE, trim = TRUE), "-",
       format(end, scientific = FALSE, trim = TRUE)
     )
-    score_column <- if (ranking_available) {
+    score_column <- if (ranked_overlap) {
       intersect(c("combined_evidence_rank"), names(peaks))
     } else {
       intersect(c("qValue", "pValue", "signalValue", "score", "V4"), names(peaks))
     }
     score <- if (length(score_column)) suppressWarnings(as.numeric(peaks[[score_column[[1]]]])) else rep(NA_real_, NROW(peaks))
-    rank_ascending <- ranking_available
+    rank_ascending <- ranked_overlap
     # MACS2 stores -log10 p/q values (larger is stronger); SEACR has no
     # p-value and is ranked by its caller signal. Shared sets are ranked by a
     # precomputed combined caller rank, where a smaller value is stronger.
@@ -4031,7 +4091,7 @@ cutrun_individual_peak_navigation <- function(path, max_peaks = 250L, scan_limit
     interval <- interval[ranked]
     score <- score[ranked]
     label <- paste0(seq_along(interval), ". ", interval)
-    if (ranking_available && "combined_evidence_rank" %in% names(peaks)) {
+    if (ranked_overlap && "combined_evidence_rank" %in% names(peaks)) {
       a_rank <- if ("source_a_rank" %in% names(peaks)) as.character(peaks$source_a_rank[ranked]) else ""
       b_rank <- if ("source_b_rank" %in% names(peaks)) as.character(peaks$source_b_rank[ranked]) else ""
       label <- paste0(label, " — combined rank ", format(signif(score, 4), trim = TRUE), " (", a_rank, " + ", b_rank, ")")
@@ -4049,7 +4109,8 @@ cutrun_individual_peak_navigation <- function(path, max_peaks = 250L, scan_limit
     value <- list(
       peaks = stats::setNames(interval, make.unique(label, sep = " — ")),
       total = as.integer(total %||% NROW(peaks)),
-      shown = as.integer(length(interval))
+      shown = as.integer(length(interval)),
+      ranking = if (ranked_overlap) "combined caller evidence" else "caller signal/evidence"
     )
   }
   assign(cache_key, list(signature = signature, value = value), envir = GENOME_BROWSER_NAV_CACHE)
@@ -11738,10 +11799,10 @@ server <- function(input, output, session) {
         ) else div(class = "muted small-note", "This peak file contains no called intervals."),
         div(
           class = "muted small-note",
-          if (nzchar(matched_igg)) paste0("Matched IgG: ", matched_igg, ".") else "No matched IgG was found in the CUT&RUN design.",
-          if (navigation$total > navigation$shown) paste0(" Menu shows ", format(navigation$shown, big.mark = ","), " high-signal candidate peaks from a fast preview of ", format(navigation$total, big.mark = ","), " called peaks. Choosing one centers IGV on that interval without loading a peak BED.") else ""
-        ),
-        div(class = "muted small-note", "Target is above IgG; their signal tracks use the same y-axis scale. The browser loads only these two signal tracks.")
+          format(navigation$total, big.mark = ","), " called peak", if (navigation$total == 1L) "" else "s",
+          " using ", selected_parameters, ". Showing the top ", format(navigation$shown, big.mark = ","),
+          " ranked by ", navigation$ranking %||% "caller signal/evidence", "."
+        )
       ))
     } else if (identical(mode, "comparison") && NROW(comparisons)) {
       comparison_choices <- stats::setNames(comparisons$id, make.unique(comparisons$label, sep = " — "))
@@ -11958,7 +12019,6 @@ server <- function(input, output, session) {
       " using ", genome_browser_reference(p), ".",
       if (cutrun_peak_mode) paste0(
         " Target: ", if (length(selected_samples)) selected_samples[[1]] else "none", ".",
-        if (nzchar(matched_igg)) paste0(" Matched IgG: ", matched_igg, ".") else " No matched IgG track was found.",
         " Signal normalization: ", cutrun_browser_signal_mode_label(selected_signal_mode), ".",
         " Target and IgG share one y-axis scale."
       ) else if (comparison_mode) paste0(
