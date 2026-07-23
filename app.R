@@ -4165,6 +4165,9 @@ genome_browser_default_locus <- function(project) {
 }
 
 genome_browser_reference <- function(project) {
+  declared <- tolower(paste(project$genome_version %||% "", project$reference_genome %||% "", project$genome %||% ""))
+  if (grepl("hg19|grch37", declared)) return("hg19")
+  if (grepl("mm10|grcm38", declared)) return("mm10")
   if (identical(genome_species(project), "human")) "hg38" else "mm39"
 }
 
