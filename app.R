@@ -11136,7 +11136,6 @@ server <- function(input, output, session) {
   cutrun_normalization_choice <- reactiveVal("spikein")
   genome_browser_mode_state <- reactiveVal("")
   path_browser <- reactiveValues(target = "", mode = "dir", path = CURRENT_HOME, selected_file = "", message = "")
-  scrna_qc_defaults_applied <- reactiveVal(character(0))
   project_selection <- reactiveValues(rna = "", scrna = "", cutrun = "", atac = "", chip = "")
   new_fastq_folders <- reactiveVal(character(0))
 
@@ -12502,7 +12501,7 @@ server <- function(input, output, session) {
     if (is_scrna_project(p)) {
       return(div(class = "run-grid",
         uiOutput("scrna_scanpy_runtime_ui"),
-        tool_panel("Input inspection", status, "Validate the raw-count input, create an unfiltered QC preview, and report any existing analysis state only when the input is an RDS or H5AD object.", tagList(uiOutput("scrna_inspect_settings_ui"), uiOutput("scrna_input_state_ui"), tags$p(class = "muted small-note", "The input is read only. This first job creates the raw-count checkpoint and the QC plots used to choose filters.")), "run_scrna_inspect", "Inspect input", show_sample_progress = FALSE),
+        tool_panel("Input inspection", status, "Validate the raw-count input, create an unfiltered QC preview, and report any existing analysis state only when the input is an RDS or H5AD object.", tagList(uiOutput("scrna_inspect_settings_ui"), uiOutput("scrna_input_state_ui"), tags$p(class = "muted small-note", "The input is read only. This first job creates the unfiltered QC plots used to choose filters; it does not change any cutoff fields.")), "run_scrna_inspect", "Inspect input & show QC plots", show_sample_progress = FALSE),
         tool_panel("QC & doublets", status, "Review the unfiltered QC plots below, choose biologically appropriate cutoffs, then filter cells and record predicted doublets.", tagList(uiOutput("scrna_pre_qc_plot_ui"), uiOutput("scrna_qc_settings_ui"), uiOutput("scrna_post_qc_plot_ui"), tags$p(class = "muted small-note", "The same applied cutoffs are drawn on the before- and after-filter plots. Doublet calls are saved whether or not predicted doublets are removed.")), "run_scrna_qc", "Run QC & doublets", show_sample_progress = FALSE),
         tool_panel("Normalize & PCA", status, "Normalize retained cells, identify variable genes, scale, and calculate PCA. PCA outputs appear here as soon as this step finishes.", tagList(uiOutput("scrna_preprocess_settings_ui"), uiOutput("scrna_pca_output_ui")), "run_scrna_preprocess", "Run normalization & PCA", show_sample_progress = FALSE),
         tool_panel("UMAP & clustering", status, "For multiple inputs, optionally correct a technical batch first; then calculate neighbours, UMAP, and clusters. Review the UMAP preview here before annotation.", tagList(uiOutput("scrna_cluster_settings_ui"), uiOutput("scrna_umap_output_ui")), "run_scrna_cluster", "Run UMAP & clustering", show_sample_progress = FALSE),
@@ -12862,8 +12861,8 @@ server <- function(input, output, session) {
     global <- recommendations[recommendations$sample_id == "Recommended global", , drop = FALSE]
     if (!NROW(global)) return(NULL)
     div(class = "read-source-note",
-      tags$strong("Suggested starting cutoffs"),
-      tags$p("Auto-filled from the unfiltered distributions using conservative robust quantiles. Gene cutoffs are rounded to the nearest 10 and count cutoffs to the nearest 100; review and adjust before submitting QC."),
+      tags$strong("Suggested starting cutoffs (not applied automatically)"),
+      tags$p("Calculated from the unfiltered distributions using conservative robust quantiles. Gene cutoffs are rounded to the nearest 10 and count cutoffs to the nearest 100; enter the values you choose in the fields below before submitting QC."),
       div(class = "cutrun-metric-grid compact",
         scrna_metric_card("Minimum detected genes per cell", global$min_features[[1]], "Lower-tail screen", "blue"),
         scrna_metric_card("Minimum total counts per cell", global$min_counts[[1]], "Lower-tail screen", "purple"),
@@ -12873,24 +12872,6 @@ server <- function(input, output, session) {
       if (NROW(recommendations) > 1L) tags$p(class = "muted small-note", "For multiple inputs, the global values are conservative across samples; per-sample recommendations are available in Downloads.") else NULL
     )
   })
-
-  observeEvent(progress_refresh(), {
-    p <- current_project(); if (!is_scrna_project(p)) return()
-    path <- file.path(scrna_output_dir(p), "tables", "qc_recommended_thresholds.tsv")
-    if (!file.exists(path)) return()
-    stamp <- paste(p$id %||% p$name, file.info(path)$mtime, sep = "::")
-    if (identical(isolate(scrna_qc_defaults_applied()), stamp)) return()
-    recommendations <- scrna_qc_recommendations(p)
-    global <- recommendations[recommendations$sample_id == "Recommended global", , drop = FALSE]
-    if (!NROW(global)) return()
-    session$onFlushed(function() {
-      updateNumericInput(session, "scrna_min_features", value = as.numeric(global$min_features[[1]]))
-      updateNumericInput(session, "scrna_min_counts", value = as.numeric(global$min_counts[[1]]))
-      updateNumericInput(session, "scrna_max_features", value = as.numeric(global$max_features[[1]]))
-      updateNumericInput(session, "scrna_max_percent_mt", value = as.numeric(global$max_percent_mt[[1]]))
-    }, once = TRUE)
-    scrna_qc_defaults_applied(stamp)
-  }, ignoreInit = FALSE)
 
   output$scrna_qc_settings_ui <- renderUI({
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
