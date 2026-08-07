@@ -758,7 +758,8 @@ new_project_from_inputs <- function(input) {
     fastq_dirs = fastq_dirs,
     design_matrix_path = design_path,
     scrna_input_manifest = trimws(input$new_scrna_manifest_path %||% ""),
-    scrna_engine = tolower(trimws(input$new_scrna_engine %||% "auto")),
+    # The concrete engine is set once the single-cell input manifest is saved.
+    scrna_engine = "auto",
     scrna_input_mode = tolower(trimws(input$new_scrna_setup_mode %||% "single")),
     external_results = existing_results,
     counts_only = counts_only,
@@ -8839,7 +8840,12 @@ submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto
   if (!nzchar(manifest_path)) return(record_preflight_failure(project, step_label, "This project has no saved single-cell input record. Re-select the input object, then try again.", "scrna"))
   manifest <- tryCatch(validate_scrna_manifest(scrna_manifest(project)), error = function(e) e)
   if (inherits(manifest, "error")) return(record_preflight_failure(project, step_label, conditionMessage(manifest), "scrna"))
-  resolved_engine <- tryCatch(scrna_engine_for_manifest(project, engine), error = function(e) e)
+  locked_engine <- tolower(project$scrna_engine %||% "auto")
+  requested_engine <- tolower(engine %||% "auto")
+  if (locked_engine %in% c("seurat", "scanpy") && requested_engine %in% c("seurat", "scanpy") && !identical(locked_engine, requested_engine)) {
+    return(record_preflight_failure(project, step_label, paste0("This project is fixed to the ", locked_engine, " engine. Create a separate project to use the other engine."), "scrna"))
+  }
+  resolved_engine <- tryCatch(scrna_engine_for_manifest(project, if (locked_engine %in% c("seurat", "scanpy")) locked_engine else requested_engine), error = function(e) e)
   if (inherits(resolved_engine, "error")) return(record_preflight_failure(project, step_label, conditionMessage(resolved_engine), "scrna"))
   if (identical(resolved_engine, "scanpy")) {
     container <- scanpy_container_check()
@@ -11679,8 +11685,7 @@ server <- function(input, output, session) {
           tags$p(class = "muted small-note", "The manifest must contain sample_id and input_path columns. Add condition, donor, or technical_batch columns only when they are available.")
         ),
         scrna_results_location_control,
-        selectInput("new_scrna_engine", "Processing engine", choices = c("Automatic from input type" = "auto", "Seurat" = "seurat", "Scanpy" = "scanpy"), selected = "auto", selectize = FALSE),
-        tags$p(class = "muted small-note", "The cluster runtime is configured by CodeSpringLab. Cell-type annotation files are selected at the annotation step in Run Pipeline.")
+        tags$p(class = "muted small-note", "The analysis engine is fixed automatically when this project is created: Scanpy for H5AD or filtered 10x input, and Seurat for RDS input. The Run Pipeline will show only compatible options. Cell-type annotation files are selected at the annotation step.")
       ),
       conditionalPanel(
         "input.new_project_mode == 'new' && input.new_project_analysis != 'scRNA-seq'",
@@ -12135,6 +12140,10 @@ server <- function(input, output, session) {
         dir.create(dirname(p$design_matrix_path), recursive = TRUE, showWarnings = FALSE)
         utils::write.table(manifest, p$design_matrix_path, sep = "\t", row.names = FALSE, quote = FALSE)
         p$scrna_input_manifest <- p$design_matrix_path
+        # Lock the engine into the project configuration once its input type
+        # is known.  This prevents a later UI choice from mixing Seurat-only
+        # and Scanpy-only parameters in the same analysis.
+        p$scrna_engine <- scrna_engine_for_manifest(p, "auto")
         counts_message <- paste0("Single-cell sample manifest: ", p$scrna_input_manifest, "\nInputs: ", NROW(manifest))
       } else if (isTRUE(p$counts_only)) {
         counts_source_mode <- input$new_counts_source_mode %||% "upload"
@@ -12763,9 +12772,9 @@ server <- function(input, output, session) {
 
   scrna_ui_engine <- function() {
     p <- current_project()
-    requested <- tolower(input$scrna_run_engine %||% p$scrna_engine %||% "auto")
-    resolved <- tryCatch(scrna_engine_for_manifest(p, requested), error = function(e) "")
-    engine <- if (resolved %in% c("seurat", "scanpy")) resolved else requested
+    saved <- tolower(p$scrna_engine %||% "auto")
+    resolved <- tryCatch(scrna_engine_for_manifest(p, saved), error = function(e) "")
+    engine <- if (resolved %in% c("seurat", "scanpy")) resolved else saved
     if (!engine %in% c("seurat", "scanpy")) engine <- "seurat"
     engine
   }
@@ -12794,7 +12803,7 @@ server <- function(input, output, session) {
     tone <- if (container$ready) "green" else "blue"
     div(class = paste("tool-panel", if (container$ready) "complete" else "not-started"),
       tags$h4("Scanpy container"),
-      tags$p(class = "muted", "Required only for H5AD input. It is a shared, tested software image used directly by every Scanpy job; no Python environment is created in a user home folder."),
+      tags$p(class = "muted", "Required for this Scanpy project. It is a shared, tested software image used directly by every Scanpy job; no Python environment is created in a user home folder."),
       div(class = "cutrun-metric-grid compact", scrna_metric_card("Status", container$state, container$detail, tone)),
       if (container$ready) tags$p(class = "muted small-note", paste("Versioned image:", basename(container$path))) else tags$p(class = "muted small-note", "Once the CodeSpringLab maintainer installs the image, this card becomes ready automatically—there is nothing for individual users to set up.")
     )
@@ -12802,14 +12811,10 @@ server <- function(input, output, session) {
 
   output$scrna_inspect_settings_ui <- renderUI({
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
-    detected_engine <- tryCatch(scrna_engine_for_manifest(p, "auto"), error = function(e) "scanpy")
-    selected_engine <- tolower(input$scrna_run_engine %||% p$scrna_engine %||% "auto")
-    # The choice presented to the user is the concrete engine, not a vague
-    # automatic placeholder: RDS -> Seurat; H5AD and filtered 10x -> Scanpy.
-    if (!selected_engine %in% c("seurat", "scanpy")) selected_engine <- detected_engine
+    engine <- scrna_ui_engine()
     tagList(
-      selectInput("scrna_run_engine", "Analysis engine", choices = c("Seurat" = "seurat", "Scanpy" = "scanpy"), selected = selected_engine, selectize = FALSE),
-      tags$p(class = "muted small-note", "Default: Scanpy for H5AD and filtered 10x matrices; Seurat for RDS. Scanpy jobs run in the shared CodeSpringLab container; the inspection report tells you exactly what was detected.")
+      div(class = "read-source-note", tags$strong(paste("Analysis engine:", if (identical(engine, "scanpy")) "Scanpy" else "Seurat")), tags$p("This is fixed for the project from its input type. Only compatible processing choices are available.")),
+      if (identical(engine, "scanpy")) tags$p(class = "muted small-note", "This project uses the shared Scanpy runtime.") else tags$p(class = "muted small-note", "This project uses the Seurat workflow.")
     )
   })
 
@@ -12983,8 +12988,7 @@ server <- function(input, output, session) {
     if (!is_scrna_project(p)) return(NULL)
     manifest <- scrna_manifest(p)
     if (!NROW(manifest)) return(tags$p(class = "muted small-note", "Save a readable single-cell manifest to receive input-aware recommendations."))
-    requested <- tolower(input$scrna_run_engine %||% p$scrna_engine %||% "auto")
-    engine <- tryCatch(scrna_engine_for_manifest(p, requested), error = function(e) requested)
+    engine <- scrna_ui_engine()
     batch_column <- trimws(as.character(input$scrna_batch_column %||% ""))
     batch_values <- if (nzchar(batch_column) && batch_column %in% names(manifest)) unique(trimws(as.character(manifest[[batch_column]]))) else character(0)
     batch_values <- batch_values[nzchar(batch_values)]
@@ -13005,8 +13009,7 @@ server <- function(input, output, session) {
   output$scrna_advanced_settings_ui <- renderUI({
     p <- current_project()
     if (!is_scrna_project(p)) return(NULL)
-    requested <- tolower(input$scrna_run_engine %||% p$scrna_engine %||% "auto")
-    engine <- tryCatch(scrna_engine_for_manifest(p, requested), error = function(e) requested)
+    engine <- scrna_ui_engine()
     tagList(
       tags$details(
         tags$summary("Advanced QC, dimensionality, and reproducibility settings"),
@@ -13400,7 +13403,7 @@ server <- function(input, output, session) {
       submit_scrna_pipeline_job(
         p,
         stage = stage,
-        engine = input$scrna_run_engine %||% "auto",
+        engine = p$scrna_engine %||% scrna_ui_engine(),
         normalization = input$scrna_normalization %||% "auto",
         integration = integration_choice,
         batch_column = if (is.null(input$scrna_batch_column)) "batch" else input$scrna_batch_column,
