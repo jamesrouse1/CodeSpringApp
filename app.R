@@ -11150,6 +11150,7 @@ server <- function(input, output, session) {
   sample_progress_state <- reactiveVal(data.frame())
   progress_refresh_busy <- reactiveVal(FALSE)
   scrna_qc_defaults_applied <- reactiveVal(character(0))
+  scrna_umap_defaults_applied <- reactiveVal(character(0))
   cutrun_normalization_choice <- reactiveVal("spikein")
   genome_browser_mode_state <- reactiveVal("")
   path_browser <- reactiveValues(target = "", mode = "dir", path = CURRENT_HOME, selected_file = "", message = "")
@@ -12907,6 +12908,31 @@ server <- function(input, output, session) {
     scrna_qc_defaults_applied(stamp)
   }, ignoreInit = FALSE)
 
+  scrna_pca_recommendation <- function(project) {
+    tab <- safe_read_table(file.path(scrna_output_dir(project), "tables", "pca_recommended_parameters.tsv"), 10)
+    if (!NROW(tab) || !"recommended_n_pcs" %in% names(tab)) return(NA_integer_)
+    value <- suppressWarnings(as.integer(tab$recommended_n_pcs[[1]]))
+    if (is.na(value) || value < 5L) NA_integer_ else value
+  }
+
+  observeEvent(list(progress_refresh(), input$scrna_umap_focus), {
+    p <- current_project(); if (!is_scrna_project(p) || !identical(scrna_ui_engine(), "scanpy")) return()
+    focus <- input$scrna_umap_focus %||% "local"
+    if (!focus %in% c("local", "global")) focus <- "local"
+    recommendation_path <- file.path(scrna_output_dir(p), "tables", "pca_recommended_parameters.tsv")
+    recommendation_stamp <- if (file.exists(recommendation_path)) as.character(file.info(recommendation_path)$mtime) else "no_pca_yet"
+    stamp <- paste(p$id %||% p$name, focus, recommendation_stamp, sep = "::")
+    if (identical(isolate(scrna_umap_defaults_applied()), stamp)) return()
+    defaults <- if (identical(focus, "global")) list(n_neighbors = 30, min_dist = 0.6) else list(n_neighbors = 15, min_dist = 0.3)
+    n_pcs <- scrna_pca_recommendation(p)
+    session$onFlushed(function() {
+      updateNumericInput(session, "scrna_n_neighbors", value = defaults$n_neighbors)
+      updateNumericInput(session, "scrna_umap_min_dist", value = defaults$min_dist)
+      if (!is.na(n_pcs)) updateNumericInput(session, "scrna_n_pcs", value = n_pcs)
+    }, once = TRUE)
+    scrna_umap_defaults_applied(stamp)
+  }, ignoreInit = FALSE)
+
   output$scrna_qc_settings_ui <- renderUI({
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
     choices <- scrna_ui_choices()
@@ -12957,15 +12983,12 @@ server <- function(input, output, session) {
     umap_controls <- if (identical(scrna_ui_engine(), "scanpy")) {
       tagList(
         tags$h4("UMAP parameters"),
-        tags$p(class = "muted small-note", "Start with the defaults. More neighbours emphasizes broad structure; a smaller minimum distance makes clusters appear tighter."),
+        radioButtons("scrna_umap_focus", "Emphasize", choices = c("Local structure (nearby subpopulations)" = "local", "Global structure (broader population relationships)" = "global"), selected = input$scrna_umap_focus %||% "local", inline = TRUE),
+        tags$p(class = "muted small-note", "The selected focus auto-fills neighbours and minimum distance. The PCA elbow auto-fills the recommended number of PCs after Normalize & PCA; all values remain editable."),
         fluidRow(
           column(4, numericInput("scrna_n_neighbors", "Neighbours", value = input$scrna_n_neighbors %||% 15, min = 2, max = 200, step = 1)),
           column(4, numericInput("scrna_umap_min_dist", "Minimum distance", value = input$scrna_umap_min_dist %||% 0.5, min = 0, max = 2, step = 0.05)),
-          column(4, numericInput("scrna_umap_spread", "Spread", value = input$scrna_umap_spread %||% 1, min = 0.1, max = 10, step = 0.1))
-        ),
-        fluidRow(
-          column(6, selectInput("scrna_umap_metric", "Distance metric", choices = c("Euclidean" = "euclidean", "Cosine" = "cosine", "Manhattan" = "manhattan", "Correlation" = "correlation"), selected = selected_choice(input$scrna_umap_metric, c("euclidean", "cosine", "manhattan", "correlation"), "euclidean"), selectize = FALSE)),
-          column(6, selectInput("scrna_umap_init_pos", "Initialization", choices = c("Spectral (recommended)" = "spectral", "Random" = "random"), selected = selected_choice(input$scrna_umap_init_pos, c("spectral", "random"), "spectral"), selectize = FALSE))
+          column(4, numericInput("scrna_n_pcs", "Principal components", value = input$scrna_n_pcs %||% 30, min = 5, max = 100, step = 1))
         )
       )
     } else NULL
@@ -12973,7 +12996,7 @@ server <- function(input, output, session) {
       integration_controls,
       umap_controls,
       numericInput("scrna_cluster_resolution", "Clustering resolution", value = input$scrna_cluster_resolution %||% 0.6, min = 0.05, max = 5, step = 0.05),
-      tags$details(tags$summary("Advanced clustering settings"), numericInput("scrna_n_pcs", "Principal components for neighbours and UMAP", value = input$scrna_n_pcs %||% 30, min = 5, max = 100, step = 1), numericInput("scrna_seed", "Random seed", value = input$scrna_seed %||% 1234, min = 1, step = 1), if (identical(scrna_ui_engine(), "scanpy")) numericInput("scrna_scvi_max_epochs", "Maximum scVI training epochs", value = input$scrna_scvi_max_epochs %||% 400, min = 10, max = 5000, step = 50) else NULL),
+      tags$details(tags$summary("Advanced clustering settings"), numericInput("scrna_seed", "Random seed", value = input$scrna_seed %||% 1234, min = 1, step = 1), if (identical(scrna_ui_engine(), "scanpy")) numericInput("scrna_scvi_max_epochs", "Maximum scVI training epochs", value = input$scrna_scvi_max_epochs %||% 400, min = 10, max = 5000, step = 50) else NULL),
       uiOutput("scrna_recommendations_ui")
     )
   })
@@ -14064,9 +14087,10 @@ server <- function(input, output, session) {
     if (!length(files)) return(div(class = "empty-box", "Run Normalize & PCA to create the PCA variance and sample-separation previews."))
     variance <- files[grepl("_variance_explained\\.png$", unname(files), ignore.case = TRUE)]
     selected <- selected_choice(input$scrna_pca_output, files, unname(if (length(variance)) variance else files)[[1]])
+    recommended_pcs <- scrna_pca_recommendation(p)
     tagList(
       tags$h4("PCA output"),
-      tags$p(class = "muted small-note", "Review variance explained and the PCA distribution by input sample before moving on to UMAP and clustering."),
+      tags$p(class = "muted small-note", paste0("Review variance explained and the PCA distribution by input sample before moving on to UMAP and clustering.", if (!is.na(recommended_pcs)) paste0(" The dashed line marks the suggested PCA elbow (", recommended_pcs, " PCs).") else "")),
       selectInput("scrna_pca_output", "PCA figure", choices = files, selected = selected, selectize = FALSE),
       image_or_file_ui(selected, "760px")
     )
