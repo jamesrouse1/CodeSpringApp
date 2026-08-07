@@ -10120,6 +10120,12 @@ scrna_discrete_palette <- function(n) {
   grDevices::hcl.colors(n, palette = "Dynamic")
 }
 
+scrna_expression_palette <- function() {
+  # Explicit hex values work across Plotly versions; named palettes such as
+  # "Viridis" are interpreted inconsistently by older Plotly installations.
+  c("#440154", "#3B528B", "#21918C", "#5EC962", "#FDE725")
+}
+
 scrna_results_explorer_ui <- function() {
   div(class = "native-results-host cutrun-results-host scrna-results-host", div(class = "app-shell cutrun-results-shell",
     results_explorer_hero("Single-cell RNA-seq Results Explorer"),
@@ -14164,6 +14170,7 @@ server <- function(input, output, session) {
     values
   }
   output$scrna_embedding_controls_ui <- renderUI({
+    progress_refresh()
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
     columns <- scrna_embedding_columns(p)
     if (!all(c("UMAP_1", "UMAP_2") %in% columns)) {
@@ -14183,6 +14190,7 @@ server <- function(input, output, session) {
     )
   })
   output$scrna_embedding_widget_ui <- renderUI({
+    progress_refresh()
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
     if (!PLOTLY_AVAILABLE) return(div(class = "empty-box", "Interactive UMAP support is not installed on this app server yet. The publication-ready UMAP figures are available below."))
     plotly::plotlyOutput("scrna_embedding_plot", height = "700px")
@@ -14241,6 +14249,7 @@ server <- function(input, output, session) {
             table_output("scrna_selected_cells"))
   })
   if (PLOTLY_AVAILABLE) output$scrna_embedding_plot <- plotly::renderPlotly({
+    progress_refresh()
     p <- current_project()
     color_mode <- input$scrna_embedding_color_mode %||% "metadata"
     color_column <- if (identical(color_mode, "metadata")) scrna_embedding_color_column(p, input$scrna_embedding_color %||% "") else ""
@@ -14267,7 +14276,7 @@ server <- function(input, output, session) {
     if (identical(color_mode, "marker")) hover <- paste0(hover, "<br>", marker_gene, ": ", sprintf("%.3f", value))
     if (is.numeric(value) || is.integer(value)) {
       x$.codespring_color <- value
-      plot <- plotly::plot_ly(x, x = ~UMAP_1, y = ~UMAP_2, type = "scattergl", mode = "markers", source = "scrna_embedding", key = ~cell, color = ~.codespring_color, colors = "Viridis", text = hover, hoverinfo = "text", marker = list(size = 4, opacity = 0.72))
+      plot <- plotly::plot_ly(x, x = ~UMAP_1, y = ~UMAP_2, type = "scattergl", mode = "markers", source = "scrna_embedding", key = ~cell, color = ~.codespring_color, colors = scrna_expression_palette(), text = hover, hoverinfo = "text", marker = list(size = 4, opacity = 0.72))
     } else {
       values <- as.character(value); values[is.na(values) | !nzchar(values)] <- "Unassigned"
       validate(need(length(unique(values)) <= 80L, paste0("‘", color_column, "’ has ", length(unique(values)), " distinct values and is not suitable for categorical coloring. Choose a sample, condition, cluster, or cell-type field instead.")))
