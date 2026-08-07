@@ -11133,6 +11133,7 @@ server <- function(input, output, session) {
   cutrun_normalization_choice <- reactiveVal("spikein")
   genome_browser_mode_state <- reactiveVal("")
   path_browser <- reactiveValues(target = "", mode = "dir", path = CURRENT_HOME, selected_file = "", message = "")
+  scrna_qc_defaults_applied <- reactiveVal(character(0))
   project_selection <- reactiveValues(rna = "", scrna = "", cutrun = "", atac = "", chip = "")
   new_fastq_folders <- reactiveVal(character(0))
 
@@ -12842,10 +12843,57 @@ server <- function(input, output, session) {
     )
   })
 
+  scrna_qc_recommendations <- function(project) {
+    path <- file.path(scrna_output_dir(project), "tables", "qc_recommended_thresholds.tsv")
+    recommendations <- safe_read_table(path, 1000)
+    if (!NROW(recommendations)) return(data.frame())
+    recommendations
+  }
+
+  output$scrna_qc_recommendations_ui <- renderUI({
+    p <- current_project(); if (!is_scrna_project(p)) return(NULL)
+    recommendations <- scrna_qc_recommendations(p)
+    if (!NROW(recommendations)) {
+      return(tags$p(class = "muted small-note", "Run Input inspection first. The unfiltered distributions will be used to suggest editable QC starting values."))
+    }
+    global <- recommendations[recommendations$sample_id == "Recommended global", , drop = FALSE]
+    if (!NROW(global)) return(NULL)
+    div(class = "read-source-note",
+      tags$strong("Suggested starting cutoffs"),
+      tags$p("Auto-filled from the unfiltered distributions using conservative robust quantiles. Review and adjust these values before submitting QC."),
+      div(class = "cutrun-metric-grid compact",
+        scrna_metric_card("Min. genes", global$min_features[[1]], "Lower-tail screen", "blue"),
+        scrna_metric_card("Min. UMIs", global$min_counts[[1]], "Lower-tail screen", "purple"),
+        scrna_metric_card("Max. genes", global$max_features[[1]], "High-complexity screen", "gold"),
+        scrna_metric_card("Max. mito", paste0(global$max_percent_mt[[1]], "%"), "Upper-tail screen", "green")
+      ),
+      if (NROW(recommendations) > 1L) tags$p(class = "muted small-note", "For multiple inputs, the global values are conservative across samples; per-sample recommendations are available in Downloads.") else NULL
+    )
+  })
+
+  observeEvent(run_cards_refresh(), {
+    p <- current_project(); if (!is_scrna_project(p)) return()
+    path <- file.path(scrna_output_dir(p), "tables", "qc_recommended_thresholds.tsv")
+    if (!file.exists(path)) return()
+    stamp <- paste(p$id %||% p$name, file.info(path)$mtime, sep = "::")
+    if (identical(isolate(scrna_qc_defaults_applied()), stamp)) return()
+    recommendations <- scrna_qc_recommendations(p)
+    global <- recommendations[recommendations$sample_id == "Recommended global", , drop = FALSE]
+    if (!NROW(global)) return()
+    session$onFlushed(function() {
+      updateNumericInput(session, "scrna_min_features", value = as.numeric(global$min_features[[1]]))
+      updateNumericInput(session, "scrna_min_counts", value = as.numeric(global$min_counts[[1]]))
+      updateNumericInput(session, "scrna_max_features", value = as.numeric(global$max_features[[1]]))
+      updateNumericInput(session, "scrna_max_percent_mt", value = as.numeric(global$max_percent_mt[[1]]))
+    }, once = TRUE)
+    scrna_qc_defaults_applied(stamp)
+  }, ignoreInit = FALSE)
+
   output$scrna_qc_settings_ui <- renderUI({
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
     choices <- scrna_ui_choices()
     tagList(
+      uiOutput("scrna_qc_recommendations_ui"),
       numericInput("scrna_min_features", "Minimum detected genes per cell", value = input$scrna_min_features %||% 200, min = 0, step = 25),
       numericInput("scrna_min_counts", "Minimum UMIs/counts per cell", value = input$scrna_min_counts %||% 0, min = 0, step = 100),
       numericInput("scrna_max_percent_mt", "Maximum mitochondrial percent", value = input$scrna_max_percent_mt %||% 20, min = 0, max = 100, step = 1),
@@ -13928,10 +13976,11 @@ server <- function(input, output, session) {
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
     files <- scrna_result_file_choices(p, "^00_qc_pre_filter_.*\\.png$")
     if (!length(files)) return(div(class = "empty-box", "Run Input inspection first to generate the unfiltered QC overview. This lets you choose thresholds from your own data before QC and doublet handling."))
-    selected <- selected_choice(input$scrna_pre_qc_plot, files, unname(files)[[1]])
+    violin <- files[grepl("_violin\\.png$", unname(files), ignore.case = TRUE)]
+    selected <- selected_choice(input$scrna_pre_qc_plot, files, unname(if (length(violin)) violin else files)[[1]])
     tagList(
       tags$h4("Unfiltered QC overview"),
-      tags$p(class = "muted small-note", "Cells are grouped by input sample. Use this distribution to choose the thresholds below; no cells have been filtered yet."),
+      tags$p(class = "muted small-note", "The violin plot appears first. Suggested cutoffs below are auto-filled from these unfiltered distributions and remain fully editable; no cells have been filtered yet."),
       selectInput("scrna_pre_qc_plot", "Unfiltered QC figure", choices = files, selected = selected, selectize = FALSE),
       image_or_file_ui(selected, "760px")
     )
