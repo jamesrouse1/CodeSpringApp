@@ -12907,13 +12907,18 @@ server <- function(input, output, session) {
     recommendations <- scrna_qc_recommendations(p)
     global <- recommendations[recommendations$sample_id == "Recommended global", , drop = FALSE]
     if (!NROW(global)) return()
+    # The QC fields are rendered dynamically inside the pipeline card.  Wait
+    # through the current flush before updating them, otherwise a completed
+    # inspection can arrive before those inputs exist in the browser.
     session$onFlushed(function() {
-      updateNumericInput(session, "scrna_min_features", value = as.numeric(global$min_features[[1]]))
-      updateNumericInput(session, "scrna_min_counts", value = as.numeric(global$min_counts[[1]]))
-      updateNumericInput(session, "scrna_max_features", value = as.numeric(global$max_features[[1]]))
-      updateNumericInput(session, "scrna_max_percent_mt", value = as.numeric(global$max_percent_mt[[1]]))
+      session$onFlushed(function() {
+        updateNumericInput(session, "scrna_min_features", value = as.numeric(global$min_features[[1]]))
+        updateNumericInput(session, "scrna_min_counts", value = as.numeric(global$min_counts[[1]]))
+        updateNumericInput(session, "scrna_max_features", value = as.numeric(global$max_features[[1]]))
+        updateNumericInput(session, "scrna_max_percent_mt", value = as.numeric(global$max_percent_mt[[1]]))
+        scrna_qc_defaults_applied(stamp)
+      }, once = TRUE)
     }, once = TRUE)
-    scrna_qc_defaults_applied(stamp)
   }, ignoreInit = FALSE)
 
   scrna_pca_recommendation <- function(project) {
