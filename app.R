@@ -11136,6 +11136,7 @@ server <- function(input, output, session) {
   sample_size_cache <- reactiveVal(data.frame(path = character(), size = numeric(), checked = character(), stringsAsFactors = FALSE))
   sample_progress_state <- reactiveVal(data.frame())
   progress_refresh_busy <- reactiveVal(FALSE)
+  scrna_qc_defaults_applied <- reactiveVal(character(0))
   cutrun_normalization_choice <- reactiveVal("spikein")
   genome_browser_mode_state <- reactiveVal("")
   path_browser <- reactiveValues(target = "", mode = "dir", path = CURRENT_HOME, selected_file = "", message = "")
@@ -12864,8 +12865,8 @@ server <- function(input, output, session) {
     global <- recommendations[recommendations$sample_id == "Recommended global", , drop = FALSE]
     if (!NROW(global)) return(NULL)
     div(class = "read-source-note",
-      tags$strong("Suggested starting cutoffs (not applied automatically)"),
-      tags$p("Calculated from the unfiltered distributions using conservative robust quantiles. Gene cutoffs are rounded to the nearest 10 and count cutoffs to the nearest 100; enter the values you choose in the fields below before submitting QC."),
+      tags$strong("Suggested starting cutoffs"),
+      tags$p("Auto-filled from the unfiltered distributions. Lower cutoffs round down and upper cutoffs round up: values below 100 use tens, and larger values use hundreds. The dashed lines on the plot show these suggested values."),
       div(class = "cutrun-metric-grid compact",
         scrna_metric_card("Minimum detected genes per cell", global$min_features[[1]], "Lower-tail screen", "blue"),
         scrna_metric_card("Minimum total counts per cell", global$min_counts[[1]], "Lower-tail screen", "purple"),
@@ -12875,6 +12876,24 @@ server <- function(input, output, session) {
       if (NROW(recommendations) > 1L) tags$p(class = "muted small-note", "For multiple inputs, the global values are conservative across samples; per-sample recommendations are available in Downloads.") else NULL
     )
   })
+
+  observeEvent(progress_refresh(), {
+    p <- current_project(); if (!is_scrna_project(p)) return()
+    path <- file.path(scrna_output_dir(p), "tables", "qc_recommended_thresholds.tsv")
+    if (!file.exists(path)) return()
+    stamp <- paste(p$id %||% p$name, file.info(path)$mtime, sep = "::")
+    if (identical(isolate(scrna_qc_defaults_applied()), stamp)) return()
+    recommendations <- scrna_qc_recommendations(p)
+    global <- recommendations[recommendations$sample_id == "Recommended global", , drop = FALSE]
+    if (!NROW(global)) return()
+    session$onFlushed(function() {
+      updateNumericInput(session, "scrna_min_features", value = as.numeric(global$min_features[[1]]))
+      updateNumericInput(session, "scrna_min_counts", value = as.numeric(global$min_counts[[1]]))
+      updateNumericInput(session, "scrna_max_features", value = as.numeric(global$max_features[[1]]))
+      updateNumericInput(session, "scrna_max_percent_mt", value = as.numeric(global$max_percent_mt[[1]]))
+    }, once = TRUE)
+    scrna_qc_defaults_applied(stamp)
+  }, ignoreInit = FALSE)
 
   output$scrna_qc_settings_ui <- renderUI({
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
