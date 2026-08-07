@@ -9995,7 +9995,8 @@ scrna_embedding_color_column <- function(project, requested = "") {
 }
 
 scrna_dashboard_gene_choices <- function(project) {
-  tab <- safe_read_table(file.path(scrna_output_dir(project), "tables", "dashboard_gene_expression_genes.tsv"), 5000)
+  full_path <- file.path(scrna_output_dir(project), "tables", "dashboard_all_genes.tsv")
+  tab <- safe_read_table(if (file.exists(full_path)) full_path else file.path(scrna_output_dir(project), "tables", "dashboard_gene_expression_genes.tsv"), 50000)
   genes <- unique(trimws(as.character(tab$gene %||% character(0))))
   genes[nzchar(genes)]
 }
@@ -14132,22 +14133,30 @@ server <- function(input, output, session) {
     selected <- selected_choice(input$scrna_umap_plot, files, unname(files)[[1]])
     tagList(selectInput("scrna_umap_plot", "Embedding", choices = files, selected = selected, selectize = FALSE), image_or_file_ui(selected, "760px"))
   })
-  scrna_dashboard_expression <- function(project) {
-    root <- file.path(scrna_output_dir(project), "tables")
-    matrix_path <- file.path(root, "dashboard_gene_expression.mtx.gz")
-    cells_path <- file.path(root, "dashboard_gene_expression_cells.tsv")
-    genes_path <- file.path(root, "dashboard_gene_expression_genes.tsv")
-    if (!all(file.exists(c(matrix_path, cells_path, genes_path))) || !requireNamespace("Matrix", quietly = TRUE)) return(NULL)
-    stamp <- paste(project$id %||% project$name, file.info(matrix_path)$size, file.info(matrix_path)$mtime, sep = "::")
+  scrna_dashboard_marker_values <- function(project, gene) {
+    root <- scrna_output_dir(project)
+    checkpoint <- file.path(root, "checkpoints", "04_clustered_scanpy.h5ad")
+    if (!file.exists(checkpoint)) checkpoint <- file.path(root, "objects", "processed_scanpy.h5ad")
+    if (!file.exists(checkpoint)) return(NULL)
+    safe_gene <- gsub("[^A-Za-z0-9_.-]", "_", gene)
+    cache_path <- file.path(root, "tables", "dashboard_marker_cache", paste0(safe_gene, ".tsv.gz"))
+    object_info <- file.info(checkpoint)
+    stamp <- paste(project$id %||% project$name, gene, object_info$size, object_info$mtime, sep = "::")
     cached <- scrna_dashboard_expression_cache()
-    if (identical(cached$stamp %||% "", stamp)) return(cached)
-    cells <- safe_read_table(cells_path, 1000000)$cell %||% character(0)
-    genes <- safe_read_table(genes_path, 10000)$gene %||% character(0)
-    expression <- tryCatch(Matrix::readMM(gzfile(matrix_path, "rt")), error = function(e) NULL)
-    if (is.null(expression) || NROW(expression) != length(cells) || NCOL(expression) != length(genes)) return(NULL)
-    value <- list(stamp = stamp, cells = as.character(cells), genes = as.character(genes), expression = expression)
-    scrna_dashboard_expression_cache(value)
-    value
+    if (identical(cached$stamp %||% "", stamp)) return(cached$values)
+    if (!file.exists(cache_path) || file.info(cache_path)$mtime < object_info$mtime) {
+      container <- scanpy_container_check()
+      helper <- file.path(SCRIPTS_DIR, "singleCellRNAseq", "extract_h5ad_marker_expression.py")
+      if (!isTRUE(container$ready) || !file.exists(helper)) return(NULL)
+      dir.create(dirname(cache_path), recursive = TRUE, showWarnings = FALSE)
+      result <- tryCatch(system2("singularity", c("exec", container$path, "python", helper, checkpoint, gene, cache_path), stdout = TRUE, stderr = TRUE), error = function(e) character(0))
+      if (!file.exists(cache_path) || !file_size_for(cache_path)) return(NULL)
+    }
+    values <- safe_read_table(cache_path, 1000000)
+    if (!all(c("cell", "expression") %in% names(values))) return(NULL)
+    values$cell <- as.character(values$cell); values$expression <- suppressWarnings(as.numeric(values$expression))
+    scrna_dashboard_expression_cache(list(stamp = stamp, values = values))
+    values
   }
   output$scrna_embedding_controls_ui <- renderUI({
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
@@ -14239,13 +14248,11 @@ server <- function(input, output, session) {
     marker_gene <- ""
     if (identical(color_mode, "marker")) {
       marker_gene <- trimws(input$scrna_embedding_gene %||% "")
-      expression_data <- scrna_dashboard_expression(p)
-      validate(need(!is.null(expression_data), "Marker-expression data are not available yet. Re-run Normalize & PCA with the current CodeSpringLab version."))
-      gene_index <- match(marker_gene, expression_data$genes)
-      validate(need(!is.na(gene_index), "Choose a marker gene from the available expression panel."))
-      cell_index <- match(x$cell, expression_data$cells)
-      validate(need(!anyNA(cell_index), "The marker-expression file does not match this UMAP. Re-run Normalize & PCA and UMAP."))
-      x$.marker_expression <- as.numeric(expression_data$expression[cell_index, gene_index])
+      expression_data <- scrna_dashboard_marker_values(p, marker_gene)
+      validate(need(!is.null(expression_data), "Marker expression could not be read from the normalized post-UMAP object. Re-run Normalize & PCA and UMAP with the current CodeSpringLab version."))
+      cell_index <- match(x$cell, expression_data$cell)
+      validate(need(!anyNA(cell_index), "The marker-expression values do not match this UMAP. Re-run Normalize & PCA and UMAP."))
+      x$.marker_expression <- expression_data$expression[cell_index]
       value <- x$.marker_expression
     } else {
       value <- x[[color_column]]
