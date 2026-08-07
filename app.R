@@ -12865,16 +12865,16 @@ server <- function(input, output, session) {
       tags$strong("Suggested starting cutoffs"),
       tags$p("Auto-filled from the unfiltered distributions using conservative robust quantiles. Review and adjust these values before submitting QC."),
       div(class = "cutrun-metric-grid compact",
-        scrna_metric_card("Min. genes", global$min_features[[1]], "Lower-tail screen", "blue"),
-        scrna_metric_card("Min. UMIs", global$min_counts[[1]], "Lower-tail screen", "purple"),
-        scrna_metric_card("Max. genes", global$max_features[[1]], "High-complexity screen", "gold"),
-        scrna_metric_card("Max. mito", paste0(global$max_percent_mt[[1]], "%"), "Upper-tail screen", "green")
+        scrna_metric_card("Minimum detected genes per cell", global$min_features[[1]], "Lower-tail screen", "blue"),
+        scrna_metric_card("Minimum total counts per cell", global$min_counts[[1]], "Lower-tail screen", "purple"),
+        scrna_metric_card("Maximum detected genes per cell", global$max_features[[1]], "High-complexity screen", "gold"),
+        scrna_metric_card("Maximum mitochondrial reads per cell (%)", paste0(global$max_percent_mt[[1]], "%"), "Upper-tail screen", "green")
       ),
       if (NROW(recommendations) > 1L) tags$p(class = "muted small-note", "For multiple inputs, the global values are conservative across samples; per-sample recommendations are available in Downloads.") else NULL
     )
   })
 
-  observeEvent(run_cards_refresh(), {
+  observeEvent(progress_refresh(), {
     p <- current_project(); if (!is_scrna_project(p)) return()
     path <- file.path(scrna_output_dir(p), "tables", "qc_recommended_thresholds.tsv")
     if (!file.exists(path)) return()
@@ -12898,8 +12898,8 @@ server <- function(input, output, session) {
     tagList(
       uiOutput("scrna_qc_recommendations_ui"),
       numericInput("scrna_min_features", "Minimum detected genes per cell", value = input$scrna_min_features %||% 200, min = 0, step = 25),
-      numericInput("scrna_min_counts", "Minimum UMIs/counts per cell", value = input$scrna_min_counts %||% 0, min = 0, step = 100),
-      numericInput("scrna_max_percent_mt", "Maximum mitochondrial percent", value = input$scrna_max_percent_mt %||% 20, min = 0, max = 100, step = 1),
+      numericInput("scrna_min_counts", "Minimum total counts per cell", value = input$scrna_min_counts %||% 0, min = 0, step = 100),
+      numericInput("scrna_max_percent_mt", "Maximum mitochondrial reads per cell (%)", value = input$scrna_max_percent_mt %||% 20, min = 0, max = 100, step = 1),
       selectInput("scrna_doublet_method", "Doublet detection", choices = choices$doublets, selected = selected_choice(input$scrna_doublet_method, unname(choices$doublets), "auto"), selectize = FALSE),
       numericInput("scrna_doublet_rate", "Expected doublet rate", value = input$scrna_doublet_rate %||% 0.05, min = 0.001, max = 0.5, step = 0.01),
       checkboxInput("scrna_remove_doublets", "Remove predicted doublets before downstream analysis", value = if (is.null(input$scrna_remove_doublets)) TRUE else isTRUE(input$scrna_remove_doublets)),
