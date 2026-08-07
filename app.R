@@ -11547,6 +11547,19 @@ server <- function(input, output, session) {
         return()
       }
       value <- normalizePath(value, winslash = "/", mustWork = FALSE)
+      # A 10x matrix is a three-file directory input, not any individual
+      # component file.  If a user reaches one by clicking through the file
+      # browser before selecting the folder data type, recover safely by
+      # storing its parent directory as the scRNA input.
+      is_scrna_10x_component <- identical(path_browser$target, "new_scrna_input_path") &&
+        grepl("^(matrix\\.mtx|features\\.tsv|genes\\.tsv|barcodes\\.tsv)(\\.gz)?$", basename(value), ignore.case = TRUE)
+      if (is_scrna_10x_component) {
+        tenx_dir <- normalizePath(dirname(value), winslash = "/", mustWork = FALSE)
+        updateRadioButtons(session, "new_scrna_input_location_type", selected = "dir")
+        updateTextInput(session, path_browser$target, value = tenx_dir)
+        removeModal()
+        return()
+      }
       updateTextInput(session, path_browser$target, value = value)
       removeModal()
       return()
