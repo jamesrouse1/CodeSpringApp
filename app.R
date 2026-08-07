@@ -13994,6 +13994,7 @@ server <- function(input, output, session) {
     safe_read_table(file.path(scrna_output_dir(p), "tables", "cluster_markers.tsv"), 5000)
   }, page_length = 100)
   output$scrna_qc_plot_ui <- renderUI({
+    progress_refresh()
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
     files <- scrna_result_file_choices(p, "^0[12].*\\.png$")
     if (!length(files)) return(div(class = "empty-box", "QC figures have not been created yet."))
@@ -14001,6 +14002,7 @@ server <- function(input, output, session) {
     tagList(selectInput("scrna_qc_plot", "QC figure", choices = files, selected = selected, selectize = FALSE), image_or_file_ui(selected, "760px"))
   })
   output$scrna_pre_qc_plot_ui <- renderUI({
+    progress_refresh()
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
     files <- scrna_result_file_choices(p, "^00_qc_pre_filter_.*\\.png$")
     if (!length(files)) return(div(class = "empty-box", "Run Input inspection first to generate the unfiltered QC overview. This lets you choose thresholds from your own data before QC and doublet handling."))
@@ -14014,6 +14016,7 @@ server <- function(input, output, session) {
     )
   })
   output$scrna_post_qc_plot_ui <- renderUI({
+    progress_refresh()
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
     files <- scrna_result_file_choices(p, "^01_qc_post_filter_.*\\.png$")
     if (!length(files)) return(div(class = "empty-box", "After you run QC, the retained-cell plots will appear here with the same applied cutoffs."))
@@ -14027,6 +14030,7 @@ server <- function(input, output, session) {
     )
   })
   output$scrna_pca_output_ui <- renderUI({
+    progress_refresh()
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
     files <- scrna_result_file_choices(p, "^03_pca_.*\\.png$")
     if (!length(files)) return(div(class = "empty-box", "Run Normalize & PCA to create the PCA variance and sample-separation previews."))
@@ -14040,6 +14044,7 @@ server <- function(input, output, session) {
     )
   })
   output$scrna_umap_output_ui <- renderUI({
+    progress_refresh()
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
     files <- scrna_result_file_choices(p, "^04_umap_.*pre_annotation\\.png$")
     if (!length(files)) return(div(class = "empty-box", "Run UMAP & clustering to create the unannotated UMAP preview."))
@@ -14053,6 +14058,7 @@ server <- function(input, output, session) {
     )
   })
   output$scrna_input_plot_ui <- renderUI({
+    progress_refresh()
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
     files <- scrna_result_file_choices(p, "^00_input_.*\\.png$")
     if (!length(files)) return(tags$p(class = "muted", "This input did not include a saved UMAP. The workflow-generated UMAPs are available in Explore Cells."))
@@ -14060,6 +14066,7 @@ server <- function(input, output, session) {
     tagList(h4("Embedding supplied with the input object"), selectInput("scrna_input_plot", "Input embedding", choices = files, selected = selected, selectize = FALSE), image_or_file_ui(selected, "760px"))
   })
   output$scrna_umap_plot_ui <- renderUI({
+    progress_refresh()
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
     files <- scrna_result_file_choices(p, "^0[3-6]_.*\\.png$")
     if (!length(files)) return(div(class = "empty-box", "UMAP figures have not been created yet."))
