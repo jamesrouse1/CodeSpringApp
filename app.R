@@ -8793,7 +8793,10 @@ scrna_engine_for_manifest <- function(project, requested = "auto") {
   has_rds <- any(grepl("\\.rds$", paths))
   has_h5ad <- any(grepl("\\.h5ad$", paths))
   if (has_rds && has_h5ad) stop("Do not mix Seurat .rds and Scanpy .h5ad inputs in one run. Process them separately or begin from filtered 10x matrices.")
-  if (identical(requested, "auto")) return(if (has_h5ad) "scanpy" else "seurat")
+  # Filtered 10x folders are raw-count inputs supported directly by Scanpy.
+  # Make that the automatic default so the displayed QC/doublet controls and
+  # the submitted runner always agree.
+  if (identical(requested, "auto")) return(if (has_rds) "seurat" else "scanpy")
   if (identical(requested, "seurat") && has_h5ad) stop("Scanpy .h5ad input requires the Scanpy engine. Use automatic selection or choose Scanpy.")
   if (identical(requested, "scanpy") && has_rds) stop("Seurat .rds input requires the Seurat engine. Use automatic selection or choose Seurat.")
   requested
@@ -12784,7 +12787,7 @@ server <- function(input, output, session) {
 
   output$scrna_scanpy_runtime_ui <- renderUI({
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
-    engine <- tryCatch(scrna_engine_for_manifest(p, "auto"), error = function(e) "")
+    engine <- scrna_ui_engine()
     if (!identical(engine, "scanpy")) return(NULL)
     container <- scanpy_container_check()
     tone <- if (container$ready) "green" else "blue"
@@ -12798,14 +12801,14 @@ server <- function(input, output, session) {
 
   output$scrna_inspect_settings_ui <- renderUI({
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
-    detected_engine <- tryCatch(scrna_engine_for_manifest(p, "auto"), error = function(e) "seurat")
+    detected_engine <- tryCatch(scrna_engine_for_manifest(p, "auto"), error = function(e) "scanpy")
     selected_engine <- tolower(input$scrna_run_engine %||% p$scrna_engine %||% "auto")
     # The choice presented to the user is the concrete engine, not a vague
-    # automatic placeholder: H5AD -> Scanpy; RDS and raw 10x -> Seurat.
+    # automatic placeholder: RDS -> Seurat; H5AD and filtered 10x -> Scanpy.
     if (!selected_engine %in% c("seurat", "scanpy")) selected_engine <- detected_engine
     tagList(
       selectInput("scrna_run_engine", "Analysis engine", choices = c("Seurat" = "seurat", "Scanpy" = "scanpy"), selected = selected_engine, selectize = FALSE),
-      tags$p(class = "muted small-note", "Default: Scanpy for H5AD; Seurat for RDS and filtered 10x/raw matrices. Scanpy jobs run in the shared CodeSpringLab container; the inspection report tells you exactly what was detected.")
+      tags$p(class = "muted small-note", "Default: Scanpy for H5AD and filtered 10x matrices; Seurat for RDS. Scanpy jobs run in the shared CodeSpringLab container; the inspection report tells you exactly what was detected.")
     )
   })
 
