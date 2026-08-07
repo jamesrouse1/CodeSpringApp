@@ -9994,6 +9994,12 @@ scrna_embedding_color_column <- function(project, requested = "") {
   selected_choice(requested, choices, choices[[1]])
 }
 
+scrna_dashboard_gene_choices <- function(project) {
+  tab <- safe_read_table(file.path(scrna_output_dir(project), "tables", "dashboard_gene_expression_genes.tsv"), 5000)
+  genes <- unique(trimws(as.character(tab$gene %||% character(0))))
+  genes[nzchar(genes)]
+}
+
 scrna_embedding_table <- function(project, columns = character(0), max_points = 30000L, cells = character(0)) {
   path <- file.path(scrna_output_dir(project), "tables", "umap_coordinates.tsv")
   headers <- scrna_embedding_columns(project)
@@ -10122,7 +10128,7 @@ scrna_results_explorer_ui <- function() {
     tabPanel("Source input", br(), h3("Source Object Inspection"), tags$p(class = "muted", "This records what was present in the supplied object before CodeSpring starts its reproducible workflow. The source object itself is never changed."), table_output("scrna_input_processing"), br(), uiOutput("scrna_input_plot_ui")),
     tabPanel("QC", br(), h3("Quality Control"), uiOutput("scrna_qc_plot_ui"), br(), h4("QC summary by sample"), table_output("scrna_qc_summary"), br(), h4("Doublet calls by sample"), table_output("scrna_doublet_summary"), br(), h4("Individual doublet calls"), table_output("scrna_doublet_calls")),
     tabPanel("Preprocessing", br(), h3("Feature Selection and PCA"), h4("Feature filtering by sample"), tags$p(class = "muted small-note", "Genes are retained when they are detected in at least the selected number of cells within an input library; the analysis retains their union across libraries."), table_output("scrna_feature_filtering"), br(), h4("PCA variance explained"), table_output("scrna_pca_variance"), br(), h4("Highly variable genes"), table_output("scrna_hvg_table")),
-    tabPanel("Explore Cells", br(), h3("Interactive Cell Explorer"), tags$p(class = "muted", "Color the UMAP by any saved cell-level annotation. Hover for cell identity and key metadata; large datasets are sampled only for browser rendering, while complete tables remain downloadable."), uiOutput("scrna_embedding_controls_ui"), uiOutput("scrna_embedding_widget_ui"), uiOutput("scrna_selected_cells_ui"), br(), tags$details(tags$summary("Publication-ready UMAP figures and cell metadata"), br(), uiOutput("scrna_umap_plot_ui"), br(), h4("Cell metadata preview"), tags$p(class = "muted small-note", "Previewing the first 5,000 cells. Download the complete metadata table from Downloads."), table_output("scrna_cell_metadata"))),
+    tabPanel("Cell dashboard", br(), h3("Interactive Cell Dashboard"), tags$p(class = "muted", "Explore the UMAP directly: color cells by cluster, sample, annotation, or selected marker-gene expression. Hover for cell identity and metadata; lasso or box-select cells to inspect them."), uiOutput("scrna_embedding_controls_ui"), uiOutput("scrna_embedding_widget_ui"), uiOutput("scrna_selected_cells_ui"), br(), tags$details(tags$summary("Static UMAP figures and cell metadata"), br(), uiOutput("scrna_umap_plot_ui"), br(), h4("Cell metadata preview"), tags$p(class = "muted small-note", "Previewing the first 5,000 cells. Download the complete metadata table from Downloads."), table_output("scrna_cell_metadata"))),
     tabPanel("Composition", br(), h3("Cell-type Composition"), tags$p(class = "muted", "Exact cell counts and within-sample proportions are calculated by the workflow before any browser rendering or UMAP sampling."), uiOutput("scrna_composition_plot_ui"), br(), h4("Cells by cluster and annotation"), table_output("scrna_cluster_sizes"), br(), h4("Exact composition table"), tags$p(class = "muted small-note", "This complete table is never grouped or rounded; use it for reporting and download it from Downloads."), table_output("scrna_composition_table")),
     tabPanel("Markers", br(), h3("Cluster Markers"), tags$p(class = "muted", "Start with the ten strongest markers for one cluster; the complete ranked marker table remains available below and in Downloads."), uiOutput("scrna_top_markers_ui"), table_output("scrna_top_markers"), br(), uiOutput("scrna_marker_score_ui"), tags$details(tags$summary("Full ranked marker table"), br(), table_output("scrna_marker_table"))),
       tabPanel("Downloads", br(), h3("Completed Files"), tags$p(class = "muted", "Select a result to preview it in the app or download the original file."), uiOutput("scrna_file_ui"), uiOutput("scrna_file_view"), br(), downloadButton("download_scrna_file", "Download selected file", class = "btn-default"))
@@ -11151,6 +11157,7 @@ server <- function(input, output, session) {
   progress_refresh_busy <- reactiveVal(FALSE)
   scrna_qc_defaults_applied <- reactiveVal(character(0))
   scrna_umap_defaults_applied <- reactiveVal(character(0))
+  scrna_dashboard_expression_cache <- reactiveVal(list())
   cutrun_normalization_choice <- reactiveVal("spikein")
   genome_browser_mode_state <- reactiveVal("")
   path_browser <- reactiveValues(target = "", mode = "dir", path = CURRENT_HOME, selected_file = "", message = "")
@@ -14125,6 +14132,23 @@ server <- function(input, output, session) {
     selected <- selected_choice(input$scrna_umap_plot, files, unname(files)[[1]])
     tagList(selectInput("scrna_umap_plot", "Embedding", choices = files, selected = selected, selectize = FALSE), image_or_file_ui(selected, "760px"))
   })
+  scrna_dashboard_expression <- function(project) {
+    root <- file.path(scrna_output_dir(project), "tables")
+    matrix_path <- file.path(root, "dashboard_gene_expression.mtx.gz")
+    cells_path <- file.path(root, "dashboard_gene_expression_cells.tsv")
+    genes_path <- file.path(root, "dashboard_gene_expression_genes.tsv")
+    if (!all(file.exists(c(matrix_path, cells_path, genes_path))) || !requireNamespace("Matrix", quietly = TRUE)) return(NULL)
+    stamp <- paste(project$id %||% project$name, file.info(matrix_path)$size, file.info(matrix_path)$mtime, sep = "::")
+    cached <- scrna_dashboard_expression_cache()
+    if (identical(cached$stamp %||% "", stamp)) return(cached)
+    cells <- safe_read_table(cells_path, 1000000)$cell %||% character(0)
+    genes <- safe_read_table(genes_path, 10000)$gene %||% character(0)
+    expression <- tryCatch(Matrix::readMM(gzfile(matrix_path, "rt")), error = function(e) NULL)
+    if (is.null(expression) || NROW(expression) != length(cells) || NCOL(expression) != length(genes)) return(NULL)
+    value <- list(stamp = stamp, cells = as.character(cells), genes = as.character(genes), expression = expression)
+    scrna_dashboard_expression_cache(value)
+    value
+  }
   output$scrna_embedding_controls_ui <- renderUI({
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
     columns <- scrna_embedding_columns(p)
@@ -14137,9 +14161,10 @@ server <- function(input, output, session) {
     if (is.na(requested_points)) requested_points <- 30000L
     tagList(
       fluidRow(
-        column(5, selectInput("scrna_embedding_color", "Color cells by", choices = choices, selected = selected_choice(input$scrna_embedding_color, choices, choices[[1]]), selectize = FALSE)),
-        column(4, numericInput("scrna_embedding_max_points", "Maximum cells shown", value = min(30000L, max(2000L, requested_points)), min = 2000, max = 50000, step = 1000)),
-        column(3, br(), checkboxInput("scrna_embedding_legend", "Show legend", value = if (is.null(input$scrna_embedding_legend)) TRUE else isTRUE(input$scrna_embedding_legend)))
+        column(4, radioButtons("scrna_embedding_color_mode", "Color UMAP by", choices = c("Cell metadata" = "metadata", "Marker expression" = "marker"), selected = input$scrna_embedding_color_mode %||% "metadata", inline = TRUE)),
+        column(4, conditionalPanel("input.scrna_embedding_color_mode == 'metadata'", selectInput("scrna_embedding_color", "Metadata field", choices = choices, selected = selected_choice(input$scrna_embedding_color, choices, choices[[1]]), selectize = FALSE)), conditionalPanel("input.scrna_embedding_color_mode == 'marker'", selectInput("scrna_embedding_gene", "Marker gene", choices = scrna_dashboard_gene_choices(p), selected = selected_choice(input$scrna_embedding_gene, scrna_dashboard_gene_choices(p), ""), selectize = TRUE))),
+        column(2, numericInput("scrna_embedding_max_points", "Maximum cells", value = min(30000L, max(2000L, requested_points)), min = 2000, max = 50000, step = 1000)),
+        column(2, br(), checkboxInput("scrna_embedding_legend", "Show legend", value = if (is.null(input$scrna_embedding_legend)) TRUE else isTRUE(input$scrna_embedding_legend)))
       )
     )
   })
@@ -14203,16 +14228,31 @@ server <- function(input, output, session) {
   })
   if (PLOTLY_AVAILABLE) output$scrna_embedding_plot <- plotly::renderPlotly({
     p <- current_project()
-    color_column <- scrna_embedding_color_column(p, input$scrna_embedding_color %||% "")
-    validate(need(nzchar(color_column), "The embedding table has no cell-level annotation columns to color."))
+    color_mode <- input$scrna_embedding_color_mode %||% "metadata"
+    color_column <- if (identical(color_mode, "metadata")) scrna_embedding_color_column(p, input$scrna_embedding_color %||% "") else ""
+    if (identical(color_mode, "metadata")) validate(need(nzchar(color_column), "The embedding table has no cell-level annotation columns to color."))
     point_limit <- suppressWarnings(as.integer(input$scrna_embedding_max_points %||% 30000L))
     if (is.na(point_limit)) point_limit <- 30000L
     point_limit <- max(2000L, min(50000L, point_limit))
     x <- scrna_embedding_table(p, columns = c(color_column, "sample_id", "condition", "batch", "cluster", "cell_type", "annotation_source"), max_points = point_limit)
     validate(need(NROW(x), "No valid UMAP coordinates are available for this selection."))
-    value <- x[[color_column]]
+    marker_gene <- ""
+    if (identical(color_mode, "marker")) {
+      marker_gene <- trimws(input$scrna_embedding_gene %||% "")
+      expression_data <- scrna_dashboard_expression(p)
+      validate(need(!is.null(expression_data), "Marker-expression data are not available yet. Re-run Normalize & PCA with the current CodeSpringLab version."))
+      gene_index <- match(marker_gene, expression_data$genes)
+      validate(need(!is.na(gene_index), "Choose a marker gene from the available expression panel."))
+      cell_index <- match(x$cell, expression_data$cells)
+      validate(need(!anyNA(cell_index), "The marker-expression file does not match this UMAP. Re-run Normalize & PCA and UMAP."))
+      x$.marker_expression <- as.numeric(expression_data$expression[cell_index, gene_index])
+      value <- x$.marker_expression
+    } else {
+      value <- x[[color_column]]
+    }
     hover_columns <- intersect(c("cell", "sample_id", "condition", "batch", "cluster", "cell_type", "annotation_source"), names(x))
     hover <- apply(x[, hover_columns, drop = FALSE], 1, function(row) paste(paste(names(row), row, sep = ": "), collapse = "<br>"))
+    if (identical(color_mode, "marker")) hover <- paste0(hover, "<br>", marker_gene, ": ", sprintf("%.3f", value))
     if (is.numeric(value) || is.integer(value)) {
       x$.codespring_color <- value
       plot <- plotly::plot_ly(x, x = ~UMAP_1, y = ~UMAP_2, type = "scattergl", mode = "markers", source = "scrna_embedding", key = ~cell, color = ~.codespring_color, colors = "Viridis", text = hover, hoverinfo = "text", marker = list(size = 4, opacity = 0.72))
