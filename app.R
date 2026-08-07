@@ -8867,6 +8867,9 @@ submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto
   if (checked$max_features > 0 && checked$max_features <= checked$min_features) {
     return(record_preflight_failure(project, step_label, "Maximum detected genes must be greater than minimum detected genes, or set it to 0 to disable the upper feature filter.", "scrna"))
   }
+  # Keep low-prevalence-gene filtering as a fixed, reproducible internal
+  # safeguard instead of exposing another routine tuning control.
+  if (identical(resolved_engine, "scanpy")) checked$min_cells_per_gene <- 3L
   integration <- tolower(integration %||% "auto")
   allowed_integration <- if (identical(resolved_engine, "seurat")) c("auto", "none", "rpca", "cca") else c("auto", "none", "scvi", "harmony")
   if (!integration %in% allowed_integration) integration <- "auto"
@@ -8894,7 +8897,7 @@ submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto
   dir.create(dirname(params_path), recursive = TRUE, showWarnings = FALSE)
   normalization <- tolower(normalization %||% "auto")
   if (identical(normalization, "auto")) normalization <- if (identical(resolved_engine, "seurat")) "sct" else "lognormalize"
-  if (identical(resolved_engine, "scanpy") && identical(normalization, "sct")) normalization <- "lognormalize"
+  if (identical(resolved_engine, "scanpy")) normalization <- "lognormalize"
   doublet_method <- tolower(doublet_method %||% "auto")
   allowed_doublet <- if (identical(resolved_engine, "seurat")) c("auto", "none", "scdblfinder") else c("auto", "none", "scrublet")
   if (!doublet_method %in% allowed_doublet) {
@@ -12906,10 +12909,15 @@ server <- function(input, output, session) {
 
   output$scrna_preprocess_settings_ui <- renderUI({
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
+    if (identical(scrna_ui_engine(), "scanpy")) {
+      return(tagList(
+        tags$strong("Normalization"),
+        tags$p(class = "muted small-note", "Scanpy standard normalization is used automatically: library-size normalization followed by log1p transformation. No selection is needed.")
+      ))
+    }
     choices <- scrna_ui_choices()
     tagList(
       selectInput("scrna_normalization", "Normalization", choices = choices$normalization, selected = selected_choice(input$scrna_normalization, unname(choices$normalization), "auto"), selectize = FALSE),
-      numericInput("scrna_min_cells_per_gene", "Minimum cells expressing a retained gene", value = input$scrna_min_cells_per_gene %||% 3, min = 1, step = 1),
       tags$p(class = "muted small-note", "Automatic selects the recommended normalization for the chosen engine.")
     )
   })
