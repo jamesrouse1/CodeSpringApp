@@ -8831,7 +8831,7 @@ scanpy_container_check <- function() {
   list(ready = TRUE, state = "Ready", path = container, detail = "All H5AD jobs use this shared, versioned Scanpy container. No per-user Python environment is created.")
 }
 
-submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto", normalization = "auto", integration = "auto", batch_column = "batch", cluster_resolution = 0.6, min_features = 200, min_counts = 0, max_features = 0, max_percent_mt = 20, min_cells_per_gene = 3, n_pcs = 30, doublet_method = "auto", doublet_rate = 0.05, remove_doublets = TRUE, seed = 1234, scvi_max_epochs = 400, marker_file = "", celltype_file = "", marker_upload = NULL, celltype_upload = NULL, marker_source = "server", celltype_source = "server") {
+submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto", normalization = "auto", integration = "auto", batch_column = "batch", cluster_resolution = 0.6, min_features = 200, min_counts = 0, max_features = 0, max_percent_mt = 20, min_cells_per_gene = 3, n_pcs = 30, n_neighbors = 15, umap_min_dist = 0.5, umap_spread = 1, umap_metric = "euclidean", umap_init_pos = "spectral", doublet_method = "auto", doublet_rate = 0.05, remove_doublets = TRUE, seed = 1234, scvi_max_epochs = 400, marker_file = "", celltype_file = "", marker_upload = NULL, celltype_upload = NULL, marker_source = "server", celltype_source = "server") {
   stage <- tolower(trimws(as.character(stage %||% "inspect")))
   step_label <- tryCatch(scrna_stage_step(stage), error = function(e) "")
   if (!is_scrna_project(project)) return(record_preflight_failure(project, step_label %||% "scRNA processing", "This is not an scRNA-seq project.", "scrna"))
@@ -8868,6 +8868,9 @@ submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto
     max_percent_mt = numeric_setting(max_percent_mt, "Maximum mitochondrial percent", 0, 100),
     min_cells_per_gene = numeric_setting(min_cells_per_gene, "Minimum cells per retained gene", 1, Inf, TRUE),
     n_pcs = numeric_setting(n_pcs, "Number of principal components", 5, 100, TRUE),
+    n_neighbors = numeric_setting(n_neighbors, "UMAP neighbours", 2, 200, TRUE),
+    umap_min_dist = numeric_setting(umap_min_dist, "UMAP minimum distance", 0, 2),
+    umap_spread = numeric_setting(umap_spread, "UMAP spread", 0.1, 10),
     doublet_rate = numeric_setting(doublet_rate, "Expected doublet rate", 0, 0.5),
     seed = numeric_setting(seed, "Random seed", 1, .Machine$integer.max, TRUE),
     scvi_max_epochs = numeric_setting(scvi_max_epochs, "Maximum scVI epochs", 10, 5000, TRUE)
@@ -8879,6 +8882,10 @@ submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto
   # Keep low-prevalence-gene filtering as a fixed, reproducible internal
   # safeguard instead of exposing another routine tuning control.
   if (identical(resolved_engine, "scanpy")) checked$min_cells_per_gene <- 3L
+  umap_metric <- tolower(trimws(umap_metric %||% "euclidean"))
+  if (!umap_metric %in% c("euclidean", "cosine", "manhattan", "correlation")) return(record_preflight_failure(project, step_label, "Choose a supported UMAP distance metric.", "scrna"))
+  umap_init_pos <- tolower(trimws(umap_init_pos %||% "spectral"))
+  if (!umap_init_pos %in% c("spectral", "random")) return(record_preflight_failure(project, step_label, "Choose spectral or random UMAP initialization.", "scrna"))
   integration <- tolower(integration %||% "auto")
   allowed_integration <- if (identical(resolved_engine, "seurat")) c("auto", "none", "rpca", "cca") else c("auto", "none", "scvi", "harmony")
   if (!integration %in% allowed_integration) integration <- "auto"
@@ -8913,8 +8920,8 @@ submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto
     return(record_preflight_failure(project, "scRNA processing", paste0("Doublet method '", doublet_method, "' is not compatible with the ", resolved_engine, " engine. Choose ", paste(allowed_doublet, collapse = ", "), "."), "scrna"))
   }
   params <- data.frame(
-    key = c("normalization", "integration", "batch_column", "cluster_resolution", "min_features", "min_counts", "max_features", "max_percent_mt", "n_pcs", "min_cells_per_gene", "doublet_method", "doublet_rate", "remove_doublets", "marker_file", "celltype_file", "seed", "scvi_max_epochs"),
-    value = as.character(c(normalization, integration, batch_column, checked$cluster_resolution, checked$min_features, checked$min_counts, checked$max_features, checked$max_percent_mt, checked$n_pcs, checked$min_cells_per_gene, doublet_method, checked$doublet_rate, isTRUE(remove_doublets), marker_file, celltype_file, checked$seed, checked$scvi_max_epochs)),
+    key = c("normalization", "integration", "batch_column", "cluster_resolution", "min_features", "min_counts", "max_features", "max_percent_mt", "n_pcs", "n_neighbors", "umap_min_dist", "umap_spread", "umap_metric", "umap_init_pos", "min_cells_per_gene", "doublet_method", "doublet_rate", "remove_doublets", "marker_file", "celltype_file", "seed", "scvi_max_epochs"),
+    value = as.character(c(normalization, integration, batch_column, checked$cluster_resolution, checked$min_features, checked$min_counts, checked$max_features, checked$max_percent_mt, checked$n_pcs, checked$n_neighbors, checked$umap_min_dist, checked$umap_spread, umap_metric, umap_init_pos, checked$min_cells_per_gene, doublet_method, checked$doublet_rate, isTRUE(remove_doublets), marker_file, celltype_file, checked$seed, checked$scvi_max_epochs)),
     stringsAsFactors = FALSE
   )
   # Keep the copied, editable project manifest normalized immediately before
@@ -12947,8 +12954,24 @@ server <- function(input, output, session) {
         tags$p(class = "muted small-note", "Integration is only for a genuine technical batch (for example, library or sequencing run). Keep the checkbox selected when inputs do not need technical batch correction.")
       )
     }
+    umap_controls <- if (identical(scrna_ui_engine(), "scanpy")) {
+      tagList(
+        tags$h4("UMAP parameters"),
+        tags$p(class = "muted small-note", "Start with the defaults. More neighbours emphasizes broad structure; a smaller minimum distance makes clusters appear tighter."),
+        fluidRow(
+          column(4, numericInput("scrna_n_neighbors", "Neighbours", value = input$scrna_n_neighbors %||% 15, min = 2, max = 200, step = 1)),
+          column(4, numericInput("scrna_umap_min_dist", "Minimum distance", value = input$scrna_umap_min_dist %||% 0.5, min = 0, max = 2, step = 0.05)),
+          column(4, numericInput("scrna_umap_spread", "Spread", value = input$scrna_umap_spread %||% 1, min = 0.1, max = 10, step = 0.1))
+        ),
+        fluidRow(
+          column(6, selectInput("scrna_umap_metric", "Distance metric", choices = c("Euclidean" = "euclidean", "Cosine" = "cosine", "Manhattan" = "manhattan", "Correlation" = "correlation"), selected = selected_choice(input$scrna_umap_metric, c("euclidean", "cosine", "manhattan", "correlation"), "euclidean"), selectize = FALSE)),
+          column(6, selectInput("scrna_umap_init_pos", "Initialization", choices = c("Spectral (recommended)" = "spectral", "Random" = "random"), selected = selected_choice(input$scrna_umap_init_pos, c("spectral", "random"), "spectral"), selectize = FALSE))
+        )
+      )
+    } else NULL
     tagList(
       integration_controls,
+      umap_controls,
       numericInput("scrna_cluster_resolution", "Clustering resolution", value = input$scrna_cluster_resolution %||% 0.6, min = 0.05, max = 5, step = 0.05),
       tags$details(tags$summary("Advanced clustering settings"), numericInput("scrna_n_pcs", "Principal components for neighbours and UMAP", value = input$scrna_n_pcs %||% 30, min = 5, max = 100, step = 1), numericInput("scrna_seed", "Random seed", value = input$scrna_seed %||% 1234, min = 1, step = 1), if (identical(scrna_ui_engine(), "scanpy")) numericInput("scrna_scvi_max_epochs", "Maximum scVI training epochs", value = input$scrna_scvi_max_epochs %||% 400, min = 10, max = 5000, step = 50) else NULL),
       uiOutput("scrna_recommendations_ui")
@@ -13414,6 +13437,11 @@ server <- function(input, output, session) {
         max_percent_mt = input$scrna_max_percent_mt %||% 20,
         min_cells_per_gene = input$scrna_min_cells_per_gene %||% 3,
         n_pcs = input$scrna_n_pcs %||% 30,
+        n_neighbors = input$scrna_n_neighbors %||% 15,
+        umap_min_dist = input$scrna_umap_min_dist %||% 0.5,
+        umap_spread = input$scrna_umap_spread %||% 1,
+        umap_metric = input$scrna_umap_metric %||% "euclidean",
+        umap_init_pos = input$scrna_umap_init_pos %||% "spectral",
         doublet_method = input$scrna_doublet_method %||% "auto",
         doublet_rate = input$scrna_doublet_rate %||% 0.05,
         remove_doublets = isTRUE(input$scrna_remove_doublets),
