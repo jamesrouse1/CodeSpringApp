@@ -31,17 +31,18 @@ assert(
 )
 assert(
   !grepl("scrna_runtime_executable", app_text, fixed = TRUE) &&
-    grepl("Cell-type annotation files are selected at the annotation step", app_text, fixed = TRUE) &&
+    grepl("Annotation files are requested only at the annotation step", app_text, fixed = TRUE) &&
     grepl("Upload one Seurat/Scanpy object from laptop", app_text, fixed = TRUE),
   "single-cell setup exposes annotation and upload controls in the appropriate workflow steps"
 )
 assert(
   !app_env$scrna_uses_input_manifest(list(analysis_key = "scrna", scrna_input_mode = "single")) &&
     app_env$scrna_uses_input_manifest(list(analysis_key = "scrna", scrna_input_mode = "multiple")) &&
-    grepl("Multiple sample inputs", app_text, fixed = TRUE) &&
+    grepl("Read a processed Seurat or Scanpy object", app_text, fixed = TRUE) &&
+    grepl("One folder containing all samples", app_text, fixed = TRUE) &&
     grepl("new_scrna_inputs_table", app_text, fixed = TRUE) &&
-    grepl("Create it in the app", app_text, fixed = TRUE),
-  "single-input scRNA projects keep their internal manifest hidden and reveal it only for multi-input or integration workflows"
+    grepl("Use an existing sample-design file instead", app_text, fixed = TRUE),
+  "scRNA setup separates processed objects from new single- or multi-sample analyses"
 )
 assert(
   grepl("scrna_preintegration_umap_ui", app_text, fixed = TRUE) &&
@@ -1366,6 +1367,24 @@ assert(
   identical(app_env$project_status(scrna_project, jobs = failed_scrna_job)$status[[1]], "Likely failed"),
   "scRNA terminal failures are surfaced as failed rather than not started"
 )
+processed_rds <- file.path(root, "existing_processed.rds")
+writeLines("fixture", processed_rds)
+processed_manifest <- file.path(root, "existing_processed_manifest.tsv")
+write.table(data.frame(sample_id = "existing", input_path = processed_rds), processed_manifest, sep = "\t", row.names = FALSE, quote = FALSE)
+processed_project <- list(
+  id = "scrna/processed", name = "processed", analysis_key = "scrna", analysis = "scRNA-seq",
+  data_dir = file.path(root, "processed-results", "data"), results_root = file.path(root, "processed-results"),
+  design_matrix_path = processed_manifest, scrna_input_manifest = processed_manifest, scrna_engine = "seurat", scrna_input_mode = "single"
+)
+dir.create(file.path(processed_project$data_dir, "scrna", "tables"), recursive = TRUE)
+write.table(data.frame(sample_id = "existing", input_kind = "seurat_rds", pca_detected = TRUE, umap_detected = TRUE, clusters_detected = TRUE, annotation_columns_detected = "cell_type"), file.path(processed_project$data_dir, "scrna", "tables", "input_processing_detected.tsv"), sep = "\t", row.names = FALSE, quote = FALSE)
+dir.create(file.path(processed_project$data_dir, "scrna", "objects"), recursive = TRUE)
+writeLines("project-local processed object", file.path(processed_project$data_dir, "scrna", "objects", "processed_seurat.rds"))
+assert(
+  app_env$scrna_source_is_processed_object(processed_project) && app_env$scrna_existing_processed_ready(processed_project) &&
+    all(app_env$project_status(processed_project)$status[app_env$project_status(processed_project)$step %in% c("Normalize & PCA", "UMAP & clustering", "Annotate & markers")] == "Complete"),
+  "a processed object with PCA, UMAP, clusters, and annotations is adopted for continuation without mandatory reconstruction"
+)
 assert(
   grepl("scanpy_container_check", app_text, fixed = TRUE) && grepl("scrna_manifest_from_setup", app_text, fixed = TRUE),
   "scRNA setup supports an optional manifest and a shared Scanpy container"
@@ -1403,7 +1422,24 @@ assert(
     length(unique(pooled_rows$input_path)) == 1L,
   "one pooled FASTQ folder expands into one Cell Ranger design row per sample prefix while lanes remain grouped"
 )
-assert("Cell Ranger count" %in% app_env$scrna_pipeline_order(fastq_project), "FASTQ-backed scRNA projects expose Cell Ranger before input inspection")
+matrix_pool <- file.path(root, "matrix_pool")
+for (sample in c("sample_a", "sample_b")) {
+  sample_matrix <- file.path(matrix_pool, sample, "outs", "filtered_feature_bc_matrix")
+  dir.create(sample_matrix, recursive = TRUE)
+  for (name in c("matrix.mtx.gz", "features.tsv.gz", "barcodes.tsv.gz")) {
+    con <- gzfile(file.path(sample_matrix, name), "wt"); writeLines("fixture", con); close(con)
+  }
+}
+matrix_rows <- app_env$scrna_matrix_input_rows(matrix_pool)
+assert(
+  NROW(matrix_rows) == 2L && identical(sort(matrix_rows$sample_id), c("sample_a", "sample_b")),
+  "one parent folder discovers multiple filtered feature-barcode matrix subfolders"
+)
+assert("Alignment & counting" %in% app_env$scrna_pipeline_order(fastq_project), "FASTQ-backed scRNA projects expose alignment and counting before input inspection")
+assert(
+  identical(app_env$canonical_job_step("Cell Ranger count"), "Alignment & counting") && identical(app_env$canonical_job_step("Alignment & counting"), "Alignment & counting"),
+  "legacy Cell Ranger job records remain attached to the renamed alignment and counting stage"
+)
 assert(
   grepl("run_scrna_cellranger", app_text, fixed = TRUE) && any(grepl("module load CellRanger/9.0.1", runtime_text, fixed = TRUE)),
   "the app submits FASTQ samples through the maintained CellRanger/9.0.1 cluster module"

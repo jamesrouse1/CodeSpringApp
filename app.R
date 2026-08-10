@@ -760,7 +760,7 @@ new_project_from_inputs <- function(input) {
     scrna_input_manifest = trimws(input$new_scrna_manifest_path %||% ""),
     # The concrete engine is set once the single-cell input manifest is saved.
     scrna_engine = "auto",
-    scrna_input_mode = tolower(trimws(input$new_scrna_setup_mode %||% "single")),
+    scrna_input_mode = if (identical(tolower(trimws(input$new_scrna_start_mode %||% "new")), "object")) "single" else "auto",
     external_results = existing_results,
     counts_only = counts_only,
     source_config = "",
@@ -2560,6 +2560,7 @@ canonical_job_step <- function(x) {
     rsem = "RSEM (optional)",
     kallisto = "Kallisto (optional)"
   )
+  map <- c(map, cellrangercount = "Alignment & counting", alignmentcounting = "Alignment & counting")
   out <- unname(map[x_norm])
   out[is.na(out)] <- x[is.na(out)]
   out
@@ -2822,7 +2823,7 @@ methods_sentence_for_step <- function(step, manifest_rows, project) {
     "MACS2 (optional)" = paste0("Optional CUT&RUN peaks were called with MACS2.", ref_text, mode_text),
     "Peak Overlap" = paste0("Per-sample shared peak BEDs were created by intersecting the selected completed peak caller/settings with BEDTools.", ref_text, mode_text),
     "STAR" = paste0("Reads were aligned with STAR using ", gencode_label(project), ".", ref_text, mode_text),
-    "Cell Ranger count" = paste0("10x gene-expression FASTQs were processed independently with Cell Ranger 9.0.1 to generate filtered feature-barcode matrices.", ref_text, mode_text),
+    "Alignment & counting" = paste0("10x gene-expression FASTQs were aligned and quantified independently with Cell Ranger 9.0.1 to generate filtered feature-barcode matrices.", ref_text, mode_text),
     "featureCounts" = paste0("Gene-level counts were quantified with featureCounts using the selected GTF annotation.", ref_text, mode_text),
     "DESeq2" = paste0("Differential expression analysis was performed with DESeq2.", mode_text),
     "GSEA" = paste0("Gene set enrichment analysis was performed with CodeSpringLab GSEApy using signal-to-noise ranking and gene-set permutations.", ref_text, mode_text),
@@ -3130,19 +3131,24 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
     detected_any <- function(column) {
       column %in% names(detected) && any(tolower(trimws(as.character(detected[[column]]))) %in% c("true", "t", "yes", "y", "1"), na.rm = TRUE)
     }
+    existing_processed_ready <- scrna_existing_processed_ready(project)
     source_details <- c(
       if (NROW(detected)) "Source object state detected" else "Inspect the source object on HPC",
-      if (NROW(detected)) "QC is rerun from raw counts for a reproducible checkpoint" else "",
+      if (existing_processed_ready) "Existing processed embedding retained; reconstruction is optional" else if (NROW(detected)) "QC can be rerun from raw counts for a reproducible checkpoint" else "",
       if (detected_any("pca_detected")) "PCA detected in the source object; CodeSpring will create its own checkpoint" else "",
       if (detected_any("umap_detected") || detected_any("clusters_detected")) "UMAP/clusters detected in the source object; CodeSpring will create its own checkpoint" else "",
       if ("annotation_columns_detected" %in% names(detected) && any(nzchar(trimws(as.character(detected$annotation_columns_detected))), na.rm = TRUE)) "Existing annotation field detected and available for retention" else ""
     )
     status_one <- function(step, marker_path) {
-      complete <- if (identical(step, "Cell Ranger count")) {
+      complete <- if (identical(step, "Alignment & counting")) {
         NROW(fastq_manifest) > 0L && all(vapply(fastq_manifest$sample_id, function(sample) {
           scrna_cellranger_complete(project, sample)
         }, logical(1)))
-      } else file.exists(marker_path) || (identical(step, "Annotate & markers") && file.exists(file.path(out_dir, "_COMPLETE")))
+      } else file.exists(marker_path) ||
+        (existing_processed_ready && identical(step, "Normalize & PCA") && detected_any("pca_detected")) ||
+        (existing_processed_ready && identical(step, "UMAP & clustering")) ||
+        (existing_processed_ready && identical(step, "Annotate & markers") && "annotation_columns_detected" %in% names(detected) && any(nzchar(trimws(as.character(detected$annotation_columns_detected))))) ||
+        (identical(step, "Annotate & markers") && file.exists(file.path(out_dir, "_COMPLETE")))
       hit <- if (NROW(jobs) && all(c("step", "slurm_state") %in% names(jobs))) jobs[canonical_job_step(jobs$step) == canonical_job_step(step), , drop = FALSE] else data.frame()
       if (NROW(hit)) {
         states <- toupper(trimws(as.character(hit$slurm_state)))
@@ -3410,10 +3416,10 @@ chip_pipeline_order <- function() {
 }
 
 scrna_pipeline_order <- function(project = NULL) {
-  steps <- c("Cell Ranger count", "Input inspection", "QC & doublets", "Normalize & PCA", "UMAP & clustering", "Annotate & markers", "Signature scoring", "Differential expression", "Pathway analysis")
+  steps <- c("Alignment & counting", "Input inspection", "QC & doublets", "Normalize & PCA", "UMAP & clustering", "Annotate & markers", "Signature scoring", "Differential expression", "Pathway analysis")
   if (!is.null(project)) {
     has_fastq <- tryCatch(NROW(scrna_fastq_manifest(project)) > 0L, error = function(e) FALSE)
-    if (!has_fastq) steps <- setdiff(steps, "Cell Ranger count")
+    if (!has_fastq) steps <- setdiff(steps, "Alignment & counting")
   }
   steps
 }
@@ -8739,6 +8745,36 @@ scrna_manifest <- function(project) {
   tryCatch(utils::read.delim(path, check.names = FALSE, stringsAsFactors = FALSE), error = function(e) data.frame())
 }
 
+scrna_source_is_processed_object <- function(project) {
+  manifest <- scrna_manifest(project)
+  NROW(manifest) == 1L && grepl("\\.(rds|h5ad)$", trimws(as.character(manifest$input_path[[1]])), ignore.case = TRUE)
+}
+
+scrna_detected_input_state <- function(project) {
+  detected <- safe_read_table(file.path(project$data_dir, "scrna", "tables", "input_processing_detected.tsv"), 10000)
+  detected_flag <- function(column) {
+    column %in% names(detected) && any(tolower(trimws(as.character(detected[[column]]))) %in% c("true", "t", "yes", "y", "1"), na.rm = TRUE)
+  }
+  annotations <- if ("annotation_columns_detected" %in% names(detected)) unique(trimws(as.character(detected$annotation_columns_detected))) else character(0)
+  annotations <- annotations[nzchar(annotations)]
+  list(
+    inspected = NROW(detected) > 0L,
+    pca = detected_flag("pca_detected"),
+    umap = detected_flag("umap_detected"),
+    clusters = detected_flag("clusters_detected"),
+    annotations = annotations
+  )
+}
+
+scrna_existing_processed_ready <- function(project) {
+  if (!scrna_source_is_processed_object(project)) return(FALSE)
+  state <- scrna_detected_input_state(project)
+  object_path <- if (identical(tolower(project$scrna_engine %||% "seurat"), "scanpy")) {
+    file.path(project$data_dir, "scrna", "objects", "processed_scanpy.h5ad")
+  } else file.path(project$data_dir, "scrna", "objects", "processed_seurat.rds")
+  isTRUE(state$inspected) && isTRUE(state$umap) && isTRUE(state$clusters) && file.exists(object_path) && file_size_for(object_path) > 0
+}
+
 scrna_uses_input_manifest <- function(project) {
   mode <- tolower(trimws(as.character(project$scrna_input_mode %||% "auto")))
   if (identical(mode, "multiple")) return(TRUE)
@@ -8785,6 +8821,42 @@ scrna_fastq_input_rows <- function(path, single_sample_name = "") {
     input_path = rep(path, length(prefixes)),
     input_type = "fastq_folder",
     fastq_sample = prefixes,
+    condition = "",
+    donor = "",
+    technical_batch = "",
+    stringsAsFactors = FALSE,
+    check.names = FALSE
+  )
+}
+
+scrna_filtered_matrix_dirs <- function(path, discover_children = TRUE) {
+  path <- normalizePath(path.expand(trimws(as.character(path %||% ""))), winslash = "/", mustWork = FALSE)
+  if (!dir.exists(path)) return(character(0))
+  if (identical(scrna_detect_input_type(path), "filtered_10x_matrix")) return(path)
+  if (!isTRUE(discover_children)) return(character(0))
+  matrix_files <- list.files(path, pattern = "^matrix\\.mtx(\\.gz)?$", recursive = TRUE, full.names = TRUE, ignore.case = TRUE)
+  candidates <- unique(dirname(matrix_files))
+  candidates <- candidates[vapply(candidates, function(candidate) identical(scrna_detect_input_type(candidate), "filtered_10x_matrix"), logical(1))]
+  filtered <- candidates[tolower(basename(candidates)) == "filtered_feature_bc_matrix"]
+  sort(unique(if (length(filtered)) filtered else candidates))
+}
+
+scrna_matrix_input_rows <- function(path, single_sample_name = "", discover_children = TRUE) {
+  dirs <- scrna_filtered_matrix_dirs(path, discover_children = discover_children)
+  if (!length(dirs)) stop("No filtered feature-barcode matrix was detected in: ", path)
+  inferred_name <- vapply(dirs, function(dir) {
+    parent <- dirname(dir)
+    if (tolower(basename(dir)) == "filtered_feature_bc_matrix" && tolower(basename(parent)) == "outs") parent <- dirname(parent)
+    clean_name(basename(parent), "sample")
+  }, character(1))
+  custom <- trimws(as.character(single_sample_name %||% ""))
+  sample_ids <- if (length(dirs) == 1L && nzchar(custom)) clean_name(custom, "sample") else inferred_name
+  if (anyDuplicated(sample_ids)) stop("Detected matrix folders do not produce unique sample names. Enter the folders separately and provide explicit sample names.")
+  data.frame(
+    sample_id = sample_ids,
+    input_path = dirs,
+    input_type = "filtered_10x_matrix",
+    fastq_sample = "",
     condition = "",
     donor = "",
     technical_batch = "",
@@ -8840,7 +8912,7 @@ scrna_resolved_manifest <- function(project, require_cellranger = TRUE) {
   resolved$input_type[fastq] <- "filtered_10x_matrix"
   if (isTRUE(require_cellranger)) {
     missing <- resolved$input_path[fastq][vapply(resolved$input_path[fastq], scrna_detect_input_type, character(1)) != "filtered_10x_matrix"]
-    if (length(missing)) stop("Complete Cell Ranger count for every FASTQ sample before running Input inspection. Missing filtered matrix: ", missing[[1]])
+    if (length(missing)) stop("Complete Alignment & counting for every FASTQ sample before running Input inspection. Missing filtered matrix: ", missing[[1]])
   }
   path <- file.path(project$data_dir, "manifest", "scrna_resolved_inputs.tsv")
   dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
@@ -8867,28 +8939,28 @@ cellranger_reference_candidates <- function(project) {
 
 submit_scrna_cellranger_jobs <- function(project, transcriptome, expected_cells = 0, samples = NULL) {
   fastq <- tryCatch(scrna_fastq_manifest(project), error = function(e) e)
-  if (inherits(fastq, "error")) return(record_preflight_failure(project, "Cell Ranger count", conditionMessage(fastq), "cellranger"))
+  if (inherits(fastq, "error")) return(record_preflight_failure(project, "Alignment & counting", conditionMessage(fastq), "cellranger"))
   if (!NROW(fastq)) return("No FASTQ-folder samples need Cell Ranger; filtered matrices and processed objects begin at Input inspection.")
   transcriptome <- normalizePath(path.expand(trimws(as.character(transcriptome %||% ""))), winslash = "/", mustWork = FALSE)
   if (!dir.exists(transcriptome) || !file.exists(file.path(transcriptome, "reference.json")) || file.access(transcriptome, mode = 5) != 0) {
-    return(record_preflight_failure(project, "Cell Ranger count", "Choose a readable Cell Ranger transcriptome folder containing reference.json.", "cellranger"))
+    return(record_preflight_failure(project, "Alignment & counting", "Choose a readable Cell Ranger transcriptome folder containing reference.json.", "cellranger"))
   }
   expected_cells <- suppressWarnings(as.integer(expected_cells))
-  if (is.na(expected_cells) || expected_cells < 0L) return(record_preflight_failure(project, "Cell Ranger count", "Expected cells must be 0 (automatic) or a positive whole number.", "cellranger"))
+  if (is.na(expected_cells) || expected_cells < 0L) return(record_preflight_failure(project, "Alignment & counting", "Expected cells must be 0 (automatic) or a positive whole number.", "cellranger"))
   available <- as.character(fastq$sample_id)
   requested <- unique(trimws(as.character(samples %||% available)))
   requested <- intersect(requested[nzchar(requested)], available)
-  if (!length(requested)) return(record_preflight_failure(project, "Cell Ranger count", "Select at least one FASTQ sample.", "cellranger"))
+  if (!length(requested)) return(record_preflight_failure(project, "Alignment & counting", "Select at least one FASTQ sample.", "cellranger"))
   qsub <- file.path(SCRIPTS_DIR, "singleCellRNAseq", "qsub_cellranger_count.sh")
   runner <- file.path(SCRIPTS_DIR, "singleCellRNAseq", "cellranger_count.sh")
-  if (!file.exists(qsub) || !file.exists(runner)) return(record_preflight_failure(project, "Cell Ranger count", "CodeSpringLab Cell Ranger runner scripts were not found. Update CodeSpringLab, then try again.", "cellranger"))
+  if (!file.exists(qsub) || !file.exists(runner)) return(record_preflight_failure(project, "Alignment & counting", "CodeSpringLab Cell Ranger runner scripts were not found. Update CodeSpringLab, then try again.", "cellranger"))
   jobs <- job_history(project)
   messages <- vapply(requested, function(sample) {
     row <- fastq[fastq$sample_id == sample, , drop = FALSE][1, , drop = FALSE]
     target <- file.path(scrna_cellranger_matrix_dir(project, sample), "matrix.mtx.gz")
     if (file.exists(target) && file_size_for(target) > 0) return(paste(sample, "already has a completed Cell Ranger matrix; skipped."))
     active <- if (NROW(jobs) && all(c("step", "sample", "slurm_state") %in% names(jobs))) {
-      any(canonical_job_step(jobs$step) == canonical_job_step("Cell Ranger count") & jobs$sample == sample & jobs$slurm_state %in% active_slurm_states())
+      any(canonical_job_step(jobs$step) == canonical_job_step("Alignment & counting") & jobs$sample == sample & jobs$slurm_state %in% active_slurm_states())
     } else FALSE
     if (active) return(paste(sample, "already has an active Cell Ranger job; skipped."))
     pairs <- scrna_fastq_pairs(row$input_path[[1]])
@@ -8898,7 +8970,7 @@ submit_scrna_cellranger_jobs <- function(project, transcriptome, expected_cells 
     if (length(detected_prefixes) > 1L && !nzchar(fastq_sample)) return(paste0("ERROR: ", sample, " points to a folder containing multiple FASTQ sample prefixes. Enter one of these in fastq_sample: ", paste(detected_prefixes, collapse = ", ")))
     if (nzchar(fastq_sample) && length(detected_prefixes) && !fastq_sample %in% detected_prefixes) return(paste0("ERROR: fastq_sample '", fastq_sample, "' was not found in ", row$input_path[[1]], ". Detected: ", paste(detected_prefixes, collapse = ", ")))
     submit_sbatch(
-      project, "Cell Ranger count", qsub,
+      project, "Alignment & counting", qsub,
       c(sample, row$input_path[[1]], fastq_sample, transcriptome, file.path(project$data_dir, "cellranger"), expected_cells, runner),
       "cellranger_count", paste0("CellRanger/9.0.1; expected_cells=", expected_cells), sample = sample,
       target = target, reference = transcriptome
@@ -9834,7 +9906,7 @@ run_step_meta <- function(project = NULL) {
       "Run sample-level pseudobulk DESeq2 and optional exploratory cell-level Wilcoxon testing.",
       "Run ranked fgseaMultilevel from the pseudobulk Wald statistic and a selected pathway database."
     )
-    if ("Cell Ranger count" %in% steps) descriptions <- c("Run Cell Ranger count for each 10x FASTQ sample and create filtered feature-barcode matrices.", descriptions)
+    if ("Alignment & counting" %in% steps) descriptions <- c("Align and quantify each 10x FASTQ sample with Cell Ranger and create filtered feature-barcode matrices.", descriptions)
     descriptions
   } else if (!is.null(project) && isTRUE(project$counts_only)) {
     c(
@@ -11957,8 +12029,7 @@ server <- function(input, output, session) {
     open_server_browser("new_scrna_manifest_path", "file", input$new_scrna_manifest_path %||% "")
   })
   observeEvent(input$browse_new_scrna_input_path, {
-    mode <- if (identical(input$new_scrna_input_location_type %||% "file", "dir")) "dir" else "file"
-    open_server_browser("new_scrna_input_path", mode, input$new_scrna_input_path %||% "")
+    open_server_browser("new_scrna_input_path", "file", input$new_scrna_input_path %||% "")
   })
   observeEvent(input$browse_new_scrna_matrix_path, {
     open_server_browser("new_scrna_matrix_path", "dir", input$new_scrna_matrix_path %||% "")
@@ -11971,18 +12042,33 @@ server <- function(input, output, session) {
     raw_name <- trimws(input$new_scrna_sample_name %||% "")
     path <- normalizePath(path.expand(trimws(input$new_scrna_matrix_path %||% "")), winslash = "/", mustWork = FALSE)
     requested_type <- input$new_scrna_folder_type %||% "filtered_10x_matrix"
+    sample_mode <- input$new_scrna_sample_count %||% "multiple"
+    folder_layout <- if (identical(sample_mode, "single")) "one" else input$new_scrna_folder_layout %||% "one"
+    one_sample_per_path <- identical(folder_layout, "multiple") || identical(sample_mode, "single")
+    if (one_sample_per_path && !nzchar(raw_name)) {
+      new_scrna_input_message("Enter the sample name for this folder.")
+      return()
+    }
     if (identical(requested_type, "fastq_folder")) {
       candidate <- tryCatch(scrna_fastq_input_rows(path, raw_name), error = function(e) e)
       if (inherits(candidate, "error")) {
         new_scrna_input_message(conditionMessage(candidate))
         return()
       }
-    } else {
-      if (!nzchar(raw_name)) {
-        new_scrna_input_message("Enter a sample name before adding this filtered matrix.")
+      if (one_sample_per_path && NROW(candidate) != 1L) {
+        new_scrna_input_message(paste0("This folder contains ", NROW(candidate), " FASTQ sample prefixes. Choose 'One folder containing all samples' to discover them together, or select a folder containing exactly one sample."))
         return()
       }
-      candidate <- data.frame(sample_id = clean_name(raw_name, "sample"), input_path = path, input_type = requested_type, fastq_sample = "", condition = "", donor = "", technical_batch = "", stringsAsFactors = FALSE, check.names = FALSE)
+    } else {
+      candidate <- tryCatch(scrna_matrix_input_rows(path, raw_name, discover_children = !one_sample_per_path), error = function(e) e)
+      if (inherits(candidate, "error")) {
+        new_scrna_input_message(conditionMessage(candidate))
+        return()
+      }
+      if (one_sample_per_path && NROW(candidate) != 1L) {
+        new_scrna_input_message("Choose the filtered_feature_bc_matrix folder for exactly one sample.")
+        return()
+      }
     }
     checked <- tryCatch(validate_scrna_manifest(candidate), error = function(e) e)
     if (inherits(checked, "error")) {
@@ -11997,7 +12083,8 @@ server <- function(input, output, session) {
     }
     new_scrna_inputs(rbind(current, checked[, names(current), drop = FALSE]))
     if (NROW(checked) > 1L) {
-      new_scrna_input_message(paste0("Detected and added ", NROW(checked), " FASTQ samples. Cell Ranger will combine lanes within each sample prefix. Review and edit the design metadata below."))
+      kind <- if (identical(requested_type, "fastq_folder")) "FASTQ samples; Cell Ranger will combine lanes within each sample prefix" else "filtered matrices"
+      new_scrna_input_message(paste0("Detected and added ", NROW(checked), " ", kind, ". Review and edit the design metadata below."))
     } else {
       new_scrna_input_message(paste0("Added ", checked$sample_id[[1]], " (", checked$input_type[[1]], "). Add the next sample or edit its metadata below."))
     }
@@ -12102,19 +12189,6 @@ server <- function(input, output, session) {
         return()
       }
       value <- normalizePath(value, winslash = "/", mustWork = FALSE)
-      # A 10x matrix is a three-file directory input, not any individual
-      # component file.  If a user reaches one by clicking through the file
-      # browser before selecting the folder data type, recover safely by
-      # storing its parent directory as the scRNA input.
-      is_scrna_10x_component <- identical(path_browser$target, "new_scrna_input_path") &&
-        grepl("^(matrix\\.mtx|features\\.tsv|genes\\.tsv|barcodes\\.tsv)(\\.gz)?$", basename(value), ignore.case = TRUE)
-      if (is_scrna_10x_component) {
-        tenx_dir <- normalizePath(dirname(value), winslash = "/", mustWork = FALSE)
-        updateRadioButtons(session, "new_scrna_input_location_type", selected = "dir")
-        updateTextInput(session, path_browser$target, value = tenx_dir)
-        removeModal()
-        return()
-      }
       updateTextInput(session, path_browser$target, value = value)
       removeModal()
       return()
@@ -12196,31 +12270,33 @@ server <- function(input, output, session) {
       conditionalPanel(
         "input.new_project_mode == 'new' && input.new_project_analysis == 'scRNA-seq'",
         div(class = "read-source-note",
-            tags$strong("Data and output locations"),
-            tags$p("For multiple samples, add either each filtered matrix folder or each 10x FASTQ folder and its sample name, then build the sample design directly in the app. For one processed object or one folder, choose the single-input option."),
-            tags$p("All heavy processing is submitted to SLURM. The app remains responsive and shows the workflow as In progress while the HPC job runs.")),
-        radioButtons("new_scrna_setup_mode", "Input setup", choices = c("Multiple sample inputs" = "multiple", "One object or folder" = "single"), selected = "multiple", inline = TRUE),
-        conditionalPanel("input.new_scrna_setup_mode == 'single'",
+            tags$strong("Choose where the analysis begins"),
+            tags$p("Read a processed object to inspect and continue an existing analysis, or start a new analysis from raw 10x inputs. Heavy processing runs as SLURM jobs and never modifies the source data.")),
+        radioButtons("new_scrna_start_mode", "Starting point", choices = c("Read a processed Seurat or Scanpy object" = "object", "Start a new analysis" = "new"), selected = "new"),
+        conditionalPanel("input.new_scrna_start_mode == 'object'",
           radioButtons("new_scrna_input_source", "Data location", choices = c("Browse or paste a server path" = "server", "Upload one Seurat/Scanpy object from laptop" = "upload"), selected = "server", inline = TRUE),
           conditionalPanel("input.new_scrna_input_source == 'server'",
             div(class = "new-project-path-control",
-                textInput("new_scrna_input_path", "Server data path", value = "", placeholder = "Absolute path to a .rds, .h5ad, filtered 10x matrix folder, or 10x FASTQ folder"),
+                textInput("new_scrna_input_path", "Processed object", value = "", placeholder = "Absolute path to a Seurat .rds or Scanpy .h5ad object"),
                 actionButton("browse_new_scrna_input_path", "Browse server", class = "btn-default"))
           ),
           conditionalPanel("input.new_scrna_input_source == 'upload'",
             fileInput("new_scrna_input_upload", "Single-cell object from laptop", accept = c(".rds", ".h5ad")),
-            tags$p(class = "muted small-note", "The uploaded object is copied to data/uploads/inputs inside this project. For a matrix or FASTQ folder, use a server path.")
+            tags$p(class = "muted small-note", "The object is copied into this project's organized input folder; the original is unchanged.")
           ),
-          radioButtons("new_scrna_input_location_type", "Data type", choices = c("Seurat RDS or Scanpy H5AD file" = "file", "Filtered matrix or 10x FASTQ folder" = "dir"), selected = "file", inline = TRUE),
-          textInput("new_scrna_sample_id", "Sample name", value = "", placeholder = "For example: AH07_uPAR_F")
+          tags$p(class = "muted small-note", "The app detects H5AD versus RDS automatically. Input inspection records existing counts, normalization, PCA, UMAP, clusters, and annotation fields so only relevant continuation options are emphasized.")
         ),
-        conditionalPanel("input.new_scrna_setup_mode == 'multiple'",
-          radioButtons("new_scrna_manifest_source", "Build the sample design", choices = c("Create it in the app" = "build", "Use a server manifest" = "server", "Upload a manifest" = "upload"), selected = "build", inline = TRUE),
-          conditionalPanel("input.new_scrna_manifest_source == 'build'",
+        conditionalPanel("input.new_scrna_start_mode == 'new'",
+          radioButtons("new_scrna_sample_count", "Samples", choices = c("One sample" = "single", "Multiple samples" = "multiple"), selected = "multiple", inline = TRUE),
+          radioButtons("new_scrna_folder_type", "Input data", choices = c("10x gene-expression FASTQs" = "fastq_folder", "Filtered feature-barcode matrix" = "filtered_10x_matrix"), selected = "fastq_folder", inline = TRUE),
+          conditionalPanel("input.new_scrna_sample_count == 'multiple'",
+            radioButtons("new_scrna_folder_layout", "Folder layout", choices = c("One folder containing all samples" = "one", "One folder path per sample" = "multiple"), selected = "one", inline = TRUE)
+          ),
+          checkboxInput("new_scrna_use_manifest", "Use an existing sample-design file instead", value = FALSE),
+          conditionalPanel("!input.new_scrna_use_manifest",
             div(class = "read-source-note",
-              tags$strong("Add one input folder per sample"),
-              tags$p("Choose either a filtered feature-barcode matrix or a 10x gene-expression FASTQ folder. For a FASTQ folder, the app detects every sample prefix and combines its sequencing lanes automatically. Each detected sample receives its own Cell Ranger count job before QC.")),
-            radioButtons("new_scrna_folder_type", "Folder contents", choices = c("Filtered feature-barcode matrix" = "filtered_10x_matrix", "10x gene-expression FASTQs" = "fastq_folder"), selected = "filtered_10x_matrix", inline = TRUE),
+              tags$strong("Add input data"),
+              tags$p("With one shared folder, the app discovers all standard sample prefixes or filtered-matrix subfolders. With separate folders, add each path and provide its sample name.")),
             div(class = "new-project-path-control",
               textInput("new_scrna_matrix_path", "Sample input folder", value = "", placeholder = "Absolute path containing matrix/features/barcodes or matched R1/R2 FASTQs"),
               actionButton("browse_new_scrna_matrix_path", "Browse server", class = "btn-default")
@@ -12235,18 +12311,21 @@ server <- function(input, output, session) {
             table_output("new_scrna_inputs_table"),
             tags$p(class = "muted small-note", "All cells are editable. Use technical_batch only for library, capture, lane, or sequencing-run effects—not for the biological condition.")
           ),
-          conditionalPanel("input.new_scrna_manifest_source == 'server'",
-            div(class = "new-project-path-control",
-                textInput("new_scrna_manifest_path", "Server manifest path", value = "", placeholder = "Absolute server path to samples.tsv"),
-                actionButton("browse_new_scrna_manifest_path", "Browse server", class = "btn-default"))
+          conditionalPanel("input.new_scrna_use_manifest",
+            radioButtons("new_scrna_manifest_source", "Sample-design location", choices = c("Server file" = "server", "Upload from laptop" = "upload"), selected = "server", inline = TRUE),
+            conditionalPanel("input.new_scrna_manifest_source == 'server'",
+              div(class = "new-project-path-control",
+                  textInput("new_scrna_manifest_path", "Server sample-design path", value = "", placeholder = "Absolute path to samples.tsv"),
+                  actionButton("browse_new_scrna_manifest_path", "Browse server", class = "btn-default"))
+            ),
+            conditionalPanel("input.new_scrna_manifest_source == 'upload'",
+              fileInput("new_scrna_manifest_upload", "Sample design from laptop", accept = c(".tsv", ".txt"))
+            ),
+            tags$p(class = "muted small-note", "Required columns: sample_id and input_path. Input type is detected automatically when input_type is omitted.")
           ),
-          conditionalPanel("input.new_scrna_manifest_source == 'upload'",
-            fileInput("new_scrna_manifest_upload", "Manifest from laptop", accept = c(".tsv", ".txt"))
-          ),
-          conditionalPanel("input.new_scrna_manifest_source != 'build'", tags$p(class = "muted small-note", "Imported sample designs must contain sample_id and input_path. input_type is optional and is detected from the folder; condition, donor, and technical_batch are optional metadata columns."))
         ),
         scrna_results_location_control,
-        tags$p(class = "muted small-note", "The analysis engine is fixed automatically when this project is created: Scanpy for H5AD, and Seurat for RDS, filtered 10x matrices, or Cell Ranger FASTQ processing. The Run Pipeline will show only compatible options. Cell-type annotation files are selected at the annotation step.")
+        tags$p(class = "muted small-note", "Engine selection is automatic: Scanpy for H5AD and Seurat for RDS, filtered matrices, or Cell Ranger outputs. Annotation files are requested only at the annotation step.")
       ),
       conditionalPanel(
         "input.new_project_mode == 'new' && input.new_project_analysis != 'scRNA-seq'",
@@ -12686,22 +12765,21 @@ server <- function(input, output, session) {
       example_design_copied <- ""
       counts_message <- ""
       if (is_scrna_project(p)) {
-        setup_mode <- tolower(input$new_scrna_setup_mode %||% "single")
+        start_mode <- tolower(input$new_scrna_start_mode %||% "new")
         input_source <- input$new_scrna_input_source %||% "server"
-        manifest_source_mode <- input$new_scrna_manifest_source %||% "build"
-        input_path <- if (identical(setup_mode, "multiple")) {
-          ""
-        } else if (identical(input_source, "upload")) {
+        use_manifest <- identical(start_mode, "new") && isTRUE(input$new_scrna_use_manifest)
+        manifest_source_mode <- input$new_scrna_manifest_source %||% "server"
+        input_path <- if (identical(start_mode, "object") && identical(input_source, "upload")) {
           copy_uploaded_project_file(
             input$new_scrna_input_upload,
             file.path(p$data_dir, "uploads", "inputs"),
             "single-cell object",
             c("rds", "h5ad")
           )
-        } else {
+        } else if (identical(start_mode, "object")) {
           input$new_scrna_input_path %||% ""
-        }
-        manifest_source <- if (!identical(setup_mode, "multiple") || identical(manifest_source_mode, "build")) {
+        } else ""
+        manifest_source <- if (!use_manifest) {
           ""
         } else if (identical(manifest_source_mode, "upload")) {
           copy_uploaded_project_file(
@@ -12713,21 +12791,23 @@ server <- function(input, output, session) {
         } else {
           p$scrna_input_manifest %||% ""
         }
-        manifest <- if (identical(setup_mode, "multiple") && identical(manifest_source_mode, "build")) {
+        manifest <- if (identical(start_mode, "new") && !use_manifest) {
           built <- new_scrna_inputs()
-          if (NROW(built) < 2L) {
-            stop("Add at least two sample input folders and give each one a unique sample name.")
-          }
+          if (!NROW(built)) stop("Detect and add at least one FASTQ or filtered-matrix sample before creating the project.")
+          expected_samples <- input$new_scrna_sample_count %||% "multiple"
+          if (identical(expected_samples, "single") && NROW(built) != 1L) stop("One sample was selected, but the input table contains ", NROW(built), " samples. Clear the table and add the intended sample folder.")
+          if (identical(expected_samples, "multiple") && NROW(built) < 2L) stop("Multiple samples was selected, but only one sample was detected. Add the remaining sample folders or choose One sample.")
           validate_scrna_manifest(built)
+        } else if (identical(start_mode, "object")) {
+          scrna_manifest_from_setup("", "", input_path)
         } else {
-          if (identical(setup_mode, "multiple") && !nzchar(manifest_source)) {
-            stop("Build the sample design in the app, or choose a readable sample-design file.")
-          }
-          scrna_manifest_from_setup(manifest_source, input$new_scrna_sample_id %||% "", input_path)
+          if (!nzchar(manifest_source)) stop("Choose a readable sample-design file or build the sample design in the app.")
+          scrna_manifest_from_setup(manifest_source, "", "")
         }
         dir.create(dirname(p$design_matrix_path), recursive = TRUE, showWarnings = FALSE)
         utils::write.table(manifest, p$design_matrix_path, sep = "\t", row.names = FALSE, quote = FALSE)
         p$scrna_input_manifest <- p$design_matrix_path
+        p$scrna_input_mode <- if (identical(start_mode, "object") || NROW(manifest) == 1L) "single" else "multiple"
         # Lock the engine into the project configuration once its input type
         # is known.  This prevents a later UI choice from mixing Seurat-only
         # and Scanpy-only parameters in the same analysis.
@@ -13101,13 +13181,23 @@ server <- function(input, output, session) {
     adapter_defaults <- default_adapter_pair(p)
     if (is_scrna_project(p)) {
       has_fastq_inputs <- tryCatch(NROW(scrna_fastq_manifest(p)) > 0L, error = function(e) FALSE)
+      processed_source <- scrna_source_is_processed_object(p)
+      existing_state <- scrna_detected_input_state(p)
+      reuse_existing <- scrna_existing_processed_ready(p)
+      show_rebuild <- isTRUE(isolate(input$scrna_show_rebuild_steps))
       return(div(class = "run-grid",
         uiOutput("scrna_scanpy_runtime_ui"),
-        if (has_fastq_inputs) tool_panel("Cell Ranger count", status, "Convert each 10x gene-expression FASTQ sample into a filtered feature-barcode matrix before single-cell QC.", uiOutput("scrna_cellranger_settings_ui"), "run_scrna_cellranger", "Run Cell Ranger for selected samples", show_sample_progress = FALSE) else NULL,
-        tool_panel("Input inspection", status, "Validate the raw-count input, create an unfiltered QC preview, and report any existing analysis state only when the input is an RDS or H5AD object.", tagList(uiOutput("scrna_inspect_settings_ui"), uiOutput("scrna_input_state_ui"), tags$p(class = "muted small-note", "The input is read only. This first job creates the unfiltered QC plots used to choose filters; it does not change any cutoff fields.")), "run_scrna_inspect", "Inspect input & show QC plots", show_sample_progress = FALSE),
-        tool_panel("QC & doublets", status, "Review the unfiltered QC plots below, choose biologically appropriate cutoffs, then filter cells and record predicted doublets.", tagList(uiOutput("scrna_pre_qc_plot_ui"), uiOutput("scrna_qc_settings_ui"), uiOutput("scrna_post_qc_plot_ui"), tags$p(class = "muted small-note", "The same applied cutoffs are drawn on the before- and after-filter plots. Doublet calls are saved whether or not predicted doublets are removed.")), "run_scrna_qc", "Run QC & doublets", show_sample_progress = FALSE),
-        tool_panel("Normalize & PCA", status, "Normalize retained cells, identify variable genes, scale, and calculate PCA. PCA outputs appear here as soon as this step finishes.", tagList(uiOutput("scrna_preprocess_settings_ui"), uiOutput("scrna_pca_output_ui")), "run_scrna_preprocess", "Run normalization & PCA", show_sample_progress = FALSE),
-        tool_panel("UMAP & clustering", status, "Compare the uncorrected embedding first. For multiple inputs, optionally correct a technical batch; then calculate neighbours, UMAP, and clusters.", tagList(uiOutput("scrna_preintegration_umap_ui"), uiOutput("scrna_cluster_settings_ui"), uiOutput("scrna_umap_output_ui")), "run_scrna_cluster", "Run UMAP & clustering", show_sample_progress = FALSE),
+        if (processed_source && existing_state$inspected) div(class = "read-source-note",
+          tags$strong(if (reuse_existing) "Processed object detected" else "Object inspection complete"),
+          tags$p(if (reuse_existing) "The existing UMAP and clusters are retained in the project. Continue with annotation, scoring, differential expression, or pathway analysis; reconstruction steps are hidden unless requested." else "The object state was recorded. Required continuation steps remain visible because a complete reusable UMAP and cluster assignment were not both detected."),
+          if (length(existing_state$annotations)) tags$p(class = "muted small-note", paste("Detected annotation metadata:", paste(existing_state$annotations, collapse = "; "))) else NULL,
+          if (reuse_existing) checkboxInput("scrna_show_rebuild_steps", "Show optional QC, normalization, and reclustering controls", value = show_rebuild) else NULL
+        ) else NULL,
+        if (has_fastq_inputs) tool_panel("Alignment & counting", status, "Align and quantify each 10x gene-expression FASTQ sample with Cell Ranger before single-cell QC.", uiOutput("scrna_cellranger_settings_ui"), "run_scrna_cellranger", "Run alignment & counting", show_sample_progress = FALSE) else NULL,
+        if (!reuse_existing || show_rebuild) tool_panel("Input inspection", status, "Validate the raw-count input, create an unfiltered QC preview, and report any existing analysis state only when the input is an RDS or H5AD object.", tagList(uiOutput("scrna_inspect_settings_ui"), uiOutput("scrna_input_state_ui"), tags$p(class = "muted small-note", "The input is read only. This first job creates the unfiltered QC plots used to choose filters; it does not change any cutoff fields.")), "run_scrna_inspect", "Inspect input & show QC plots", show_sample_progress = FALSE) else NULL,
+        if (!reuse_existing || show_rebuild) tool_panel("QC & doublets", status, "Review the unfiltered QC plots below, choose biologically appropriate cutoffs, then filter cells and record predicted doublets.", tagList(uiOutput("scrna_pre_qc_plot_ui"), uiOutput("scrna_qc_settings_ui"), uiOutput("scrna_post_qc_plot_ui"), tags$p(class = "muted small-note", "The same applied cutoffs are drawn on the before- and after-filter plots. Doublet calls are saved whether or not predicted doublets are removed.")), "run_scrna_qc", "Run QC & doublets", show_sample_progress = FALSE) else NULL,
+        if (!reuse_existing || show_rebuild) tool_panel("Normalize & PCA", status, "Normalize retained cells, identify variable genes, scale, and calculate PCA. PCA outputs appear here as soon as this step finishes.", tagList(uiOutput("scrna_preprocess_settings_ui"), uiOutput("scrna_pca_output_ui")), "run_scrna_preprocess", "Run normalization & PCA", show_sample_progress = FALSE) else NULL,
+        if (!reuse_existing || show_rebuild) tool_panel("UMAP & clustering", status, "Compare the uncorrected embedding first. For multiple inputs, optionally correct a technical batch; then calculate neighbours, UMAP, and clusters.", tagList(uiOutput("scrna_preintegration_umap_ui"), uiOutput("scrna_cluster_settings_ui"), uiOutput("scrna_umap_output_ui")), "run_scrna_cluster", "Run UMAP & clustering", show_sample_progress = FALSE) else NULL,
         tool_panel("Annotate & markers", status, "Use the project's saved post-UMAP object, add a named annotation metadata field, and immediately write exact composition tables.", uiOutput("scrna_annotation_settings_ui"), "run_scrna_annotate", "Run annotation & markers", show_sample_progress = FALSE),
         tool_panel("Signature scoring", status, "Score one or more named gene signatures on normalized expression and store every score as reusable cell metadata in the processed object.", uiOutput("scrna_signature_settings_ui"), "run_scrna_score", "Run signature scoring", show_sample_progress = FALSE),
         tool_panel("Differential expression", status, "Use pseudobulk DESeq2 when independent biological samples are available; one-sample projects instead offer exploratory cell-level comparisons between annotated populations.", uiOutput("scrna_differential_settings_ui"), "run_scrna_differential", "Run differential expression", show_sample_progress = FALSE),
@@ -13410,7 +13500,7 @@ server <- function(input, output, session) {
     jobs <- job_history(p)
     recorded_reference <- ""
     if (NROW(jobs) && all(c("step", "reference") %in% names(jobs))) {
-      refs <- as.character(jobs$reference[canonical_job_step(jobs$step) == canonical_job_step("Cell Ranger count")])
+      refs <- as.character(jobs$reference[canonical_job_step(jobs$step) == canonical_job_step("Alignment & counting")])
       refs <- refs[nzchar(refs)]
       if (length(refs)) recorded_reference <- tail(refs, 1)
     }
@@ -14288,11 +14378,14 @@ server <- function(input, output, session) {
     )
   }
   observeEvent(input$run_scrna_inspect, submit_scrna_stage("inspect"), ignoreInit = TRUE)
+  observeEvent(input$scrna_show_rebuild_steps, {
+    run_cards_refresh(Sys.time())
+  }, ignoreInit = TRUE)
   observeEvent(input$run_scrna_cellranger, {
     p <- current_project()
     samples <- input$scrna_cellranger_samples %||% character(0)
     run_submission(
-      "Cell Ranger count",
+      "Alignment & counting",
       submit_scrna_cellranger_jobs(p, input$scrna_cellranger_reference %||% "", input$scrna_cellranger_expected_cells %||% 0, samples),
       "CellRanger/9.0.1",
       samples = samples
