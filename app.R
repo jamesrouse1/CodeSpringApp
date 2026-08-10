@@ -3148,7 +3148,7 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
       status = mapply(status_one, stages, marker, USE.NAMES = FALSE),
       path = c(file.path(out_dir, "tables", "input_processing_detected.tsv"), file.path(out_dir, "tables", "qc_summary_by_sample.tsv"), file.path(out_dir, "tables", "pca_variance_explained.tsv"), file.path(out_dir, "checkpoints"), file.path(out_dir, "objects"), file.path(out_dir, "tables", "signature_scores_summary.tsv"), file.path(out_dir, "tables", "pseudobulk_differential_expression.tsv"), file.path(out_dir, "tables", "pathway_fgsea_ranked.tsv")),
       input = c(project$scrna_engine %||% "auto", "", "", "", "", "", "", ""),
-      detail = c(source_details, "Scores named gene sets on normalized expression and stores them as cell metadata", "Uses sample-level pseudobulk DESeq2 for primary inference; cell-level Wilcoxon is exploratory", "Runs ranked fgsea from the pseudobulk Wald statistic and a supplied GMT"),
+      detail = c(source_details, "Scores named gene sets on normalized expression and stores them as cell metadata", "Uses sample-level pseudobulk DESeq2 for primary inference; cell-level Wilcoxon is exploratory", "Runs ranked fgsea from the pseudobulk Wald statistic and a selected pathway database"),
       stringsAsFactors = FALSE
     )
     raw$status[raw$step %in% names(active_states)] <- "Active"
@@ -8859,7 +8859,7 @@ write_scrna_manual_gene_sets <- function(project, entries, set_column, directory
   normalizePath(path, winslash = "/", mustWork = TRUE)
 }
 
-submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto", normalization = "auto", integration = "auto", batch_column = "batch", cluster_resolution = 0.6, min_features = 200, min_counts = 0, max_features = 0, max_percent_mt = 20, min_cells_per_gene = 3, n_pcs = 30, n_neighbors = 15, umap_min_dist = 0.5, umap_spread = 1, umap_metric = "euclidean", umap_init_pos = "spectral", doublet_method = "auto", doublet_rate = 0.05, remove_doublets = TRUE, seed = 1234, scvi_max_epochs = 400, marker_file = "", celltype_file = "", marker_upload = NULL, celltype_upload = NULL, marker_source = "server", celltype_source = "server", marker_manual = list(), annotation_name = "cell_type", signature_file = "", signature_upload = NULL, signature_source = "server", signature_manual = list(), de_group_column = "condition", de_reference = "", de_comparison = "", de_annotation_column = "", de_annotation_values = "all", de_method = "both", de_covariates = character(0), pathway_gmt_file = "", pathway_gmt_upload = NULL, pathway_source = "server") {
+submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto", normalization = "auto", integration = "auto", batch_column = "batch", cluster_resolution = 0.6, min_features = 200, min_counts = 0, max_features = 0, max_percent_mt = 20, min_cells_per_gene = 3, n_pcs = 30, n_neighbors = 15, umap_min_dist = 0.5, umap_spread = 1, umap_metric = "euclidean", umap_init_pos = "spectral", doublet_method = "auto", doublet_rate = 0.05, remove_doublets = TRUE, seed = 1234, scvi_max_epochs = 400, marker_file = "", celltype_file = "", marker_upload = NULL, celltype_upload = NULL, marker_source = "server", celltype_source = "server", marker_manual = list(), annotation_name = "cell_type", signature_file = "", signature_upload = NULL, signature_source = "server", signature_manual = list(), de_group_column = "condition", de_reference = "", de_comparison = "", de_annotation_column = "", de_annotation_values = "all", de_method = "both", de_covariates = character(0), pathway_library = "MSigDB_Hallmark_2020", pathway_gmt_file = "", pathway_gmt_upload = NULL, pathway_source = "server") {
   stage <- tolower(trimws(as.character(stage %||% "inspect")))
   step_label <- tryCatch(scrna_stage_step(stage), error = function(e) "")
   if (!is_scrna_project(project)) return(record_preflight_failure(project, step_label %||% "scRNA processing", "This is not an scRNA-seq project.", "scrna"))
@@ -8924,6 +8924,7 @@ submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto
   marker_file <- trimws(as.character(marker_file %||% ""))
   celltype_file <- trimws(as.character(celltype_file %||% ""))
   signature_file <- trimws(as.character(signature_file %||% ""))
+  pathway_library <- trimws(as.character(pathway_library %||% "MSigDB_Hallmark_2020"))
   pathway_gmt_file <- trimws(as.character(pathway_gmt_file %||% ""))
   annotation_name <- gsub("[^A-Za-z0-9_]+", "_", trimws(as.character(annotation_name %||% "cell_type")))
   annotation_name <- gsub("^_+|_+$", "", annotation_name)
@@ -8973,7 +8974,7 @@ submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto
     if (!nzchar(de_group_column) || !nzchar(de_reference) || !nzchar(de_comparison) || identical(de_reference, de_comparison)) return(record_preflight_failure(project, step_label, "Choose a sample-level comparison field and two different groups.", "scrna"))
     if (!de_method %in% c("both", "pseudobulk", "cell", "cell_level")) de_method <- "both"
   }
-  if (identical(stage, "pathway") && !nzchar(pathway_gmt_file)) return(record_preflight_failure(project, step_label, "Choose a GMT gene-set collection for ranked pathway analysis.", "scrna"))
+  if (identical(stage, "pathway") && !pathway_library %in% GSEAPY_GENESET_OPTIONS) return(record_preflight_failure(project, step_label, "Choose a pathway database from the available list.", "scrna"))
   if (identical(stage, "pathway") && !file.exists(file.path(project$data_dir, "scrna", "tables", "pseudobulk_differential_expression.tsv"))) return(record_preflight_failure(project, step_label, "Complete sample-level pseudobulk differential expression before ranked pathway analysis.", "scrna"))
   out_dir <- file.path(project$data_dir, "scrna")
   params_path <- file.path(project$data_dir, "manifest", "scrna_parameters.tsv")
@@ -8987,8 +8988,8 @@ submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto
     return(record_preflight_failure(project, "scRNA processing", paste0("Doublet method '", doublet_method, "' is not compatible with the ", resolved_engine, " engine. Choose ", paste(allowed_doublet, collapse = ", "), "."), "scrna"))
   }
   params <- data.frame(
-    key = c("normalization", "integration", "batch_column", "cluster_resolution", "min_features", "min_counts", "max_features", "max_percent_mt", "n_pcs", "n_neighbors", "umap_min_dist", "umap_spread", "umap_metric", "umap_init_pos", "min_cells_per_gene", "doublet_method", "doublet_rate", "remove_doublets", "marker_file", "celltype_file", "annotation_name", "signature_file", "de_group_column", "de_reference", "de_comparison", "de_annotation_column", "de_annotation_values", "de_method", "de_covariates", "pathway_gmt_file", "seed", "scvi_max_epochs"),
-    value = as.character(c(normalization, integration, batch_column, checked$cluster_resolution, checked$min_features, checked$min_counts, checked$max_features, checked$max_percent_mt, checked$n_pcs, checked$n_neighbors, checked$umap_min_dist, checked$umap_spread, umap_metric, umap_init_pos, checked$min_cells_per_gene, doublet_method, checked$doublet_rate, isTRUE(remove_doublets), marker_file, celltype_file, annotation_name, signature_file, de_group_column, de_reference, de_comparison, de_annotation_column, paste(unique(as.character(de_annotation_values %||% "all")), collapse = "||"), de_method, paste(unique(as.character(de_covariates %||% character(0))), collapse = ","), pathway_gmt_file, checked$seed, checked$scvi_max_epochs)),
+    key = c("normalization", "integration", "batch_column", "cluster_resolution", "min_features", "min_counts", "max_features", "max_percent_mt", "n_pcs", "n_neighbors", "umap_min_dist", "umap_spread", "umap_metric", "umap_init_pos", "min_cells_per_gene", "doublet_method", "doublet_rate", "remove_doublets", "marker_file", "celltype_file", "annotation_name", "signature_file", "de_group_column", "de_reference", "de_comparison", "de_annotation_column", "de_annotation_values", "de_method", "de_covariates", "pathway_library", "pathway_species", "pathway_gmt_file", "seed", "scvi_max_epochs"),
+    value = as.character(c(normalization, integration, batch_column, checked$cluster_resolution, checked$min_features, checked$min_counts, checked$max_features, checked$max_percent_mt, checked$n_pcs, checked$n_neighbors, checked$umap_min_dist, checked$umap_spread, umap_metric, umap_init_pos, checked$min_cells_per_gene, doublet_method, checked$doublet_rate, isTRUE(remove_doublets), marker_file, celltype_file, annotation_name, signature_file, de_group_column, de_reference, de_comparison, de_annotation_column, paste(unique(as.character(de_annotation_values %||% "all")), collapse = "||"), de_method, paste(unique(as.character(de_covariates %||% character(0))), collapse = ","), pathway_library, genome_species(project), pathway_gmt_file, checked$seed, checked$scvi_max_epochs)),
     stringsAsFactors = FALSE
   )
   # Keep the copied, editable project manifest normalized immediately before
@@ -9627,7 +9628,7 @@ run_step_meta <- function(project = NULL) {
       "Add a named annotation metadata field, calculate cluster markers, and write exact composition tables.",
       "Score named gene signatures on normalized expression and retain the scores in the processed object.",
       "Run sample-level pseudobulk DESeq2 and optional exploratory cell-level Wilcoxon testing.",
-      "Run ranked fgseaMultilevel from the pseudobulk Wald statistic and a supplied GMT collection."
+      "Run ranked fgseaMultilevel from the pseudobulk Wald statistic and a selected pathway database."
     )
   } else if (!is.null(project) && isTRUE(project$counts_only)) {
     c(
@@ -12726,7 +12727,7 @@ server <- function(input, output, session) {
         tool_panel("Annotate & markers", status, "Use the project's saved post-UMAP object, add a named annotation metadata field, and immediately write exact composition tables.", uiOutput("scrna_annotation_settings_ui"), "run_scrna_annotate", "Run annotation & markers", show_sample_progress = FALSE),
         tool_panel("Signature scoring", status, "Score one or more named gene signatures on normalized expression and store every score as reusable cell metadata in the processed object.", uiOutput("scrna_signature_settings_ui"), "run_scrna_score", "Run signature scoring", show_sample_progress = FALSE),
         tool_panel("Differential expression", status, "Run sample-level pseudobulk DESeq2 for primary inference and, when requested, an exploratory cell-level Wilcoxon comparison.", uiOutput("scrna_differential_settings_ui"), "run_scrna_differential", "Run differential expression", show_sample_progress = FALSE),
-        tool_panel("Pathway analysis", status, "Run ranked fgsea on the pseudobulk DESeq2 Wald statistic using a supplied GMT gene-set collection.", uiOutput("scrna_pathway_settings_ui"), "run_scrna_pathway", "Run pathway analysis", show_sample_progress = FALSE)
+        tool_panel("Pathway analysis", status, "Choose a pathway database and run ranked fgsea on the pseudobulk DESeq2 Wald statistic.", uiOutput("scrna_pathway_settings_ui"), "run_scrna_pathway", "Run pathway analysis", show_sample_progress = FALSE)
       ))
     }
     if (is_chip_project(p)) {
@@ -13353,11 +13354,11 @@ server <- function(input, output, session) {
 
   output$scrna_pathway_settings_ui <- renderUI({
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
+    selected_library <- selected_choice(isolate(input$scrna_pathway_library), GSEAPY_GENESET_OPTIONS, "MSigDB_Hallmark_2020")
     tagList(
       div(class = "read-source-note", tags$strong("Ranked pathway analysis"), tags$p("Uses the full pseudobulk DESeq2 Wald-statistic ranking with fgseaMultilevel. This avoids choosing an arbitrary DEG cutoff and preserves direction.")),
-      radioButtons("scrna_pathway_source", "GMT source", choices = c("Browse or paste a server path" = "server", "Upload from laptop" = "upload"), selected = input$scrna_pathway_source %||% "server", inline = TRUE),
-      conditionalPanel("input.scrna_pathway_source == 'server'", div(class = "new-project-path-control", textInput("scrna_pathway_gmt_file", "Gene-set collection (GMT)", value = input$scrna_pathway_gmt_file %||% "", placeholder = "Absolute server path to a .gmt file"), actionButton("browse_scrna_pathway_gmt_file", "Browse server", class = "btn-default"))),
-      conditionalPanel("input.scrna_pathway_source == 'upload'", fileInput("scrna_pathway_gmt_upload", "GMT from laptop", accept = c(".gmt", ".txt")))
+      selectInput("scrna_pathway_library", "Pathway database", choices = GSEAPY_GENESET_OPTIONS, selected = selected_library, selectize = FALSE),
+      tags$p(class = "muted small-note", "The selected database is downloaded and cached automatically for the job. Mouse gene ranks are converted to human ortholog symbols before testing these pathway collections; the mapping and database source are saved with the results.")
     )
   })
 
@@ -13836,9 +13837,10 @@ server <- function(input, output, session) {
         de_annotation_values = input$scrna_de_annotation_values %||% "all",
         de_method = input$scrna_de_method %||% "both",
         de_covariates = input$scrna_de_covariates %||% character(0),
-        pathway_gmt_file = input$scrna_pathway_gmt_file %||% "",
-        pathway_gmt_upload = input$scrna_pathway_gmt_upload,
-        pathway_source = input$scrna_pathway_source %||% "server"
+        pathway_library = input$scrna_pathway_library %||% "MSigDB_Hallmark_2020",
+        pathway_gmt_file = "",
+        pathway_gmt_upload = NULL,
+        pathway_source = "server"
       ),
       paste("single-cell", tolower(label))
     )
