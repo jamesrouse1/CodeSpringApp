@@ -38,8 +38,18 @@ assert(
 assert(
   !app_env$scrna_uses_input_manifest(list(analysis_key = "scrna", scrna_input_mode = "single")) &&
     app_env$scrna_uses_input_manifest(list(analysis_key = "scrna", scrna_input_mode = "multiple")) &&
-    grepl("One input — no manifest", app_text, fixed = TRUE),
+    grepl("Multiple filtered matrices", app_text, fixed = TRUE) &&
+    grepl("new_scrna_inputs_table", app_text, fixed = TRUE) &&
+    grepl("Create it in the app", app_text, fixed = TRUE),
   "single-input scRNA projects keep their internal manifest hidden and reveal it only for multi-input or integration workflows"
+)
+assert(
+  grepl("scrna_preintegration_umap_ui", app_text, fixed = TRUE) &&
+    grepl("02_preintegration_umap_", app_text, fixed = TRUE) &&
+    grepl("scrna_harmony_theta", app_text, fixed = TRUE) &&
+    grepl("scrna_harmony_lambda", app_text, fixed = TRUE) &&
+    grepl("scrna_harmony_max_iter", app_text, fixed = TRUE),
+  "single-cell integration displays the uncorrected UMAP and records reproducible Harmony controls"
 )
 assert(
   grepl('NODE_HOST="$(hostname -s', launcher_text, fixed = TRUE) &&

@@ -8794,10 +8794,9 @@ scrna_engine_for_manifest <- function(project, requested = "auto") {
   has_rds <- any(grepl("\\.rds$", paths))
   has_h5ad <- any(grepl("\\.h5ad$", paths))
   if (has_rds && has_h5ad) stop("Do not mix Seurat .rds and Scanpy .h5ad inputs in one run. Process them separately or begin from filtered 10x matrices.")
-  # Filtered 10x folders are raw-count inputs supported directly by Scanpy.
-  # Make that the automatic default so the displayed QC/doublet controls and
-  # the submitted runner always agree.
-  if (identical(requested, "auto")) return(if (has_rds) "seurat" else "scanpy")
+  # Preserve the expected native engine for processed objects. Raw filtered
+  # matrices default to Seurat, while H5AD remains a Scanpy input.
+  if (identical(requested, "auto")) return(if (has_h5ad) "scanpy" else "seurat")
   if (identical(requested, "seurat") && has_h5ad) stop("Scanpy .h5ad input requires the Scanpy engine. Use automatic selection or choose Scanpy.")
   if (identical(requested, "scanpy") && has_rds) stop("Seurat .rds input requires the Seurat engine. Use automatic selection or choose Seurat.")
   requested
@@ -8859,7 +8858,7 @@ write_scrna_manual_gene_sets <- function(project, entries, set_column, directory
   normalizePath(path, winslash = "/", mustWork = TRUE)
 }
 
-submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto", normalization = "auto", integration = "auto", batch_column = "batch", cluster_resolution = 0.6, min_features = 200, min_counts = 0, max_features = 0, max_percent_mt = 20, min_cells_per_gene = 3, n_pcs = 30, n_neighbors = 15, umap_min_dist = 0.5, umap_spread = 1, umap_metric = "euclidean", umap_init_pos = "spectral", doublet_method = "auto", doublet_rate = 0.05, remove_doublets = TRUE, seed = 1234, scvi_max_epochs = 400, marker_file = "", celltype_file = "", marker_upload = NULL, celltype_upload = NULL, marker_source = "server", celltype_source = "server", marker_manual = list(), annotation_name = "cell_type", signature_file = "", signature_upload = NULL, signature_source = "server", signature_manual = list(), de_group_column = "condition", de_reference = "", de_comparison = "", de_annotation_column = "", de_annotation_values = "all", de_method = "both", de_covariates = character(0), pathway_library = "MSigDB_Hallmark_2020", pathway_gmt_file = "", pathway_gmt_upload = NULL, pathway_source = "server") {
+submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto", normalization = "auto", integration = "auto", batch_column = "batch", cluster_resolution = 0.6, min_features = 200, min_counts = 0, max_features = 0, max_percent_mt = 20, min_cells_per_gene = 3, n_pcs = 30, n_neighbors = 15, umap_min_dist = 0.5, umap_spread = 1, umap_metric = "euclidean", umap_init_pos = "spectral", doublet_method = "auto", doublet_rate = 0.05, remove_doublets = TRUE, seed = 1234, scvi_max_epochs = 400, harmony_theta = 2, harmony_lambda = 1, harmony_max_iter = 20, marker_file = "", celltype_file = "", marker_upload = NULL, celltype_upload = NULL, marker_source = "server", celltype_source = "server", marker_manual = list(), annotation_name = "cell_type", signature_file = "", signature_upload = NULL, signature_source = "server", signature_manual = list(), de_group_column = "condition", de_reference = "", de_comparison = "", de_annotation_column = "", de_annotation_values = "all", de_method = "both", de_covariates = character(0), pathway_library = "MSigDB_Hallmark_2020", pathway_gmt_file = "", pathway_gmt_upload = NULL, pathway_source = "server") {
   stage <- tolower(trimws(as.character(stage %||% "inspect")))
   step_label <- tryCatch(scrna_stage_step(stage), error = function(e) "")
   if (!is_scrna_project(project)) return(record_preflight_failure(project, step_label %||% "scRNA processing", "This is not an scRNA-seq project.", "scrna"))
@@ -8901,7 +8900,10 @@ submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto
     umap_spread = numeric_setting(umap_spread, "UMAP spread", 0.1, 10),
     doublet_rate = numeric_setting(doublet_rate, "Expected doublet rate", 0, 0.5),
     seed = numeric_setting(seed, "Random seed", 1, .Machine$integer.max, TRUE),
-    scvi_max_epochs = numeric_setting(scvi_max_epochs, "Maximum scVI epochs", 10, 5000, TRUE)
+    scvi_max_epochs = numeric_setting(scvi_max_epochs, "Maximum scVI epochs", 10, 5000, TRUE),
+    harmony_theta = numeric_setting(harmony_theta, "Harmony theta", 0, 20),
+    harmony_lambda = numeric_setting(harmony_lambda, "Harmony lambda", 0.001, 20),
+    harmony_max_iter = numeric_setting(harmony_max_iter, "Maximum Harmony iterations", 1, 100, TRUE)
   ), error = function(e) e)
   if (inherits(checked, "error")) return(record_preflight_failure(project, step_label, conditionMessage(checked), "scrna"))
   if (checked$max_features > 0 && checked$max_features <= checked$min_features) {
@@ -8915,7 +8917,7 @@ submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto
   umap_init_pos <- tolower(trimws(umap_init_pos %||% "spectral"))
   if (!umap_init_pos %in% c("spectral", "random")) return(record_preflight_failure(project, step_label, "Choose spectral or random UMAP initialization.", "scrna"))
   integration <- tolower(integration %||% "auto")
-  allowed_integration <- if (identical(resolved_engine, "seurat")) c("auto", "none", "rpca", "cca") else c("auto", "none", "scvi", "harmony")
+  allowed_integration <- if (identical(resolved_engine, "seurat")) c("auto", "none", "rpca", "cca", "harmony") else c("auto", "none", "scvi", "harmony")
   if (!integration %in% allowed_integration) integration <- "auto"
   batch_column <- trimws(as.character(batch_column %||% ""))
   if (identical(stage, "cluster") && !nzchar(batch_column) && integration %in% setdiff(allowed_integration, c("auto", "none"))) {
@@ -9000,8 +9002,8 @@ submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto
     return(record_preflight_failure(project, "scRNA processing", paste0("Doublet method '", doublet_method, "' is not compatible with the ", resolved_engine, " engine. Choose ", paste(allowed_doublet, collapse = ", "), "."), "scrna"))
   }
   params <- data.frame(
-    key = c("normalization", "integration", "batch_column", "cluster_resolution", "min_features", "min_counts", "max_features", "max_percent_mt", "n_pcs", "n_neighbors", "umap_min_dist", "umap_spread", "umap_metric", "umap_init_pos", "min_cells_per_gene", "doublet_method", "doublet_rate", "remove_doublets", "marker_file", "celltype_file", "annotation_name", "signature_file", "de_group_column", "de_reference", "de_comparison", "de_annotation_column", "de_annotation_values", "de_method", "de_covariates", "pathway_library", "pathway_species", "pathway_gmt_file", "seed", "scvi_max_epochs"),
-    value = as.character(c(normalization, integration, batch_column, checked$cluster_resolution, checked$min_features, checked$min_counts, checked$max_features, checked$max_percent_mt, checked$n_pcs, checked$n_neighbors, checked$umap_min_dist, checked$umap_spread, umap_metric, umap_init_pos, checked$min_cells_per_gene, doublet_method, checked$doublet_rate, isTRUE(remove_doublets), marker_file, celltype_file, annotation_name, signature_file, de_group_column, de_reference, de_comparison, de_annotation_column, paste(unique(as.character(de_annotation_values %||% "all")), collapse = "||"), de_method, paste(unique(as.character(de_covariates %||% character(0))), collapse = ","), pathway_library, genome_species(project), pathway_gmt_file, checked$seed, checked$scvi_max_epochs)),
+    key = c("normalization", "integration", "batch_column", "cluster_resolution", "min_features", "min_counts", "max_features", "max_percent_mt", "n_pcs", "n_neighbors", "umap_min_dist", "umap_spread", "umap_metric", "umap_init_pos", "min_cells_per_gene", "doublet_method", "doublet_rate", "remove_doublets", "marker_file", "celltype_file", "annotation_name", "signature_file", "de_group_column", "de_reference", "de_comparison", "de_annotation_column", "de_annotation_values", "de_method", "de_covariates", "pathway_library", "pathway_species", "pathway_gmt_file", "seed", "scvi_max_epochs", "harmony_theta", "harmony_lambda", "harmony_max_iter"),
+    value = as.character(c(normalization, integration, batch_column, checked$cluster_resolution, checked$min_features, checked$min_counts, checked$max_features, checked$max_percent_mt, checked$n_pcs, checked$n_neighbors, checked$umap_min_dist, checked$umap_spread, umap_metric, umap_init_pos, checked$min_cells_per_gene, doublet_method, checked$doublet_rate, isTRUE(remove_doublets), marker_file, celltype_file, annotation_name, signature_file, de_group_column, de_reference, de_comparison, de_annotation_column, paste(unique(as.character(de_annotation_values %||% "all")), collapse = "||"), de_method, paste(unique(as.character(de_covariates %||% character(0))), collapse = ","), pathway_library, genome_species(project), pathway_gmt_file, checked$seed, checked$scvi_max_epochs, checked$harmony_theta, checked$harmony_lambda, checked$harmony_max_iter)),
     stringsAsFactors = FALSE
   )
   # Keep the copied, editable project manifest normalized immediately before
@@ -11410,6 +11412,12 @@ server <- function(input, output, session) {
   path_browser <- reactiveValues(target = "", mode = "dir", path = CURRENT_HOME, selected_file = "", message = "")
   project_selection <- reactiveValues(rna = "", scrna = "", cutrun = "", atac = "", chip = "")
   new_fastq_folders <- reactiveVal(character(0))
+  new_scrna_inputs <- reactiveVal(data.frame(
+    sample_id = character(0), input_path = character(0), condition = character(0),
+    donor = character(0), technical_batch = character(0), stringsAsFactors = FALSE,
+    check.names = FALSE
+  ))
+  new_scrna_input_message <- reactiveVal("")
 
   new_project_input_values <- function() {
     values <- reactiveValuesToList(input)
@@ -11760,6 +11768,64 @@ server <- function(input, output, session) {
     mode <- if (identical(input$new_scrna_input_location_type %||% "file", "dir")) "dir" else "file"
     open_server_browser("new_scrna_input_path", mode, input$new_scrna_input_path %||% "")
   })
+  observeEvent(input$browse_new_scrna_matrix_path, {
+    open_server_browser("new_scrna_matrix_path", "dir", input$new_scrna_matrix_path %||% "")
+  })
+
+  observeEvent(input$add_new_scrna_input, {
+    raw_name <- trimws(input$new_scrna_sample_name %||% "")
+    path <- normalizePath(path.expand(trimws(input$new_scrna_matrix_path %||% "")), winslash = "/", mustWork = FALSE)
+    if (!nzchar(raw_name)) {
+      new_scrna_input_message("Enter a sample name before adding this matrix.")
+      return()
+    }
+    sample_id <- clean_name(raw_name, "sample")
+    candidate <- data.frame(sample_id = sample_id, input_path = path, condition = "", donor = "", technical_batch = "", stringsAsFactors = FALSE, check.names = FALSE)
+    checked <- tryCatch(validate_scrna_manifest(candidate), error = function(e) e)
+    if (inherits(checked, "error")) {
+      new_scrna_input_message(conditionMessage(checked))
+      return()
+    }
+    current <- new_scrna_inputs()
+    if (sample_id %in% current$sample_id) {
+      new_scrna_input_message(paste0("Sample name already exists: ", sample_id, ". Choose a unique name."))
+      return()
+    }
+    new_scrna_inputs(rbind(current, checked[, names(current), drop = FALSE]))
+    new_scrna_input_message(paste0("Added ", sample_id, ". Add the next matrix or edit its metadata below."))
+    updateTextInput(session, "new_scrna_sample_name", value = "")
+    updateTextInput(session, "new_scrna_matrix_path", value = "")
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$remove_last_new_scrna_input, {
+    current <- new_scrna_inputs()
+    if (!NROW(current)) return()
+    removed <- current$sample_id[[NROW(current)]]
+    new_scrna_inputs(current[-NROW(current), , drop = FALSE])
+    new_scrna_input_message(paste("Removed", removed))
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$clear_new_scrna_inputs, {
+    current <- new_scrna_inputs()
+    new_scrna_inputs(current[0, , drop = FALSE])
+    new_scrna_input_message("Cleared the in-app sample table.")
+  }, ignoreInit = TRUE)
+
+  output$new_scrna_input_status <- renderText(new_scrna_input_message())
+  output$new_scrna_inputs_table <- render_csl_table({
+    new_scrna_inputs()
+  }, page_length = 50, editable = TRUE, scroll_y = "360px")
+
+  observeEvent(input$new_scrna_inputs_table_cell_edit, {
+    info <- input$new_scrna_inputs_table_cell_edit
+    current <- new_scrna_inputs()
+    if (!NROW(current) || is.null(info$row) || is.null(info$col)) return()
+    row <- as.integer(info$row); col <- as.integer(info$col) + 1L
+    if (is.na(row) || is.na(col) || row < 1L || row > NROW(current) || col < 1L || col > NCOL(current)) return()
+    current[[col]][row] <- trimws(as.character(info$value %||% ""))
+    new_scrna_inputs(current)
+    new_scrna_input_message("Sample table updated. It will be validated when the project is created.")
+  }, ignoreInit = TRUE)
   observeEvent(input$browse_scrna_marker_file, {
     open_server_browser("scrna_marker_file", "file", input$scrna_marker_file %||% "")
   })
@@ -11923,9 +11989,9 @@ server <- function(input, output, session) {
         "input.new_project_mode == 'new' && input.new_project_analysis == 'scRNA-seq'",
         div(class = "read-source-note",
             tags$strong("Data and output locations"),
-            tags$p("For one object, choose its data location and run directly. Choose a manifest only when combining multiple inputs or integrating samples."),
+            tags$p("For multiple filtered matrices, add each folder and sample name below, then build the sample design directly in the app. For one processed object or one matrix, choose the single-input option."),
             tags$p("All heavy processing is submitted to SLURM. The app remains responsive and shows the workflow as In progress while the HPC job runs.")),
-        radioButtons("new_scrna_setup_mode", "Input setup", choices = c("One input — no manifest" = "single", "Multiple inputs or integration — use a manifest" = "multiple"), selected = "single", inline = TRUE),
+        radioButtons("new_scrna_setup_mode", "Input setup", choices = c("Multiple filtered matrices" = "multiple", "One object or matrix" = "single"), selected = "multiple", inline = TRUE),
         conditionalPanel("input.new_scrna_setup_mode == 'single'",
           radioButtons("new_scrna_input_source", "Data location", choices = c("Browse or paste a server path" = "server", "Upload one Seurat/Scanpy object from laptop" = "upload"), selected = "server", inline = TRUE),
           conditionalPanel("input.new_scrna_input_source == 'server'",
@@ -11941,7 +12007,25 @@ server <- function(input, output, session) {
           textInput("new_scrna_sample_id", "Sample name", value = "", placeholder = "For example: AH07_uPAR_F")
         ),
         conditionalPanel("input.new_scrna_setup_mode == 'multiple'",
-          radioButtons("new_scrna_manifest_source", "Input manifest location", choices = c("Browse or paste a server path" = "server", "Upload a manifest from laptop" = "upload"), selected = "server", inline = TRUE),
+          radioButtons("new_scrna_manifest_source", "Build the sample design", choices = c("Create it in the app" = "build", "Use a server manifest" = "server", "Upload a manifest" = "upload"), selected = "build", inline = TRUE),
+          conditionalPanel("input.new_scrna_manifest_source == 'build'",
+            div(class = "read-source-note",
+              tags$strong("Add one filtered matrix per sample"),
+              tags$p("Choose a filtered feature-barcode matrix folder and give it the sample name you want used throughout the analysis. Repeat for every sample, then edit condition, donor, and technical batch directly in the table.")),
+            div(class = "new-project-path-control",
+              textInput("new_scrna_matrix_path", "Filtered matrix folder", value = "", placeholder = "Absolute path containing matrix.mtx, features.tsv, and barcodes.tsv"),
+              actionButton("browse_new_scrna_matrix_path", "Browse server", class = "btn-default")
+            ),
+            textInput("new_scrna_sample_name", "Sample name for this folder", value = "", placeholder = "e.g. young_control_1"),
+            div(class = "button-row",
+              actionButton("add_new_scrna_input", "Add sample", class = "btn-primary"),
+              actionButton("remove_last_new_scrna_input", "Remove last", class = "btn-default"),
+              actionButton("clear_new_scrna_inputs", "Clear table", class = "btn-default")
+            ),
+            textOutput("new_scrna_input_status"),
+            table_output("new_scrna_inputs_table"),
+            tags$p(class = "muted small-note", "All cells are editable. Use technical_batch only for library, capture, lane, or sequencing-run effects—not for the biological condition.")
+          ),
           conditionalPanel("input.new_scrna_manifest_source == 'server'",
             div(class = "new-project-path-control",
                 textInput("new_scrna_manifest_path", "Server manifest path", value = "", placeholder = "Absolute server path to samples.tsv"),
@@ -11950,10 +12034,10 @@ server <- function(input, output, session) {
           conditionalPanel("input.new_scrna_manifest_source == 'upload'",
             fileInput("new_scrna_manifest_upload", "Manifest from laptop", accept = c(".tsv", ".txt"))
           ),
-          tags$p(class = "muted small-note", "The manifest must contain sample_id and input_path columns. Add condition, donor, or technical_batch columns only when they are available.")
+          conditionalPanel("input.new_scrna_manifest_source != 'build'", tags$p(class = "muted small-note", "Imported manifests must contain sample_id and input_path columns. Add condition, donor, or technical_batch columns only when they are available."))
         ),
         scrna_results_location_control,
-        tags$p(class = "muted small-note", "The analysis engine is fixed automatically when this project is created: Scanpy for H5AD or filtered 10x input, and Seurat for RDS input. The Run Pipeline will show only compatible options. Cell-type annotation files are selected at the annotation step.")
+        tags$p(class = "muted small-note", "The analysis engine is fixed automatically when this project is created: Scanpy for H5AD, and Seurat for RDS or filtered 10x input. The Run Pipeline will show only compatible options. Cell-type annotation files are selected at the annotation step.")
       ),
       conditionalPanel(
         "input.new_project_mode == 'new' && input.new_project_analysis != 'scRNA-seq'",
@@ -12238,7 +12322,7 @@ server <- function(input, output, session) {
         )
       } else NULL
       return(tagList(
-        tags$p(class = "muted", "This is an input manifest, not a bulk-RNA design matrix. Each row identifies one single-cell input. Edit sample IDs or add optional condition, donor, and technical batch columns, then save before submitting the workflow."),
+        tags$p(class = "muted", "Each row represents one single-cell sample. Edit the sample name, filtered-matrix path, condition, donor, and technical batch directly in this design table, then save before submitting the workflow."),
         single_input_note
       ))
     }
@@ -12257,7 +12341,7 @@ server <- function(input, output, session) {
 
   output$design_editor_heading <- renderUI({
     if (is_scrna_project(current_project())) {
-      h3(if (scrna_uses_input_manifest(current_project())) "Single-cell Input Manifest" else "Single-cell Input")
+      h3(if (scrna_uses_input_manifest(current_project())) "Single-cell Sample Design" else "Single-cell Input")
     } else h3("Design Matrix Builder")
   })
 
@@ -12395,7 +12479,7 @@ server <- function(input, output, session) {
       if (is_scrna_project(p)) {
         setup_mode <- tolower(input$new_scrna_setup_mode %||% "single")
         input_source <- input$new_scrna_input_source %||% "server"
-        manifest_source_mode <- input$new_scrna_manifest_source %||% "server"
+        manifest_source_mode <- input$new_scrna_manifest_source %||% "build"
         input_path <- if (identical(setup_mode, "multiple")) {
           ""
         } else if (identical(input_source, "upload")) {
@@ -12408,7 +12492,7 @@ server <- function(input, output, session) {
         } else {
           input$new_scrna_input_path %||% ""
         }
-        manifest_source <- if (!identical(setup_mode, "multiple")) {
+        manifest_source <- if (!identical(setup_mode, "multiple") || identical(manifest_source_mode, "build")) {
           ""
         } else if (identical(manifest_source_mode, "upload")) {
           copy_uploaded_project_file(
@@ -12420,14 +12504,18 @@ server <- function(input, output, session) {
         } else {
           p$scrna_input_manifest %||% ""
         }
-        if (identical(setup_mode, "multiple") && !nzchar(manifest_source)) {
-          stop("Choose an input manifest for multiple inputs or integration.")
+        manifest <- if (identical(setup_mode, "multiple") && identical(manifest_source_mode, "build")) {
+          built <- new_scrna_inputs()
+          if (NROW(built) < 2L) {
+            stop("Add at least two filtered matrix folders and give each one a unique sample name.")
+          }
+          validate_scrna_manifest(built)
+        } else {
+          if (identical(setup_mode, "multiple") && !nzchar(manifest_source)) {
+            stop("Build the sample design in the app, or choose a readable sample-design file.")
+          }
+          scrna_manifest_from_setup(manifest_source, input$new_scrna_sample_id %||% "", input_path)
         }
-        manifest <- scrna_manifest_from_setup(
-          manifest_source,
-          input$new_scrna_sample_id %||% "",
-          input_path
-        )
         dir.create(dirname(p$design_matrix_path), recursive = TRUE, showWarnings = FALSE)
         utils::write.table(manifest, p$design_matrix_path, sep = "\t", row.names = FALSE, quote = FALSE)
         p$scrna_input_manifest <- p$design_matrix_path
@@ -12435,7 +12523,7 @@ server <- function(input, output, session) {
         # is known.  This prevents a later UI choice from mixing Seurat-only
         # and Scanpy-only parameters in the same analysis.
         p$scrna_engine <- scrna_engine_for_manifest(p, "auto")
-        counts_message <- paste0("Single-cell sample manifest: ", p$scrna_input_manifest, "\nInputs: ", NROW(manifest))
+        counts_message <- paste0("Single-cell sample design: ", p$scrna_input_manifest, "\nSamples: ", NROW(manifest))
       } else if (isTRUE(p$counts_only)) {
         counts_source_mode <- input$new_counts_source_mode %||% "upload"
         upload <- input$new_counts_file
@@ -12556,7 +12644,7 @@ server <- function(input, output, session) {
 
   observeEvent(current_project(), {
     p <- current_project()
-    updateActionButton(session, "save_design", label = if (is_scrna_project(p)) "Save single-cell manifest" else "Save design_matrix.txt")
+    updateActionButton(session, "save_design", label = if (is_scrna_project(p)) "Save sample design" else "Save design_matrix.txt")
     scrna_manifest_state(if (is_scrna_project(p)) scrna_manifest(p) else data.frame())
     metadata <- if (is_scrna_project(p) && NROW(scrna_manifest(p)) <= 1L) character(0) else default_metadata_cols(p)
     updateTextInput(session, "metadata_cols", value = paste(metadata, collapse = ", "))
@@ -12808,7 +12896,7 @@ server <- function(input, output, session) {
         tool_panel("Input inspection", status, "Validate the raw-count input, create an unfiltered QC preview, and report any existing analysis state only when the input is an RDS or H5AD object.", tagList(uiOutput("scrna_inspect_settings_ui"), uiOutput("scrna_input_state_ui"), tags$p(class = "muted small-note", "The input is read only. This first job creates the unfiltered QC plots used to choose filters; it does not change any cutoff fields.")), "run_scrna_inspect", "Inspect input & show QC plots", show_sample_progress = FALSE),
         tool_panel("QC & doublets", status, "Review the unfiltered QC plots below, choose biologically appropriate cutoffs, then filter cells and record predicted doublets.", tagList(uiOutput("scrna_pre_qc_plot_ui"), uiOutput("scrna_qc_settings_ui"), uiOutput("scrna_post_qc_plot_ui"), tags$p(class = "muted small-note", "The same applied cutoffs are drawn on the before- and after-filter plots. Doublet calls are saved whether or not predicted doublets are removed.")), "run_scrna_qc", "Run QC & doublets", show_sample_progress = FALSE),
         tool_panel("Normalize & PCA", status, "Normalize retained cells, identify variable genes, scale, and calculate PCA. PCA outputs appear here as soon as this step finishes.", tagList(uiOutput("scrna_preprocess_settings_ui"), uiOutput("scrna_pca_output_ui")), "run_scrna_preprocess", "Run normalization & PCA", show_sample_progress = FALSE),
-        tool_panel("UMAP & clustering", status, "For multiple inputs, optionally correct a technical batch first; then calculate neighbours, UMAP, and clusters. Review the UMAP preview here before annotation.", tagList(uiOutput("scrna_cluster_settings_ui"), uiOutput("scrna_umap_output_ui")), "run_scrna_cluster", "Run UMAP & clustering", show_sample_progress = FALSE),
+        tool_panel("UMAP & clustering", status, "Compare the uncorrected embedding first. For multiple inputs, optionally correct a technical batch; then calculate neighbours, UMAP, and clusters.", tagList(uiOutput("scrna_preintegration_umap_ui"), uiOutput("scrna_cluster_settings_ui"), uiOutput("scrna_umap_output_ui")), "run_scrna_cluster", "Run UMAP & clustering", show_sample_progress = FALSE),
         tool_panel("Annotate & markers", status, "Use the project's saved post-UMAP object, add a named annotation metadata field, and immediately write exact composition tables.", uiOutput("scrna_annotation_settings_ui"), "run_scrna_annotate", "Run annotation & markers", show_sample_progress = FALSE),
         tool_panel("Signature scoring", status, "Score one or more named gene signatures on normalized expression and store every score as reusable cell metadata in the processed object.", uiOutput("scrna_signature_settings_ui"), "run_scrna_score", "Run signature scoring", show_sample_progress = FALSE),
         tool_panel("Differential expression", status, "Use pseudobulk DESeq2 when independent biological samples are available; one-sample projects instead offer exploratory cell-level comparisons between annotated populations.", uiOutput("scrna_differential_settings_ui"), "run_scrna_differential", "Run differential expression", show_sample_progress = FALSE),
@@ -13077,7 +13165,7 @@ server <- function(input, output, session) {
     if (identical(scrna_ui_engine(), "seurat")) {
       list(
         normalization = c("Automatic (SCTransform v2)" = "auto", "SCTransform v2" = "sct", "LogNormalize" = "lognormalize"),
-        integration = c("Automatic (RPCA when a technical batch is selected)" = "auto", "No integration" = "none", "RPCA" = "rpca", "CCA" = "cca"),
+        integration = c("Automatic (RPCA when a technical batch is selected)" = "auto", "No integration" = "none", "RPCA (conservative)" = "rpca", "CCA (stronger correction)" = "cca", "Harmony" = "harmony"),
         doublets = c("Automatic (scDblFinder)" = "auto", "No doublet detection" = "none", "scDblFinder" = "scdblfinder")
       )
     } else {
@@ -13287,7 +13375,14 @@ server <- function(input, output, session) {
       integration_controls,
       umap_controls,
       numericInput("scrna_cluster_resolution", "Clustering resolution", value = input$scrna_cluster_resolution %||% 0.6, min = 0.05, max = 5, step = 0.05),
-      tags$details(tags$summary("Advanced clustering settings"), numericInput("scrna_seed", "Random seed", value = input$scrna_seed %||% 1234, min = 1, step = 1), if (identical(scrna_ui_engine(), "scanpy")) numericInput("scrna_scvi_max_epochs", "Maximum scVI training epochs", value = input$scrna_scvi_max_epochs %||% 400, min = 10, max = 5000, step = 50) else NULL),
+      tags$details(tags$summary("Advanced clustering and Harmony settings"),
+        numericInput("scrna_seed", "Random seed", value = input$scrna_seed %||% 1234, min = 1, step = 1),
+        numericInput("scrna_harmony_theta", "Harmony diversity penalty (theta)", value = input$scrna_harmony_theta %||% 2, min = 0, max = 20, step = 0.5),
+        numericInput("scrna_harmony_lambda", "Harmony correction penalty (lambda)", value = input$scrna_harmony_lambda %||% 1, min = 0.001, max = 20, step = 0.25),
+        numericInput("scrna_harmony_max_iter", "Maximum Harmony iterations", value = input$scrna_harmony_max_iter %||% 20, min = 1, max = 100, step = 1),
+        tags$p(class = "muted small-note", "Higher theta encourages stronger mixing across the selected technical batch. Higher lambda makes correction more conservative. Defaults are appropriate starting values."),
+        if (identical(scrna_ui_engine(), "scanpy")) numericInput("scrna_scvi_max_epochs", "Maximum scVI training epochs", value = input$scrna_scvi_max_epochs %||% 400, min = 10, max = 5000, step = 50) else NULL
+      ),
       uiOutput("scrna_recommendations_ui")
     )
   })
@@ -13920,6 +14015,9 @@ server <- function(input, output, session) {
         remove_doublets = isTRUE(input$scrna_remove_doublets),
         seed = input$scrna_seed %||% 1234,
         scvi_max_epochs = input$scrna_scvi_max_epochs %||% 400,
+        harmony_theta = input$scrna_harmony_theta %||% 2,
+        harmony_lambda = input$scrna_harmony_lambda %||% 1,
+        harmony_max_iter = input$scrna_harmony_max_iter %||% 20,
         marker_file = if (isTRUE(input$scrna_use_celltype_mapping)) "" else input$scrna_marker_file %||% "",
         celltype_file = if (isTRUE(input$scrna_use_celltype_mapping)) input$scrna_celltype_file %||% "" else "",
         marker_upload = if (isTRUE(input$scrna_use_celltype_mapping)) NULL else input$scrna_marker_upload,
@@ -14613,6 +14711,19 @@ server <- function(input, output, session) {
       tags$h4("PCA output"),
       tags$p(class = "muted small-note", paste0("Review variance explained and the PCA distribution by input sample before moving on to UMAP and clustering.", if (!is.na(recommended_pcs)) paste0(" The dashed line marks the suggested PCA elbow (", recommended_pcs, " PCs).") else "")),
       selectInput("scrna_pca_output", "PCA figure", choices = files, selected = selected, selectize = FALSE),
+      image_or_file_ui(selected, "760px")
+    )
+  })
+  output$scrna_preintegration_umap_ui <- renderUI({
+    progress_refresh()
+    p <- current_project(); if (!is_scrna_project(p)) return(NULL)
+    files <- scrna_result_file_choices(p, "^02_preintegration_umap_.*\\.png$")
+    if (!length(files)) return(div(class = "empty-box", "Run Normalize & PCA to generate the UMAP before integration. It will appear here before you choose a correction method."))
+    selected <- selected_choice(input$scrna_preintegration_umap, files, unname(files)[[1]])
+    tagList(
+      tags$h4("Before integration"),
+      tags$p(class = "muted small-note", "Uncorrected normalized expression. Compare this with the final UMAP to confirm that correction removes technical structure without erasing expected biology."),
+      selectInput("scrna_preintegration_umap", "Pre-integration view", choices = files, selected = selected, selectize = FALSE),
       image_or_file_ui(selected, "760px")
     )
   })
