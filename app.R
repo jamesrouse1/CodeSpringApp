@@ -8831,7 +8831,7 @@ scanpy_container_check <- function() {
   list(ready = TRUE, state = "Ready", path = container, detail = "All H5AD jobs use this shared, versioned Scanpy container. No per-user Python environment is created.")
 }
 
-submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto", normalization = "auto", integration = "auto", batch_column = "batch", cluster_resolution = 0.6, min_features = 200, min_counts = 0, max_features = 0, max_percent_mt = 20, min_cells_per_gene = 3, n_pcs = 30, n_neighbors = 15, umap_min_dist = 0.5, umap_spread = 1, umap_metric = "euclidean", umap_init_pos = "spectral", doublet_method = "auto", doublet_rate = 0.05, remove_doublets = TRUE, seed = 1234, scvi_max_epochs = 400, marker_file = "", celltype_file = "", marker_upload = NULL, celltype_upload = NULL, marker_source = "server", celltype_source = "server", annotation_name = "cell_type", signature_file = "", signature_upload = NULL, signature_source = "server", de_group_column = "condition", de_reference = "", de_comparison = "", de_annotation_column = "", de_annotation_value = "all", de_method = "both", de_covariates = character(0), pathway_gmt_file = "", pathway_gmt_upload = NULL, pathway_source = "server") {
+submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto", normalization = "auto", integration = "auto", batch_column = "batch", cluster_resolution = 0.6, min_features = 200, min_counts = 0, max_features = 0, max_percent_mt = 20, min_cells_per_gene = 3, n_pcs = 30, n_neighbors = 15, umap_min_dist = 0.5, umap_spread = 1, umap_metric = "euclidean", umap_init_pos = "spectral", doublet_method = "auto", doublet_rate = 0.05, remove_doublets = TRUE, seed = 1234, scvi_max_epochs = 400, marker_file = "", celltype_file = "", marker_upload = NULL, celltype_upload = NULL, marker_source = "server", celltype_source = "server", annotation_name = "cell_type", signature_file = "", signature_upload = NULL, signature_source = "server", de_group_column = "condition", de_reference = "", de_comparison = "", de_annotation_column = "", de_annotation_values = "all", de_method = "both", de_covariates = character(0), pathway_gmt_file = "", pathway_gmt_upload = NULL, pathway_source = "server") {
   stage <- tolower(trimws(as.character(stage %||% "inspect")))
   step_label <- tryCatch(scrna_stage_step(stage), error = function(e) "")
   if (!is_scrna_project(project)) return(record_preflight_failure(project, step_label %||% "scRNA processing", "This is not an scRNA-seq project.", "scrna"))
@@ -8941,8 +8941,8 @@ submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto
     return(record_preflight_failure(project, "scRNA processing", paste0("Doublet method '", doublet_method, "' is not compatible with the ", resolved_engine, " engine. Choose ", paste(allowed_doublet, collapse = ", "), "."), "scrna"))
   }
   params <- data.frame(
-    key = c("normalization", "integration", "batch_column", "cluster_resolution", "min_features", "min_counts", "max_features", "max_percent_mt", "n_pcs", "n_neighbors", "umap_min_dist", "umap_spread", "umap_metric", "umap_init_pos", "min_cells_per_gene", "doublet_method", "doublet_rate", "remove_doublets", "marker_file", "celltype_file", "annotation_name", "signature_file", "de_group_column", "de_reference", "de_comparison", "de_annotation_column", "de_annotation_value", "de_method", "de_covariates", "pathway_gmt_file", "seed", "scvi_max_epochs"),
-    value = as.character(c(normalization, integration, batch_column, checked$cluster_resolution, checked$min_features, checked$min_counts, checked$max_features, checked$max_percent_mt, checked$n_pcs, checked$n_neighbors, checked$umap_min_dist, checked$umap_spread, umap_metric, umap_init_pos, checked$min_cells_per_gene, doublet_method, checked$doublet_rate, isTRUE(remove_doublets), marker_file, celltype_file, annotation_name, signature_file, de_group_column, de_reference, de_comparison, de_annotation_column, de_annotation_value, de_method, paste(unique(as.character(de_covariates %||% character(0))), collapse = ","), pathway_gmt_file, checked$seed, checked$scvi_max_epochs)),
+    key = c("normalization", "integration", "batch_column", "cluster_resolution", "min_features", "min_counts", "max_features", "max_percent_mt", "n_pcs", "n_neighbors", "umap_min_dist", "umap_spread", "umap_metric", "umap_init_pos", "min_cells_per_gene", "doublet_method", "doublet_rate", "remove_doublets", "marker_file", "celltype_file", "annotation_name", "signature_file", "de_group_column", "de_reference", "de_comparison", "de_annotation_column", "de_annotation_values", "de_method", "de_covariates", "pathway_gmt_file", "seed", "scvi_max_epochs"),
+    value = as.character(c(normalization, integration, batch_column, checked$cluster_resolution, checked$min_features, checked$min_counts, checked$max_features, checked$max_percent_mt, checked$n_pcs, checked$n_neighbors, checked$umap_min_dist, checked$umap_spread, umap_metric, umap_init_pos, checked$min_cells_per_gene, doublet_method, checked$doublet_rate, isTRUE(remove_doublets), marker_file, celltype_file, annotation_name, signature_file, de_group_column, de_reference, de_comparison, de_annotation_column, paste(unique(as.character(de_annotation_values %||% "all")), collapse = "||"), de_method, paste(unique(as.character(de_covariates %||% character(0))), collapse = ","), pathway_gmt_file, checked$seed, checked$scvi_max_epochs)),
     stringsAsFactors = FALSE
   )
   # Keep the copied, editable project manifest normalized immediately before
@@ -9996,6 +9996,17 @@ scrna_result_file_choices <- function(project, pattern = "\\.(tsv|txt|csv|png|pd
   stats::setNames(files, labels)
 }
 
+scrna_de_result_file_choices <- function(project, method = c("pseudobulk", "cell")) {
+  method <- match.arg(method)
+  root <- file.path(scrna_output_dir(project), "differential_expression")
+  pattern <- if (identical(method, "pseudobulk")) "^pseudobulk_DESeq2__.*\\.tsv$" else "^cell_level_Wilcoxon__.*\\.tsv$"
+  files <- if (dir.exists(root)) list.files(root, pattern = pattern, recursive = TRUE, full.names = TRUE) else character(0)
+  files <- sort(files[file.exists(files) & vapply(files, file_size_for, numeric(1)) > 0])
+  if (!length(files)) return(character(0))
+  labels <- substring(normalizePath(files, winslash = "/", mustWork = FALSE), nchar(normalizePath(root, winslash = "/", mustWork = FALSE)) + 2L)
+  stats::setNames(files, labels)
+}
+
 scrna_embedding_columns <- function(project) {
   path <- file.path(scrna_output_dir(project), "tables", "umap_coordinates.tsv")
   if (!file.exists(path) || file_size_for(path) <= 0) return(character(0))
@@ -10198,10 +10209,11 @@ scrna_results_explorer_ui <- function() {
     tabPanel("QC", br(), h3("Quality Control"), uiOutput("scrna_qc_plot_ui"), br(), h4("QC summary by sample"), table_output("scrna_qc_summary"), br(), h4("Doublet calls by sample"), table_output("scrna_doublet_summary"), br(), h4("Individual doublet calls"), table_output("scrna_doublet_calls")),
     tabPanel("Preprocessing", br(), h3("Feature Selection and PCA"), h4("Feature filtering by sample"), tags$p(class = "muted small-note", "Genes are retained when they are detected in at least the selected number of cells within an input library; the analysis retains their union across libraries."), table_output("scrna_feature_filtering"), br(), h4("PCA variance explained"), table_output("scrna_pca_variance"), br(), h4("Highly variable genes"), table_output("scrna_hvg_table")),
     tabPanel("Cell dashboard", br(), h3("Interactive Cell Dashboard"), tags$p(class = "muted", "Explore the UMAP directly: color cells by cluster, sample, annotation, or selected marker-gene expression. Hover for cell identity and metadata; lasso or box-select cells to inspect them."), uiOutput("scrna_embedding_controls_ui"), uiOutput("scrna_embedding_widget_ui"), uiOutput("scrna_selected_cells_ui"), br(), tags$details(tags$summary("Static UMAP figures and cell metadata"), br(), uiOutput("scrna_umap_plot_ui"), br(), h4("Cell metadata preview"), tags$p(class = "muted small-note", "Previewing the first 5,000 cells. Download the complete metadata table from Downloads."), table_output("scrna_cell_metadata"))),
+    tabPanel("Expression violins", br(), h3("Expression Distributions"), tags$p(class = "muted", "Compare normalized expression for an individual gene or a stored signature score across clusters, cell types, or other categorical metadata."), uiOutput("scrna_violin_controls_ui"), plotOutput("scrna_expression_violin", height = "680px"), downloadButton("download_scrna_expression_violin", "Download current violin", class = "btn-default")),
     tabPanel("Composition", br(), h3("Cell-type Composition"), tags$p(class = "muted", "Exact cell counts and within-sample proportions are calculated by the workflow before any browser rendering or UMAP sampling."), uiOutput("scrna_composition_plot_ui"), br(), h4("Cells by cluster and annotation"), table_output("scrna_cluster_sizes"), br(), h4("Exact composition table"), tags$p(class = "muted small-note", "This complete table is never grouped or rounded; use it for reporting and download it from Downloads."), table_output("scrna_composition_table")),
     tabPanel("Markers", br(), h3("Cluster Markers"), tags$p(class = "muted", "Start with the ten strongest markers for one cluster; the complete ranked marker table remains available below and in Downloads."), uiOutput("scrna_top_markers_ui"), table_output("scrna_top_markers"), br(), uiOutput("scrna_marker_score_ui"), tags$details(tags$summary("Full ranked marker table"), br(), table_output("scrna_marker_table"))),
     tabPanel("Signatures", br(), h3("Signature Scores"), tags$p(class = "muted", "Scores are calculated from normalized expression and retained as metadata for UMAP coloring and downstream grouping."), h4("Gene coverage"), table_output("scrna_signature_coverage"), br(), h4("Summary by sample and annotation"), table_output("scrna_signature_summary")),
-    tabPanel("Differential expression", br(), h3("Differential Expression"), tags$p(class = "muted", "Sample-level pseudobulk DESeq2 is the primary inferential result. Cell-level testing is displayed separately as exploratory."), h4("Pseudobulk DESeq2"), table_output("scrna_pseudobulk_de"), br(), tags$details(tags$summary("Exploratory cell-level Wilcoxon"), br(), table_output("scrna_cell_de"))),
+    tabPanel("Differential expression", br(), h3("Differential Expression"), tags$p(class = "muted", "Browse global and population-specific results. Sample-level pseudobulk DESeq2 is the primary inferential result; cell-level Wilcoxon remains exploratory."), uiOutput("scrna_de_result_controls_ui"), table_output("scrna_de_result_table"), br(), tags$details(tags$summary("Run status by population"), br(), table_output("scrna_de_manifest"))),
     tabPanel("Pathways", br(), h3("Ranked Pathway Analysis"), tags$p(class = "muted", "fgseaMultilevel uses the complete pseudobulk Wald-statistic ranking and reports normalized enrichment scores and FDR. The clean top-20 figure is available in Downloads."), table_output("scrna_pathway_table")),
       tabPanel("Downloads", br(), h3("Completed Files"), tags$p(class = "muted", "Select a result to preview it in the app or download the original file."), uiOutput("scrna_file_ui"), uiOutput("scrna_file_view"), br(), downloadButton("download_scrna_file", "Download selected file", class = "btn-default"))
     ))
@@ -13153,7 +13165,8 @@ server <- function(input, output, session) {
         column(6, selectInput("scrna_de_comparison", "Comparison group", choices = group_values, selected = selected_choice(input$scrna_de_comparison, group_values, if (length(group_values) > 1L) group_values[[2]] else ""), selectize = FALSE))
       ),
       selectInput("scrna_de_annotation_column", "Annotation field to subset", choices = annotation_choices, selected = annotation_column, selectize = FALSE),
-      selectInput("scrna_de_annotation_value", "Population", choices = annotation_values, selected = selected_choice(input$scrna_de_annotation_value, annotation_values, "all"), selectize = FALSE),
+      selectInput("scrna_de_annotation_values", "Populations to analyze", choices = annotation_values, selected = intersect(as.character(input$scrna_de_annotation_values %||% "all"), unname(annotation_values)), multiple = TRUE, selectize = TRUE),
+      tags$p(class = "muted small-note", "Select All cells for a global comparison and any number of individual populations in the same run. Every result receives its own descriptive filename and folder."),
       selectInput("scrna_de_covariates", "Optional sample-level covariates", choices = covariate_choices, selected = intersect(as.character(input$scrna_de_covariates %||% character(0)), covariate_choices), multiple = TRUE, selectize = TRUE),
       tags$p(class = "muted small-note", "Use this for a paired subject/donor field or a genuine technical batch. The app checks that the design is full-rank and that every covariate is constant within each biological sample."),
       radioButtons("scrna_de_method", "Outputs", choices = c("Pseudobulk DESeq2 + exploratory cell-level" = "both", "Pseudobulk DESeq2 only (recommended)" = "pseudobulk", "Exploratory cell-level only" = "cell"), selected = input$scrna_de_method %||% "both")
@@ -13640,7 +13653,7 @@ server <- function(input, output, session) {
         de_reference = input$scrna_de_reference %||% "",
         de_comparison = input$scrna_de_comparison %||% "",
         de_annotation_column = input$scrna_de_annotation_column %||% "",
-        de_annotation_value = input$scrna_de_annotation_value %||% "all",
+        de_annotation_values = input$scrna_de_annotation_values %||% "all",
         de_method = input$scrna_de_method %||% "both",
         de_covariates = input$scrna_de_covariates %||% character(0),
         pathway_gmt_file = input$scrna_pathway_gmt_file %||% "",
@@ -14200,6 +14213,34 @@ server <- function(input, output, session) {
     p <- current_project(); if (!is_scrna_project(p)) return(data.frame())
     safe_read_table(file.path(scrna_output_dir(p), "tables", "cell_level_differential_expression.tsv"), 100000)
   }, page_length = 50, scroll_y = "520px")
+  output$scrna_de_result_controls_ui <- renderUI({
+    p <- current_project(); if (!is_scrna_project(p)) return(NULL)
+    method <- input$scrna_de_result_method %||% "pseudobulk"
+    choices <- scrna_de_result_file_choices(p, if (identical(method, "cell")) "cell" else "pseudobulk")
+    if (!length(choices)) return(div(class = "empty-box", "No completed differential-expression result is available for this method yet."))
+    selected <- selected_choice(input$scrna_de_result_file, choices, unname(choices)[[1]])
+    tagList(
+      fluidRow(
+        column(4, radioButtons("scrna_de_result_method", "Analysis level", choices = c("Pseudobulk DESeq2" = "pseudobulk", "Exploratory cell-level" = "cell"), selected = method, inline = TRUE)),
+        column(8, selectInput("scrna_de_result_file", "Comparison and population", choices = choices, selected = selected, selectize = FALSE))
+      ),
+      tags$p(class = "muted small-note", basename(selected))
+    )
+  })
+  output$scrna_de_result_table <- render_csl_table({
+    p <- current_project(); if (!is_scrna_project(p)) return(data.frame())
+    method <- input$scrna_de_result_method %||% "pseudobulk"
+    choices <- scrna_de_result_file_choices(p, if (identical(method, "cell")) "cell" else "pseudobulk")
+    path <- selected_choice(input$scrna_de_result_file, choices, if (length(choices)) unname(choices)[[1]] else "")
+    if (!nzchar(path)) return(data.frame())
+    safe_read_table(path, 100000)
+  }, page_length = 50, scroll_y = "560px")
+  output$scrna_de_manifest <- render_csl_table({
+    p <- current_project(); if (!is_scrna_project(p)) return(data.frame())
+    path <- file.path(scrna_output_dir(p), "tables", "differential_results_manifest.tsv")
+    if (!file.exists(path)) path <- file.path(scrna_output_dir(p), "tables", "differential_jobs.tsv")
+    safe_read_table(path, 10000)
+  }, page_length = 50, scroll_y = "420px")
   output$scrna_pathway_table <- render_csl_table({
     p <- current_project(); if (!is_scrna_project(p)) return(data.frame())
     safe_read_table(file.path(scrna_output_dir(p), "tables", "pathway_fgsea_ranked.tsv"), 100000)
@@ -14323,21 +14364,31 @@ server <- function(input, output, session) {
   })
   scrna_dashboard_marker_values <- function(project, gene) {
     root <- scrna_output_dir(project)
-    checkpoint <- file.path(root, "checkpoints", "04_clustered_scanpy.h5ad")
-    if (!file.exists(checkpoint)) checkpoint <- file.path(root, "objects", "processed_scanpy.h5ad")
-    if (!file.exists(checkpoint)) return(NULL)
+    scanpy_object <- file.path(root, "objects", "processed_scanpy.h5ad")
+    if (!file.exists(scanpy_object)) scanpy_object <- file.path(root, "checkpoints", "04_clustered_scanpy.h5ad")
+    seurat_object <- file.path(root, "objects", "processed_seurat.rds")
+    engine <- if (file.exists(scanpy_object)) "scanpy" else if (file.exists(seurat_object)) "seurat" else ""
+    checkpoint <- if (identical(engine, "scanpy")) scanpy_object else seurat_object
+    if (!nzchar(engine) || !file.exists(checkpoint)) return(NULL)
     safe_gene <- gsub("[^A-Za-z0-9_.-]", "_", gene)
     cache_path <- file.path(root, "tables", "dashboard_marker_cache", paste0(safe_gene, ".tsv.gz"))
     object_info <- file.info(checkpoint)
-    stamp <- paste(project$id %||% project$name, gene, object_info$size, object_info$mtime, sep = "::")
+    stamp <- paste(project$id %||% project$name, engine, gene, object_info$size, object_info$mtime, sep = "::")
     cached <- scrna_dashboard_expression_cache()
     if (identical(cached$stamp %||% "", stamp)) return(cached$values)
     if (!file.exists(cache_path) || file.info(cache_path)$mtime < object_info$mtime) {
-      container <- scanpy_container_check()
-      helper <- file.path(SCRIPTS_DIR, "singleCellRNAseq", "extract_h5ad_marker_expression.py")
-      if (!isTRUE(container$ready) || !file.exists(helper)) return(NULL)
       dir.create(dirname(cache_path), recursive = TRUE, showWarnings = FALSE)
-      result <- tryCatch(system2("singularity", c("exec", container$path, "python", helper, checkpoint, gene, cache_path), stdout = TRUE, stderr = TRUE), error = function(e) character(0))
+      if (identical(engine, "scanpy")) {
+        container <- scanpy_container_check()
+        helper <- file.path(SCRIPTS_DIR, "singleCellRNAseq", "extract_h5ad_marker_expression.py")
+        if (!isTRUE(container$ready) || !file.exists(helper)) return(NULL)
+        result <- tryCatch(system2("singularity", c("exec", container$path, "python", helper, checkpoint, gene, cache_path), stdout = TRUE, stderr = TRUE), error = function(e) character(0))
+      } else {
+        helper <- file.path(SCRIPTS_DIR, "singleCellRNAseq", "extract_seurat_marker_expression.R")
+        rscript <- Sys.which("Rscript")
+        if (!nzchar(rscript) || !file.exists(helper)) return(NULL)
+        result <- tryCatch(system2(rscript, c(helper, checkpoint, gene, cache_path), stdout = TRUE, stderr = TRUE), error = function(e) character(0))
+      }
       if (!file.exists(cache_path) || !file_size_for(cache_path)) return(NULL)
     }
     values <- safe_read_table(cache_path, 1000000)
@@ -14346,6 +14397,88 @@ server <- function(input, output, session) {
     scrna_dashboard_expression_cache(list(stamp = stamp, values = values))
     values
   }
+  output$scrna_violin_controls_ui <- renderUI({
+    p <- current_project(); if (!is_scrna_project(p)) return(NULL)
+    columns <- scrna_embedding_columns(p)
+    signatures <- grep("^signature__", columns, value = TRUE)
+    group_choices <- intersect(scrna_discrete_metadata_fields(p), columns)
+    group_choices <- setdiff(group_choices, grep("^annotation_source", group_choices, value = TRUE))
+    if (!length(group_choices)) return(div(class = "empty-box", "Complete UMAP and annotation to compare expression distributions by cluster or cell type."))
+    mode_choices <- c("Individual gene" = "gene")
+    if (length(signatures)) mode_choices <- c(mode_choices, "Stored signature score" = "signature")
+    mode <- selected_choice(input$scrna_violin_value_mode, mode_choices, "gene")
+    genes <- scrna_dashboard_gene_choices(p)
+    signature_choices <- stats::setNames(signatures, gsub("^signature__", "", signatures))
+    facet_choices <- c("No facets" = "", stats::setNames(intersect(c("sample_id", "condition", "batch"), columns), intersect(c("sample_id", "condition", "batch"), columns)))
+    tagList(
+      fluidRow(
+        column(3, radioButtons("scrna_violin_value_mode", "Show", choices = mode_choices, selected = mode, inline = FALSE)),
+        column(3, conditionalPanel("input.scrna_violin_value_mode == 'gene'", selectInput("scrna_violin_gene", "Gene", choices = genes, selected = selected_choice(input$scrna_violin_gene, genes, if (length(genes)) genes[[1]] else ""), selectize = TRUE)), conditionalPanel("input.scrna_violin_value_mode == 'signature'", selectInput("scrna_violin_signature", "Signature", choices = signature_choices, selected = selected_choice(input$scrna_violin_signature, signature_choices, if (length(signature_choices)) unname(signature_choices)[[1]] else ""), selectize = FALSE))),
+        column(3, selectInput("scrna_violin_group", "Separate violins by", choices = group_choices, selected = selected_choice(input$scrna_violin_group, group_choices, if ("cluster" %in% group_choices) "cluster" else group_choices[[1]]), selectize = FALSE)),
+        column(3, selectInput("scrna_violin_facet", "Optional facets", choices = facet_choices, selected = selected_choice(input$scrna_violin_facet, facet_choices, ""), selectize = FALSE))
+      ),
+      tags$p(class = "muted small-note", if (length(signatures)) "Stored signatures are available because signature scoring has been completed. Gene violins use normalized expression from the processed object." else "Run Signature scoring to add reusable signature-score violins. Gene violins use normalized expression from the processed object.")
+    )
+  })
+  scrna_violin_data <- reactive({
+    p <- current_project(); req(is_scrna_project(p))
+    mode <- input$scrna_violin_value_mode %||% "gene"
+    group_column <- input$scrna_violin_group %||% "cluster"
+    facet_column <- input$scrna_violin_facet %||% ""
+    metadata_columns <- unique(c(group_column, facet_column))
+    if (identical(mode, "signature")) {
+      value_column <- input$scrna_violin_signature %||% ""
+      req(nzchar(value_column))
+      x <- scrna_embedding_table(p, columns = c(metadata_columns, value_column), max_points = Inf)
+      req(value_column %in% names(x))
+      value <- suppressWarnings(as.numeric(x[[value_column]]))
+      label <- gsub("^signature__", "", value_column)
+      y_label <- "Signature score"
+    } else {
+      gene <- input$scrna_violin_gene %||% ""
+      req(nzchar(gene))
+      x <- scrna_embedding_table(p, columns = metadata_columns, max_points = Inf)
+      expression <- scrna_dashboard_marker_values(p, gene)
+      req(!is.null(expression))
+      index <- match(x$cell, expression$cell)
+      req(!anyNA(index))
+      value <- expression$expression[index]
+      label <- gene
+      y_label <- "Normalized expression"
+    }
+    req(group_column %in% names(x))
+    result <- data.frame(cell = x$cell, group = as.character(x[[group_column]]), value = value, stringsAsFactors = FALSE)
+    result$facet <- if (nzchar(facet_column) && facet_column %in% names(x)) as.character(x[[facet_column]]) else ""
+    result <- result[is.finite(result$value) & !is.na(result$group) & nzchar(result$group), , drop = FALSE]
+    list(data = result, label = label, y_label = y_label, group_label = group_column, facet_label = facet_column)
+  })
+  scrna_violin_plot_object <- reactive({
+    info <- scrna_violin_data(); x <- info$data
+    req(NROW(x) > 0L)
+    groups <- unique(x$group)
+    validate(need(length(groups) <= 60L, paste0("‘", info$group_label, "’ has too many categories for a readable violin plot.")))
+    numeric_groups <- suppressWarnings(as.numeric(groups))
+    levels <- if (all(is.finite(numeric_groups))) groups[order(numeric_groups)] else sort(groups)
+    x$group <- factor(x$group, levels = levels)
+    colors <- stats::setNames(scrna_discrete_palette(length(levels)), levels)
+    plot <- ggplot2::ggplot(x, ggplot2::aes(x = group, y = value, fill = group)) +
+      ggplot2::geom_violin(scale = "width", trim = TRUE, linewidth = 0.35, color = "#374151") +
+      ggplot2::geom_boxplot(width = 0.12, outlier.shape = NA, fill = "white", alpha = 0.78, linewidth = 0.3) +
+      ggplot2::scale_fill_manual(values = colors, guide = "none") +
+      ggplot2::labs(title = info$label, x = info$group_label, y = info$y_label) +
+      ggplot2::theme_classic(base_size = 12) +
+      ggplot2::theme(plot.title = ggplot2::element_text(face = "bold"), axis.text.x = ggplot2::element_text(angle = if (length(levels) > 6L) 45 else 0, hjust = if (length(levels) > 6L) 1 else 0.5))
+    if (nzchar(info$facet_label) && any(nzchar(x$facet))) plot <- plot + ggplot2::facet_wrap(~facet, scales = "free_x")
+    plot
+  })
+  output$scrna_expression_violin <- renderPlot({ scrna_violin_plot_object() }, res = 120)
+  output$download_scrna_expression_violin <- downloadHandler(
+    filename = function() {
+      value_name <- if (identical(input$scrna_violin_value_mode %||% "gene", "signature")) gsub("^signature__", "", input$scrna_violin_signature %||% "signature") else input$scrna_violin_gene %||% "gene"
+      paste0("expression_violin__", clean_name(value_name, "value"), "__by_", clean_name(input$scrna_violin_group %||% "group", "group"), ".png")
+    },
+    content = function(file) ggplot2::ggsave(file, scrna_violin_plot_object(), width = 10, height = 6.5, dpi = 220)
+  )
   output$scrna_embedding_controls_ui <- renderUI({
     progress_refresh()
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
