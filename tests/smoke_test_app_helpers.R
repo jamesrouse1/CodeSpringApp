@@ -1435,6 +1435,24 @@ assert(
   NROW(matrix_rows) == 2L && identical(sort(matrix_rows$sample_id), c("sample_a", "sample_b")),
   "one parent folder discovers multiple filtered feature-barcode matrix subfolders"
 )
+browser_fixture <- file.path(root, "absolute_path_fixture", "nested")
+dir.create(browser_fixture, recursive = TRUE)
+browser_file_fixture <- file.path(browser_fixture, "samples.tsv")
+writeLines("sample_id\tinput_path", browser_file_fixture)
+assert(identical(normalizePath(app_env$browser_start_path(browser_fixture, "dir"), winslash = "/"), normalizePath(browser_fixture, winslash = "/")), "a pasted absolute folder opens at that exact folder")
+assert(identical(normalizePath(app_env$browser_start_path(browser_file_fixture, "file"), winslash = "/"), normalizePath(browser_fixture, winslash = "/")), "a pasted absolute file opens at its containing folder")
+assert(
+  grepl('tabPanel("Detected Samples & Design"', app_text, fixed = TRUE) &&
+    grepl('output$new_scrna_inputs_table <- render_csl_table', server_source, fixed = TRUE) &&
+    grepl('editable = TRUE', server_source, fixed = TRUE),
+  "detected scRNA samples have a dedicated editable design tab"
+)
+assert(
+  grepl('typed_value <- path.expand', server_source, fixed = TRUE) &&
+    grepl('value <- if (nzchar(typed_value))', server_source, fixed = TRUE) &&
+    grepl('path_browser$path', server_source, fixed = TRUE),
+  "the server browser uses a pasted absolute path instead of silently falling back to its previous folder"
+)
 object_project_config <- app_env$new_project_from_inputs(list(
   new_project_analysis = "scRNA-seq", new_project_name = "object_fixture", new_project_mode = "new",
   new_results_root = root, new_scrna_start_mode = "object", new_scrna_folder_type = "filtered_10x_matrix"

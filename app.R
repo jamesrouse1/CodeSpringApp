@@ -11893,6 +11893,7 @@ server <- function(input, output, session) {
   }
 
   open_server_browser <- function(target, mode = "dir", current = "") {
+    original_value <- path.expand(trimws(first_scalar_string(current, "")))
     path_browser$target <- target
     path_browser$mode <- mode
     path_browser$path <- normalizePath(browser_start_path(current, mode), winslash = "/", mustWork = FALSE)
@@ -11901,7 +11902,8 @@ server <- function(input, output, session) {
     } else {
       ""
     }
-    path_browser$message <- ""
+    original_valid <- !nzchar(original_value) || if (identical(mode, "file")) file.exists(original_value) else dir.exists(original_value)
+    path_browser$message <- if (isTRUE(original_valid)) "" else paste("The pasted path was not found or is not visible to the app. It has been preserved below for correction:", original_value)
     title <- if (identical(mode, "file")) "Choose a server file" else "Choose a server folder"
     showModal(modalDialog(
       title = title,
@@ -11910,7 +11912,10 @@ server <- function(input, output, session) {
           textInput(
             "browser_manual_path",
             if (identical(mode, "file")) "Type or paste a server file or folder" else "Type or paste a server folder",
-            value = if (nzchar(path_browser$selected_file)) path_browser$selected_file else path_browser$path
+            # Preserve a pasted value even if it is currently unreadable or
+            # mistyped. The browser may list a readable parent, but it must not
+            # replace the user's full path with /grid without explanation.
+            value = if (nzchar(original_value)) original_value else if (nzchar(path_browser$selected_file)) path_browser$selected_file else path_browser$path
           ),
           div(class = "path-browser-actions",
               actionButton("browser_go_path", "Jump to typed path"),
@@ -12110,6 +12115,7 @@ server <- function(input, output, session) {
       return()
     }
     new_scrna_inputs(rbind(current, checked[, names(current), drop = FALSE]))
+    updateTabsetPanel(session, "new_scrna_input_tabs", selected = "Detected Samples & Design")
     if (NROW(checked) > 1L) {
       kind <- if (identical(requested_type, "fastq_folder")) "FASTQ samples; Cell Ranger will combine lanes within each sample prefix" else "filtered matrices"
       new_scrna_input_message(paste0("Detected and added ", NROW(checked), " ", kind, ". Review and edit the design metadata below."))
@@ -12135,6 +12141,14 @@ server <- function(input, output, session) {
   }, ignoreInit = TRUE)
 
   output$new_scrna_input_status <- renderText(new_scrna_input_message())
+  output$new_scrna_detected_summary <- renderUI({
+    samples <- new_scrna_inputs()
+    if (!NROW(samples)) return(div(class = "empty-box", "No samples have been detected yet. Return to Input Data, paste or browse to the source folder, and click Detect & add sample(s)."))
+    div(class = "read-source-note",
+      tags$strong(paste(NROW(samples), if (NROW(samples) == 1L) "sample detected" else "samples detected")),
+      tags$p("Review and edit the design below before creating the project. These edits become the project-local sample manifest used by Cell Ranger and downstream single-cell analysis.")
+    )
+  })
   output$new_scrna_inputs_table <- render_csl_table({
     new_scrna_inputs()
   }, page_length = 50, editable = TRUE, scroll_y = "360px")
@@ -12218,8 +12232,18 @@ server <- function(input, output, session) {
   })
 
   observeEvent(input$browser_use_current, {
+    typed_value <- path.expand(trimws(input$browser_manual_path %||% ""))
     if (identical(path_browser$mode, "file")) {
-      value <- input$browser_file_choice %||% path_browser$selected_file %||% ""
+      # A pasted full file path is authoritative even when the user clicks
+      # "Use selected file" without first clicking the separate Jump button.
+      value <- if (nzchar(typed_value) && file.exists(typed_value) && !dir.exists(typed_value)) {
+        typed_value
+      } else if (nzchar(typed_value) && !dir.exists(typed_value)) {
+        path_browser$message <- paste("The app cannot use this file:", typed_value)
+        return()
+      } else {
+        input$browser_file_choice %||% path_browser$selected_file %||% ""
+      }
       value <- path.expand(trimws(value))
       if (!nzchar(value) || !file.exists(value) || dir.exists(value) || file.access(value, mode = 4) != 0) {
         path_browser$message <- paste("The app cannot use this file:", value)
@@ -12230,7 +12254,10 @@ server <- function(input, output, session) {
       removeModal()
       return()
     }
-    value <- normalizePath(path_browser$path, winslash = "/", mustWork = FALSE)
+    # Likewise, do not silently fall back to the previously displayed folder
+    # (often /grid) after a user pastes a complete directory path.
+    value <- if (nzchar(typed_value)) typed_value else path_browser$path
+    value <- normalizePath(value, winslash = "/", mustWork = FALSE)
     if (!dir.exists(value) || file.access(value, mode = 5) != 0) {
       path_browser$message <- paste("The app cannot use this folder:", value)
       return()
@@ -12324,42 +12351,54 @@ server <- function(input, output, session) {
           tags$p(class = "muted small-note", "The app detects H5AD versus RDS automatically. Input inspection records existing counts, normalization, PCA, UMAP, clusters, and annotation fields so only relevant continuation options are emphasized.")
         ),
         conditionalPanel("input.new_scrna_start_mode == 'new'",
-          radioButtons("new_scrna_sample_count", "Samples", choices = c("One sample" = "single", "Multiple samples" = "multiple"), selected = "multiple", inline = TRUE),
-          radioButtons("new_scrna_folder_type", "Input data", choices = c("10x gene-expression FASTQs" = "fastq_folder", "Filtered feature-barcode matrix" = "filtered_10x_matrix"), selected = "fastq_folder", inline = TRUE),
-          conditionalPanel("input.new_scrna_sample_count == 'multiple'",
-            radioButtons("new_scrna_folder_layout", "Folder layout", choices = c("One folder containing all samples" = "one", "One folder path per sample" = "multiple"), selected = "one", inline = TRUE)
-          ),
-          checkboxInput("new_scrna_use_manifest", "Use an existing sample-design file instead", value = FALSE),
-          conditionalPanel("!input.new_scrna_use_manifest",
-            div(class = "read-source-note",
-              tags$strong("Add input data"),
-              tags$p("With one shared folder, the app discovers all standard sample prefixes or filtered-matrix subfolders. With separate folders, add each path and provide its sample name.")),
-            div(class = "new-project-path-control",
-              textInput("new_scrna_matrix_path", "Sample input folder", value = "", placeholder = "Absolute path containing matrix/features/barcodes or matched R1/R2 FASTQs"),
-              actionButton("browse_new_scrna_matrix_path", "Browse server", class = "btn-default")
+          tabsetPanel(id = "new_scrna_input_tabs", selected = "Input Data",
+            tabPanel("Input Data",
+              br(),
+              radioButtons("new_scrna_sample_count", "Samples", choices = c("One sample" = "single", "Multiple samples" = "multiple"), selected = "multiple", inline = TRUE),
+              radioButtons("new_scrna_folder_type", "Input data", choices = c("10x gene-expression FASTQs" = "fastq_folder", "Filtered feature-barcode matrix" = "filtered_10x_matrix"), selected = "fastq_folder", inline = TRUE),
+              conditionalPanel("input.new_scrna_sample_count == 'multiple'",
+                radioButtons("new_scrna_folder_layout", "Folder layout", choices = c("One folder containing all samples" = "one", "One folder path per sample" = "multiple"), selected = "one", inline = TRUE)
+              ),
+              checkboxInput("new_scrna_use_manifest", "Use an existing sample-design file instead", value = FALSE),
+              conditionalPanel("!input.new_scrna_use_manifest",
+                div(class = "read-source-note",
+                  tags$strong("Add input data"),
+                  tags$p("Paste a complete absolute server path or browse to it. With one shared folder, the app discovers all standard sample prefixes or filtered-matrix subfolders. With separate folders, add each path and provide its sample name.")),
+                div(class = "new-project-path-control",
+                  textInput("new_scrna_matrix_path", "Sample input folder", value = "", placeholder = "Absolute path containing matrix/features/barcodes or matched R1/R2 FASTQs"),
+                  actionButton("browse_new_scrna_matrix_path", "Browse server", class = "btn-default")
+                ),
+                textInput("new_scrna_sample_name", "Custom sample name (optional for FASTQs)", value = "", placeholder = "Used for one matrix or one FASTQ sample; multi-sample FASTQ folders are named from their prefixes"),
+                div(class = "button-row", actionButton("add_new_scrna_input", "Detect & add sample(s)", class = "btn-primary")),
+                textOutput("new_scrna_input_status")
+              ),
+              conditionalPanel("input.new_scrna_use_manifest", tags$p(class = "muted small-note", "Open Detected Samples & Design to select the existing sample-design file."))
             ),
-            textInput("new_scrna_sample_name", "Custom sample name (optional for FASTQs)", value = "", placeholder = "Used for one matrix or one FASTQ sample; multi-sample FASTQ folders are named from their prefixes"),
-            div(class = "button-row",
-              actionButton("add_new_scrna_input", "Detect & add sample(s)", class = "btn-primary"),
-              actionButton("remove_last_new_scrna_input", "Remove last", class = "btn-default"),
-              actionButton("clear_new_scrna_inputs", "Clear table", class = "btn-default")
-            ),
-            textOutput("new_scrna_input_status"),
-            table_output("new_scrna_inputs_table"),
-            tags$p(class = "muted small-note", "All cells are editable. Use technical_batch only for library, capture, lane, or sequencing-run effects—not for the biological condition.")
-          ),
-          conditionalPanel("input.new_scrna_use_manifest",
-            radioButtons("new_scrna_manifest_source", "Sample-design location", choices = c("Server file" = "server", "Upload from laptop" = "upload"), selected = "server", inline = TRUE),
-            conditionalPanel("input.new_scrna_manifest_source == 'server'",
-              div(class = "new-project-path-control",
-                  textInput("new_scrna_manifest_path", "Server sample-design path", value = "", placeholder = "Absolute path to samples.tsv"),
-                  actionButton("browse_new_scrna_manifest_path", "Browse server", class = "btn-default"))
-            ),
-            conditionalPanel("input.new_scrna_manifest_source == 'upload'",
-              fileInput("new_scrna_manifest_upload", "Sample design from laptop", accept = c(".tsv", ".txt"))
-            ),
-            tags$p(class = "muted small-note", "Required columns: sample_id and input_path. Input type is detected automatically when input_type is omitted.")
-          ),
+            tabPanel("Detected Samples & Design",
+              br(),
+              conditionalPanel("!input.new_scrna_use_manifest",
+                uiOutput("new_scrna_detected_summary"),
+                div(class = "button-row",
+                  actionButton("remove_last_new_scrna_input", "Remove last sample", class = "btn-default"),
+                  actionButton("clear_new_scrna_inputs", "Clear detected samples", class = "btn-default")
+                ),
+                table_output("new_scrna_inputs_table"),
+                tags$p(class = "muted small-note", tags$strong("Editable design matrix:"), " double-click any cell to change the sample name, path, input type, FASTQ prefix, condition, donor, or technical batch. Use technical_batch only for library, capture, lane, or sequencing-run effects—not for the biological condition.")
+              ),
+              conditionalPanel("input.new_scrna_use_manifest",
+                radioButtons("new_scrna_manifest_source", "Sample-design location", choices = c("Server file" = "server", "Upload from laptop" = "upload"), selected = "server", inline = TRUE),
+                conditionalPanel("input.new_scrna_manifest_source == 'server'",
+                  div(class = "new-project-path-control",
+                      textInput("new_scrna_manifest_path", "Server sample-design path", value = "", placeholder = "Absolute path to samples.tsv"),
+                      actionButton("browse_new_scrna_manifest_path", "Browse server", class = "btn-default"))
+                ),
+                conditionalPanel("input.new_scrna_manifest_source == 'upload'",
+                  fileInput("new_scrna_manifest_upload", "Sample design from laptop", accept = c(".tsv", ".txt"))
+                ),
+                tags$p(class = "muted small-note", "Required columns: sample_id and input_path. Input type is detected automatically when input_type is omitted. A project-local editable copy is created when the project is saved.")
+              )
+            )
+          )
         ),
         scrna_results_location_control,
         tags$p(class = "muted small-note", "Engine selection is automatic: Scanpy for H5AD and Seurat for RDS, filtered matrices, or Cell Ranger outputs. Annotation files are requested only at the annotation step.")
