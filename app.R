@@ -8971,7 +8971,19 @@ submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto
   if (identical(stage, "differential")) {
     de_group_column <- trimws(as.character(de_group_column %||% "")); de_reference <- trimws(as.character(de_reference %||% "")); de_comparison <- trimws(as.character(de_comparison %||% ""))
     de_method <- tolower(trimws(as.character(de_method %||% "both")))
-    if (!nzchar(de_group_column) || !nzchar(de_reference) || !nzchar(de_comparison) || identical(de_reference, de_comparison)) return(record_preflight_failure(project, step_label, "Choose a sample-level comparison field and two different groups.", "scrna"))
+    metadata <- setdiff(scrna_embedding_columns(project), c("cell", "UMAP_1", "UMAP_2", "input_path", "source_barcode", "annotation_source"))
+    single_sample <- length(scrna_biological_sample_ids(project)) <= 1L
+    valid_fields <- if (single_sample) scrna_de_population_fields(project, metadata) else scrna_de_sample_fields(project, metadata)
+    if (!nzchar(de_group_column) || !de_group_column %in% valid_fields || !nzchar(de_reference) || !nzchar(de_comparison) || identical(de_reference, de_comparison)) {
+      label <- if (single_sample) "cell-population annotation and two different populations" else "sample-level comparison field and two different groups"
+      return(record_preflight_failure(project, step_label, paste0("Choose a valid ", label, "."), "scrna"))
+    }
+    if (single_sample) {
+      de_method <- "cell"
+      de_annotation_column <- ""
+      de_annotation_values <- "all"
+      de_covariates <- character(0)
+    }
     if (!de_method %in% c("both", "pseudobulk", "cell", "cell_level")) de_method <- "both"
   }
   if (identical(stage, "pathway") && !pathway_library %in% GSEAPY_GENESET_OPTIONS) return(record_preflight_failure(project, step_label, "Choose a pathway database from the available list.", "scrna"))
@@ -10115,6 +10127,52 @@ scrna_embedding_table <- function(project, columns = character(0), max_points = 
     assign(signature, x, envir = SCRNA_EMBEDDING_CACHE)
   }
   x
+}
+
+scrna_biological_sample_ids <- function(project) {
+  columns <- scrna_embedding_columns(project)
+  if ("sample_id" %in% columns) {
+    x <- scrna_embedding_table(project, columns = "sample_id", max_points = Inf)
+    ids <- unique(trimws(as.character(x$sample_id %||% character(0))))
+    ids <- ids[nzchar(ids)]
+    if (length(ids)) return(ids)
+  }
+  manifest <- tryCatch(scrna_manifest(project), error = function(e) data.frame())
+  ids <- if (NROW(manifest) && "sample_id" %in% names(manifest)) unique(trimws(as.character(manifest$sample_id))) else character(0)
+  ids[nzchar(ids)]
+}
+
+scrna_de_population_fields <- function(project, metadata) {
+  excluded <- c("sample_id", "condition", "batch", "input_kind", "predicted_doublet", "annotation_source")
+  candidates <- setdiff(intersect(scrna_discrete_metadata_fields(project), metadata), c(excluded, grep("^annotation_source__", metadata, value = TRUE)))
+  if (!length(candidates)) return(character(0))
+  x <- scrna_embedding_table(project, columns = candidates, max_points = Inf)
+  candidates <- candidates[vapply(candidates, function(column) {
+    values <- unique(trimws(as.character(x[[column]] %||% character(0))))
+    values <- values[nzchar(values) & !is.na(values)]
+    length(values) >= 2L && length(values) <= 80L
+  }, logical(1))]
+  active <- scrna_summary_value(project, "active_annotation", "")
+  preferred <- unique(c(active, "cell_type", grep("cell.?type|annotation|subtype", candidates, value = TRUE, ignore.case = TRUE), "cluster"))
+  unique(c(intersect(preferred, candidates), setdiff(candidates, preferred)))
+}
+
+scrna_de_sample_fields <- function(project, metadata) {
+  excluded <- c("sample_id", "cluster", "cell_type", "input_kind", "input_path", "source_barcode", "predicted_doublet", "annotation_source")
+  candidates <- setdiff(metadata, c(excluded, grep("^(signature__|annotation_source__|cell_type|celltype|subtype$)", metadata, value = TRUE, ignore.case = TRUE)))
+  if (!length(candidates)) return(character(0))
+  x <- scrna_embedding_table(project, columns = c("sample_id", candidates), max_points = Inf)
+  if (!NROW(x) || !"sample_id" %in% names(x)) return(character(0))
+  candidates <- candidates[vapply(candidates, function(column) {
+    values <- trimws(as.character(x[[column]] %||% character(0)))
+    keep <- nzchar(values) & !is.na(values) & nzchar(as.character(x$sample_id))
+    if (!any(keep)) return(FALSE)
+    distinct <- unique(values[keep])
+    constant_by_sample <- all(vapply(split(values[keep], as.character(x$sample_id[keep])), function(group) length(unique(group)) == 1L, logical(1)))
+    length(distinct) >= 2L && length(distinct) <= 50L && constant_by_sample
+  }, logical(1))]
+  preferred <- c("condition", "treatment", "group", "genotype", "sex", "age", "batch")
+  unique(c(intersect(preferred, candidates), setdiff(candidates, preferred)))
 }
 
 scrna_summary_values <- function(project) {
@@ -12726,7 +12784,7 @@ server <- function(input, output, session) {
         tool_panel("UMAP & clustering", status, "For multiple inputs, optionally correct a technical batch first; then calculate neighbours, UMAP, and clusters. Review the UMAP preview here before annotation.", tagList(uiOutput("scrna_cluster_settings_ui"), uiOutput("scrna_umap_output_ui")), "run_scrna_cluster", "Run UMAP & clustering", show_sample_progress = FALSE),
         tool_panel("Annotate & markers", status, "Use the project's saved post-UMAP object, add a named annotation metadata field, and immediately write exact composition tables.", uiOutput("scrna_annotation_settings_ui"), "run_scrna_annotate", "Run annotation & markers", show_sample_progress = FALSE),
         tool_panel("Signature scoring", status, "Score one or more named gene signatures on normalized expression and store every score as reusable cell metadata in the processed object.", uiOutput("scrna_signature_settings_ui"), "run_scrna_score", "Run signature scoring", show_sample_progress = FALSE),
-        tool_panel("Differential expression", status, "Run sample-level pseudobulk DESeq2 for primary inference and, when requested, an exploratory cell-level Wilcoxon comparison.", uiOutput("scrna_differential_settings_ui"), "run_scrna_differential", "Run differential expression", show_sample_progress = FALSE),
+        tool_panel("Differential expression", status, "Use pseudobulk DESeq2 when independent biological samples are available; one-sample projects instead offer exploratory cell-level comparisons between annotated populations.", uiOutput("scrna_differential_settings_ui"), "run_scrna_differential", "Run differential expression", show_sample_progress = FALSE),
         tool_panel("Pathway analysis", status, "Choose a pathway database and run ranked fgsea on the pseudobulk DESeq2 Wald statistic.", uiOutput("scrna_pathway_settings_ui"), "run_scrna_pathway", "Run pathway analysis", show_sample_progress = FALSE)
       ))
     }
@@ -13322,16 +13380,35 @@ server <- function(input, output, session) {
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
     columns <- scrna_embedding_columns(p)
     metadata <- setdiff(columns, c("cell", "UMAP_1", "UMAP_2", "input_path", "source_barcode", "annotation_source"))
-    group_choices <- setdiff(metadata, c("sample_id", "cluster", grep("^(signature__|annotation_source__)", metadata, value = TRUE)))
-    if (!length(group_choices)) return(div(class = "empty-box", "Complete annotation so the saved object exposes sample-level comparison metadata."))
-    group_column <- selected_choice(input$scrna_de_group_column, group_choices, if ("condition" %in% group_choices) "condition" else group_choices[[1]])
+    sample_ids <- scrna_biological_sample_ids(p)
+    single_sample <- length(sample_ids) <= 1L
+    group_choices <- if (single_sample) scrna_de_population_fields(p, metadata) else scrna_de_sample_fields(p, metadata)
+    if (!length(group_choices)) {
+      message <- if (single_sample) "Complete clustering or annotation so at least one cell-population field contains two groups." else "No valid sample-level comparison field was found. A field must contain at least two values and be constant within each biological sample."
+      return(div(class = "empty-box", message))
+    }
+    default_group <- if (single_sample) group_choices[[1]] else if ("condition" %in% group_choices) "condition" else group_choices[[1]]
+    group_column <- selected_choice(isolate(input$scrna_de_group_column), group_choices, default_group)
     group_data <- scrna_embedding_table(p, columns = group_column, max_points = Inf)
     group_values <- if (group_column %in% names(group_data)) sort(unique(trimws(as.character(group_data[[group_column]])))) else character(0)
     group_values <- group_values[nzchar(group_values)]
+    if (length(group_values) < 2L) return(div(class = "empty-box", paste0("‘", group_column, "’ does not contain two populated groups.")))
+    comparison_controls <- fluidRow(
+      column(6, selectInput("scrna_de_reference", if (single_sample) "Reference cell population" else "Reference group", choices = group_values, selected = selected_choice(isolate(input$scrna_de_reference), group_values, group_values[[1]]), selectize = FALSE)),
+      column(6, selectInput("scrna_de_comparison", if (single_sample) "Comparison cell population" else "Comparison group", choices = group_values, selected = selected_choice(isolate(input$scrna_de_comparison), group_values, group_values[[2]]), selectize = FALSE))
+    )
+    if (single_sample) {
+      return(tagList(
+        div(class = "read-source-note", tags$strong("One biological sample detected"), tags$p("Compare two cell populations with a cell-level Wilcoxon test. Pseudobulk is not shown because there are no independent biological replicates; this result is exploratory and cells are not treated as replicate samples.")),
+        selectInput("scrna_de_group_column", "Cell-population annotation", choices = group_choices, selected = group_column, selectize = FALSE),
+        comparison_controls,
+        tags$p(class = "muted small-note", "The comparison uses normalized expression from all cells carrying either selected label and saves a descriptive cell-level result file.")
+      ))
+    }
     active_annotation <- scrna_summary_value(p, "active_annotation", "")
     annotation_choices <- unique(c(intersect(c(active_annotation, "cell_type"), metadata), grep("(^cell_type|annotation|subtype)", metadata, value = TRUE, ignore.case = TRUE), ""))
     annotation_choices <- stats::setNames(annotation_choices, ifelse(nzchar(annotation_choices), annotation_choices, "All cells (no annotation subset)"))
-    annotation_column <- selected_choice(input$scrna_de_annotation_column, annotation_choices, unname(annotation_choices)[[1]])
+    annotation_column <- selected_choice(isolate(input$scrna_de_annotation_column), annotation_choices, unname(annotation_choices)[[1]])
     annotation_data <- if (nzchar(annotation_column)) scrna_embedding_table(p, columns = annotation_column, max_points = Inf) else data.frame()
     annotation_values <- if (nzchar(annotation_column) && annotation_column %in% names(annotation_data)) sort(unique(trimws(as.character(annotation_data[[annotation_column]])))) else character(0)
     annotation_values <- c("All cells" = "all", stats::setNames(annotation_values[nzchar(annotation_values)], annotation_values[nzchar(annotation_values)]))
@@ -13339,16 +13416,13 @@ server <- function(input, output, session) {
     tagList(
       div(class = "read-source-note", tags$strong("Inference defaults"), tags$p("Pseudobulk sums raw counts within each biological sample and requires at least two independent samples per group. Cell-level Wilcoxon is optional and explicitly reported as exploratory because cells are not independent replicates.")),
       selectInput("scrna_de_group_column", "Sample-level comparison field", choices = group_choices, selected = group_column, selectize = FALSE),
-      fluidRow(
-        column(6, selectInput("scrna_de_reference", "Reference group", choices = group_values, selected = selected_choice(input$scrna_de_reference, group_values, if (length(group_values)) group_values[[1]] else ""), selectize = FALSE)),
-        column(6, selectInput("scrna_de_comparison", "Comparison group", choices = group_values, selected = selected_choice(input$scrna_de_comparison, group_values, if (length(group_values) > 1L) group_values[[2]] else ""), selectize = FALSE))
-      ),
+      comparison_controls,
       selectInput("scrna_de_annotation_column", "Annotation field to subset", choices = annotation_choices, selected = annotation_column, selectize = FALSE),
-      selectInput("scrna_de_annotation_values", "Populations to analyze", choices = annotation_values, selected = intersect(as.character(input$scrna_de_annotation_values %||% "all"), unname(annotation_values)), multiple = TRUE, selectize = TRUE),
+      selectInput("scrna_de_annotation_values", "Populations to analyze", choices = annotation_values, selected = intersect(as.character(isolate(input$scrna_de_annotation_values) %||% "all"), unname(annotation_values)), multiple = TRUE, selectize = TRUE),
       tags$p(class = "muted small-note", "Select All cells for a global comparison and any number of individual populations in the same run. Every result receives its own descriptive filename and folder."),
-      selectInput("scrna_de_covariates", "Optional sample-level covariates", choices = covariate_choices, selected = intersect(as.character(input$scrna_de_covariates %||% character(0)), covariate_choices), multiple = TRUE, selectize = TRUE),
+      selectInput("scrna_de_covariates", "Optional sample-level covariates", choices = covariate_choices, selected = intersect(as.character(isolate(input$scrna_de_covariates) %||% character(0)), covariate_choices), multiple = TRUE, selectize = TRUE),
       tags$p(class = "muted small-note", "Use this for a paired subject/donor field or a genuine technical batch. The app checks that the design is full-rank and that every covariate is constant within each biological sample."),
-      radioButtons("scrna_de_method", "Outputs", choices = c("Pseudobulk DESeq2 + exploratory cell-level" = "both", "Pseudobulk DESeq2 only (recommended)" = "pseudobulk", "Exploratory cell-level only" = "cell"), selected = input$scrna_de_method %||% "both")
+      radioButtons("scrna_de_method", "Outputs", choices = c("Pseudobulk DESeq2 + exploratory cell-level" = "both", "Pseudobulk DESeq2 only (recommended)" = "pseudobulk", "Exploratory cell-level only" = "cell"), selected = isolate(input$scrna_de_method) %||% "both")
     )
   })
 
@@ -13791,6 +13865,7 @@ server <- function(input, output, session) {
     p <- current_project()
     label <- scrna_stage_step(stage)
     multiple_inputs <- NROW(scrna_manifest(p)) > 1L
+    single_biological_sample <- length(scrna_biological_sample_ids(p)) <= 1L
     integration_choice <- if (!multiple_inputs || isTRUE(input$scrna_cluster_without_integration)) "none" else input$scrna_integration %||% "auto"
     run_submission(
       label,
@@ -13833,10 +13908,10 @@ server <- function(input, output, session) {
         de_group_column = input$scrna_de_group_column %||% "condition",
         de_reference = input$scrna_de_reference %||% "",
         de_comparison = input$scrna_de_comparison %||% "",
-        de_annotation_column = input$scrna_de_annotation_column %||% "",
-        de_annotation_values = input$scrna_de_annotation_values %||% "all",
-        de_method = input$scrna_de_method %||% "both",
-        de_covariates = input$scrna_de_covariates %||% character(0),
+        de_annotation_column = if (single_biological_sample) "" else input$scrna_de_annotation_column %||% "",
+        de_annotation_values = if (single_biological_sample) "all" else input$scrna_de_annotation_values %||% "all",
+        de_method = if (single_biological_sample) "cell" else input$scrna_de_method %||% "both",
+        de_covariates = if (single_biological_sample) character(0) else input$scrna_de_covariates %||% character(0),
         pathway_library = input$scrna_pathway_library %||% "MSigDB_Hallmark_2020",
         pathway_gmt_file = "",
         pathway_gmt_upload = NULL,
