@@ -10192,10 +10192,20 @@ scrna_metric_card <- function(label, value, note = "", tone = "blue") {
 scrna_discrete_palette <- function(n) {
   n <- suppressWarnings(as.integer(n))
   if (is.na(n) || n < 1L) return(character(0))
-  anchors <- scrna_expression_palette()
-  if (n == 1L) return(anchors[[ceiling(length(anchors) / 2)]])
-  expanded <- grDevices::colorRampPalette(anchors)(n + 2L)
-  expanded[seq.int(2L, n + 1L)]
+  # Categorical metadata must not imply an ordering. This deliberately
+  # shuffled qualitative palette keeps adjacent factor levels visually
+  # distinct, while the jpplot gradient is reserved for numeric values.
+  colors <- c(
+    "#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00", "#6A3D9A",
+    "#56B4E9", "#B15928", "#E31A1C", "#1B9E77", "#7570B3", "#E7298A",
+    "#66A61E", "#A6761D", "#1F78B4", "#FF7F00", "#33A02C", "#984EA3",
+    "#A65628", "#F781BF", "#17BECF", "#BCBD22", "#8C564B", "#4D4D4D"
+  )
+  if (n > length(colors)) {
+    extra <- grDevices::hcl.colors(n - length(colors), palette = "Dynamic")
+    colors <- c(colors, extra)
+  }
+  colors[seq_len(n)]
 }
 
 scrna_expression_palette <- function() {
@@ -14506,7 +14516,7 @@ server <- function(input, output, session) {
       fluidRow(
         column(4, radioButtons("scrna_embedding_color_mode", "Color UMAP by", choices = c("Cell metadata" = "metadata", "Marker expression" = "marker"), selected = input$scrna_embedding_color_mode %||% "metadata", inline = TRUE)),
         column(4, conditionalPanel("input.scrna_embedding_color_mode == 'metadata'", selectInput("scrna_embedding_color", "Metadata field", choices = choices, selected = selected_choice(input$scrna_embedding_color, choices, choices[[1]]), selectize = FALSE)), conditionalPanel("input.scrna_embedding_color_mode == 'marker'", selectInput("scrna_embedding_gene", "Marker gene", choices = scrna_dashboard_gene_choices(p), selected = selected_choice(input$scrna_embedding_gene, scrna_dashboard_gene_choices(p), ""), selectize = TRUE))),
-        column(2, numericInput("scrna_embedding_max_points", "Maximum cells", value = min(30000L, max(2000L, requested_points)), min = 2000, max = 50000, step = 1000)),
+        column(2, numericInput("scrna_embedding_max_points", "Cells shown (display only)", value = min(30000L, max(2000L, requested_points)), min = 2000, max = 50000, step = 1000), tags$p(class = "muted small-note", "Random UMAP display sample; analysis and saved object still use every cell.")),
         column(2, checkboxInput("scrna_embedding_legend", "Show legend", value = if (is.null(input$scrna_embedding_legend)) TRUE else isTRUE(input$scrna_embedding_legend)), tags$details(tags$summary("Display"), sliderInput("scrna_embedding_point_size", "Point size", min = 1, max = 8, value = input$scrna_embedding_point_size %||% 4, step = 0.5), sliderInput("scrna_embedding_opacity", "Opacity", min = 0.1, max = 1, value = input$scrna_embedding_opacity %||% 0.72, step = 0.05)))
       )
     )
