@@ -40,7 +40,7 @@ assert(
     app_env$scrna_uses_input_manifest(list(analysis_key = "scrna", scrna_input_mode = "multiple")) &&
     grepl("Read a processed Seurat or Scanpy object", app_text, fixed = TRUE) &&
     grepl("One folder containing all samples", app_text, fixed = TRUE) &&
-    grepl("new_scrna_inputs_table", app_text, fixed = TRUE) &&
+    grepl("new_scrna_inputs_editor_ui", app_text, fixed = TRUE) &&
     grepl("Use an existing sample-design file instead", app_text, fixed = TRUE),
   "scRNA setup separates processed objects from new single- or multi-sample analyses"
 )
@@ -338,6 +338,19 @@ form_values[[app_env$design_form_input_id(1, "treatment")]] <- "edited_treatment
 form_values[[app_env$design_form_input_id(1, "include")]] <- FALSE
 edited_design <- app_env$apply_design_form_values(provided_editor, form_values)
 assert(identical(edited_design$treatment[[1]], "edited_treatment") && !edited_design$include[[1]], "provided design matrices remain editable through visible form controls")
+scrna_editor <- data.frame(
+  sample_id = c("sample_1", "sample_2"), input_path = c("/input/one", "/input/two"),
+  input_type = "filtered_10x_matrix", condition = c("control", "treated"), stringsAsFactors = FALSE
+)
+scrna_form <- as.character(app_env$design_form_table_ui(scrna_editor, prefix = "new_scrna_form", columns = names(scrna_editor)))
+scrna_values <- list(new_scrna_form_2_condition = "edited_treated")
+edited_scrna <- app_env$apply_design_form_values(scrna_editor, scrna_values, prefix = "new_scrna_form")
+assert(
+  grepl("new_scrna_form_1_sample_id", scrna_form, fixed = TRUE) &&
+    grepl("new_scrna_form_2_input_path", scrna_form, fixed = TRUE) &&
+    identical(edited_scrna$condition[[2]], "edited_treated"),
+  "scRNA manifests use the same visible input-box editor and preserve form edits"
+)
 
 duplicate_design <- data.frame(
   include = TRUE, sample = c("sample-A", "sample A"), cell_type = "", condition = c("A", "B"),
@@ -1454,9 +1467,9 @@ assert(identical(normalizePath(app_env$browser_start_path(browser_file_fixture, 
 assert(
   grepl('tabPanel("Samples & Design"', app_text, fixed = TRUE) &&
     grepl('updateTabsetPanel(session, "web_main_tabs", selected = "Samples & Design")', server_source, fixed = TRUE) &&
-    grepl('output$new_scrna_inputs_table <- render_csl_table', server_source, fixed = TRUE) &&
-    grepl('editable = TRUE', server_source, fixed = TRUE),
-  "detected scRNA samples open in the dedicated top-level editable design tab"
+    grepl('output$new_scrna_inputs_editor_ui <- renderUI', server_source, fixed = TRUE) &&
+    grepl('design_form_table_ui(samples, prefix = "new_scrna_form"', server_source, fixed = TRUE),
+  "detected scRNA samples open in the top-level RNA-style form editor"
 )
 assert(
   grepl('typed_value <- path.expand', server_source, fixed = TRUE) &&

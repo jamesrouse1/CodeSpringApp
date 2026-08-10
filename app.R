@@ -1359,17 +1359,17 @@ blank_design_matrix_rows <- function(metadata_cols, rows = 8L) {
   out[, design_matrix_columns(out), drop = FALSE]
 }
 
-design_form_input_id <- function(row, column) {
-  paste0("design_form_", as.integer(row), "_", clean_name(column, "value"))
+design_form_input_id <- function(row, column, prefix = "design_form") {
+  paste0(clean_name(prefix, "design_form"), "_", as.integer(row), "_", clean_name(column, "value"))
 }
 
-apply_design_form_values <- function(df, values) {
+apply_design_form_values <- function(df, values, prefix = "design_form") {
   if (!NROW(df)) return(df)
   values <- values %||% list()
   columns <- setdiff(names(df), "status")
   for (row in seq_len(NROW(df))) {
     for (column in columns) {
-      id <- design_form_input_id(row, column)
+      id <- design_form_input_id(row, column, prefix)
       if (!id %in% names(values)) next
       value <- values[[id]]
       if (identical(column, "include")) df[[column]][row] <- as_design_bool(value)
@@ -1379,9 +1379,11 @@ apply_design_form_values <- function(df, values) {
   df
 }
 
-design_form_table_ui <- function(df) {
+design_form_table_ui <- function(df, prefix = "design_form", columns = NULL) {
   if (!NROW(df)) return(div(class = "empty-box", "No editable rows are available."))
-  columns <- design_matrix_columns(df)
+  columns <- columns %||% design_matrix_columns(df)
+  columns <- intersect(as.character(columns), names(df))
+  if (!length(columns)) return(div(class = "empty-box", "No editable columns are available."))
   df <- df[, columns, drop = FALSE]
   tags$div(
     class = "design-form-table-wrap",
@@ -1392,11 +1394,11 @@ design_form_table_ui <- function(df) {
         tags$tr(lapply(columns, function(column) {
           value <- df[[column]][row] %||% ""
           control <- if (identical(column, "include")) {
-            checkboxInput(design_form_input_id(row, column), label = NULL, value = as_design_bool(value))
+            checkboxInput(design_form_input_id(row, column, prefix), label = NULL, value = as_design_bool(value))
           } else if (identical(column, "status")) {
             tags$span(class = "design-row-status", as.character(value))
           } else {
-            textInput(design_form_input_id(row, column), label = NULL, value = as.character(value), width = "100%")
+            textInput(design_form_input_id(row, column, prefix), label = NULL, value = as.character(value), width = "100%")
           }
           tags$td(class = paste0("design-column-", clean_name(column, "value")), control)
         }))
@@ -11618,8 +11620,8 @@ ui <- fluidPage(
                    div(class = "button-row",
                        actionButton("remove_last_new_scrna_input", "Remove last sample", class = "btn-default"),
                        actionButton("clear_new_scrna_inputs", "Clear detected samples", class = "btn-default")),
-                   table_output("new_scrna_inputs_table"),
-                   tags$p(class = "muted small-note", tags$strong("Editable design matrix:"), " double-click any cell to change the sample name, path, input type, FASTQ prefix, condition, donor, or technical batch. These rows are saved as the project-local sample manifest when you create the project."),
+                   uiOutput("new_scrna_inputs_editor_ui"),
+                   tags$p(class = "muted small-note", tags$strong("Editable design matrix:"), " every value is shown in an input box, matching the RNA-seq design editor. These rows are saved as the project-local sample manifest when you create the project."),
                    actionButton("return_to_scrna_input", "Back to input data", class = "btn-default")
                  ),
                  conditionalPanel(
@@ -12126,7 +12128,7 @@ server <- function(input, output, session) {
       new_scrna_input_message(conditionMessage(checked))
       return()
     }
-    current <- new_scrna_inputs()
+    current <- apply_design_form_values(new_scrna_inputs(), reactiveValuesToList(input), "new_scrna_form")
     duplicates <- intersect(as.character(checked$sample_id), as.character(current$sample_id))
     if (length(duplicates)) {
       new_scrna_input_message(paste0("Sample name already exists: ", duplicates[[1]], ". Remove it or edit the existing row before adding this folder again."))
@@ -12145,7 +12147,7 @@ server <- function(input, output, session) {
   }, ignoreInit = TRUE)
 
   observeEvent(input$remove_last_new_scrna_input, {
-    current <- new_scrna_inputs()
+    current <- apply_design_form_values(new_scrna_inputs(), reactiveValuesToList(input), "new_scrna_form")
     if (!NROW(current)) return()
     removed <- current$sample_id[[NROW(current)]]
     new_scrna_inputs(current[-NROW(current), , drop = FALSE])
@@ -12171,20 +12173,10 @@ server <- function(input, output, session) {
       tags$p("Review and edit the design below before creating the project. These edits become the project-local sample manifest used by Cell Ranger and downstream single-cell analysis.")
     )
   })
-  output$new_scrna_inputs_table <- render_csl_table({
-    new_scrna_inputs()
-  }, page_length = 50, editable = TRUE, scroll_y = "360px")
-
-  observeEvent(input$new_scrna_inputs_table_cell_edit, {
-    info <- input$new_scrna_inputs_table_cell_edit
-    current <- new_scrna_inputs()
-    if (!NROW(current) || is.null(info$row) || is.null(info$col)) return()
-    row <- as.integer(info$row); col <- as.integer(info$col) + 1L
-    if (is.na(row) || is.na(col) || row < 1L || row > NROW(current) || col < 1L || col > NCOL(current)) return()
-    current[[col]][row] <- trimws(as.character(info$value %||% ""))
-    new_scrna_inputs(current)
-    new_scrna_input_message("Sample table updated. It will be validated when the project is created.")
-  }, ignoreInit = TRUE)
+  output$new_scrna_inputs_editor_ui <- renderUI({
+    samples <- new_scrna_inputs()
+    design_form_table_ui(samples, prefix = "new_scrna_form", columns = names(samples))
+  })
   observeEvent(input$browse_scrna_marker_file, {
     open_server_browser("scrna_marker_file", "file", input$scrna_marker_file %||% "")
   })
@@ -12877,12 +12869,14 @@ server <- function(input, output, session) {
           p$scrna_input_manifest %||% ""
         }
         manifest <- if (identical(start_mode, "new") && !use_manifest) {
-          built <- new_scrna_inputs()
+          built <- apply_design_form_values(new_scrna_inputs(), reactiveValuesToList(input), "new_scrna_form")
           if (!NROW(built)) stop("Detect and add at least one FASTQ or filtered-matrix sample before creating the project.")
           expected_samples <- input$new_scrna_sample_count %||% "multiple"
           if (identical(expected_samples, "single") && NROW(built) != 1L) stop("One sample was selected, but the input table contains ", NROW(built), " samples. Clear the table and add the intended sample folder.")
           if (identical(expected_samples, "multiple") && NROW(built) < 2L) stop("Multiple samples was selected, but only one sample was detected. Add the remaining sample folders or choose One sample.")
-          validate_scrna_manifest(built)
+          built <- validate_scrna_manifest(built)
+          new_scrna_inputs(built)
+          built
         } else if (identical(start_mode, "object")) {
           scrna_manifest_from_setup("", "", input_path)
         } else {
@@ -12989,7 +12983,7 @@ server <- function(input, output, session) {
 
   observeEvent(input$add_metadata_col, {
     if (is_scrna_project(current_project())) {
-      df <- scrna_manifest_state()
+      df <- apply_design_form_values(scrna_manifest_state(), reactiveValuesToList(input), "scrna_manifest_form")
       if (!NROW(df)) df <- data.frame(sample_id = character(0), input_path = character(0), stringsAsFactors = FALSE, check.names = FALSE)
       requested <- parse_metadata_cols(input$metadata_cols, current_project())
       for (column in requested) if (!column %in% names(df)) df[[column]] <- ""
@@ -13002,7 +12996,7 @@ server <- function(input, output, session) {
 
   observeEvent(input$add_design_rows, {
     if (is_scrna_project(current_project())) {
-      df <- scrna_manifest_state()
+      df <- apply_design_form_values(scrna_manifest_state(), reactiveValuesToList(input), "scrna_manifest_form")
       if (!NROW(df)) df <- data.frame(sample_id = character(0), input_path = character(0), stringsAsFactors = FALSE, check.names = FALSE)
       extra <- as.data.frame(lapply(df, function(x) rep("", 5L)), stringsAsFactors = FALSE, check.names = FALSE)
       if (!NCOL(extra)) extra <- data.frame(sample_id = rep("", 5L), input_path = rep("", 5L), stringsAsFactors = FALSE, check.names = FALSE)
@@ -13043,8 +13037,8 @@ server <- function(input, output, session) {
         return(div(class = "empty-box", "This project has one input. No manifest editing is needed."))
       }
       return(tagList(
-        div(class = "read-source-note", tags$strong("Single-cell sample manifest"), tags$p("This project-local copy preserves input paths plus optional condition, donor, and batch columns. Edit cells directly, then save before running.")),
-        table_output("scrna_manifest_table"),
+        div(class = "read-source-note", tags$strong("Single-cell sample manifest"), tags$p("This project-local copy preserves input paths plus optional condition, donor, and batch columns. Every value is displayed in an editable box, matching the RNA-seq design editor.")),
+        uiOutput("scrna_manifest_editor_ui"),
         tags$p(class = "muted small-note", "The original source manifest is never modified. Inputs must remain readable absolute server paths; completed results retain the saved manifest used for that run.")
       ))
     }
@@ -13058,10 +13052,11 @@ server <- function(input, output, session) {
   output$design_editor_table <- renderUI({
     design_form_table_ui(design_state())
   })
-  output$scrna_manifest_table <- render_csl_table({
-    if (!is_scrna_project(current_project())) return(data.frame())
-    scrna_manifest_state()
-  }, page_length = 100, editable = TRUE)
+  output$scrna_manifest_editor_ui <- renderUI({
+    if (!is_scrna_project(current_project())) return(NULL)
+    manifest <- scrna_manifest_state()
+    design_form_table_ui(manifest, prefix = "scrna_manifest_form", columns = names(manifest))
+  })
 
   apply_design_cell_edit <- function(info) {
     df <- design_state()
@@ -13085,21 +13080,11 @@ server <- function(input, output, session) {
     apply_design_cell_edit(input$design_table_cell_edit)
   }, ignoreInit = TRUE)
 
-  observeEvent(input$scrna_manifest_table_cell_edit, {
-    df <- scrna_manifest_state()
-    info <- input$scrna_manifest_table_cell_edit
-    if (!NROW(df) || is.null(info$row) || is.null(info$col)) return()
-    row <- as.integer(info$row)
-    col <- as.integer(info$col) + 1L
-    if (is.na(row) || is.na(col) || row < 1L || row > NROW(df) || col < 1L || col > NCOL(df)) return()
-    df[[col]][row] <- as.character(info$value %||% "")
-    scrna_manifest_state(df)
-  }, ignoreInit = TRUE)
-
   save_design_state <- function(p, is_new = FALSE) {
     if (is_scrna_project(p)) {
       if (isTRUE(p$external_results)) stop("This completed-results project is read-only. Its original input manifest was not modified.")
-      manifest <- validate_scrna_manifest(scrna_manifest_state())
+      edited_manifest <- apply_design_form_values(scrna_manifest_state(), reactiveValuesToList(input), "scrna_manifest_form")
+      manifest <- validate_scrna_manifest(edited_manifest)
       path <- p$scrna_input_manifest %||% p$design_matrix_path
       if (!nzchar(path)) path <- file.path(p$data_dir, "manifest", "design_matrix.txt")
       dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
