@@ -8773,6 +8773,26 @@ scrna_fastq_sample_names <- function(path) {
   unique(names[nzchar(names)])
 }
 
+scrna_fastq_input_rows <- function(path, single_sample_name = "") {
+  path <- normalizePath(path.expand(trimws(as.character(path %||% ""))), winslash = "/", mustWork = FALSE)
+  prefixes <- scrna_fastq_sample_names(path)
+  if (!length(prefixes)) stop("No matched 10x R1/R2 FASTQ sample prefixes were detected in: ", path)
+  custom <- trimws(as.character(single_sample_name %||% ""))
+  sample_ids <- if (length(prefixes) == 1L && nzchar(custom)) clean_name(custom, "sample") else clean_name(prefixes, "sample")
+  if (anyDuplicated(sample_ids)) stop("Detected FASTQ prefixes become duplicate sample names after filename cleanup. Edit the FASTQ names or import a sample design with unique sample_id values.")
+  data.frame(
+    sample_id = sample_ids,
+    input_path = rep(path, length(prefixes)),
+    input_type = "fastq_folder",
+    fastq_sample = prefixes,
+    condition = "",
+    donor = "",
+    technical_batch = "",
+    stringsAsFactors = FALSE,
+    check.names = FALSE
+  )
+}
+
 scrna_detect_input_type <- function(path) {
   path <- path.expand(trimws(as.character(path %||% "")))
   if (grepl("\\.rds$", path, ignore.case = TRUE)) return("seurat_rds")
@@ -11950,27 +11970,37 @@ server <- function(input, output, session) {
   observeEvent(input$add_new_scrna_input, {
     raw_name <- trimws(input$new_scrna_sample_name %||% "")
     path <- normalizePath(path.expand(trimws(input$new_scrna_matrix_path %||% "")), winslash = "/", mustWork = FALSE)
-    if (!nzchar(raw_name)) {
-      new_scrna_input_message("Enter a sample name before adding this input folder.")
-      return()
-    }
-    sample_id <- clean_name(raw_name, "sample")
     requested_type <- input$new_scrna_folder_type %||% "filtered_10x_matrix"
-    detected_fastq_names <- if (identical(requested_type, "fastq_folder")) scrna_fastq_sample_names(path) else character(0)
-    fastq_sample <- if (length(detected_fastq_names) == 1L) detected_fastq_names[[1]] else ""
-    candidate <- data.frame(sample_id = sample_id, input_path = path, input_type = requested_type, fastq_sample = fastq_sample, condition = "", donor = "", technical_batch = "", stringsAsFactors = FALSE, check.names = FALSE)
+    if (identical(requested_type, "fastq_folder")) {
+      candidate <- tryCatch(scrna_fastq_input_rows(path, raw_name), error = function(e) e)
+      if (inherits(candidate, "error")) {
+        new_scrna_input_message(conditionMessage(candidate))
+        return()
+      }
+    } else {
+      if (!nzchar(raw_name)) {
+        new_scrna_input_message("Enter a sample name before adding this filtered matrix.")
+        return()
+      }
+      candidate <- data.frame(sample_id = clean_name(raw_name, "sample"), input_path = path, input_type = requested_type, fastq_sample = "", condition = "", donor = "", technical_batch = "", stringsAsFactors = FALSE, check.names = FALSE)
+    }
     checked <- tryCatch(validate_scrna_manifest(candidate), error = function(e) e)
     if (inherits(checked, "error")) {
       new_scrna_input_message(conditionMessage(checked))
       return()
     }
     current <- new_scrna_inputs()
-    if (sample_id %in% current$sample_id) {
-      new_scrna_input_message(paste0("Sample name already exists: ", sample_id, ". Choose a unique name."))
+    duplicates <- intersect(as.character(checked$sample_id), as.character(current$sample_id))
+    if (length(duplicates)) {
+      new_scrna_input_message(paste0("Sample name already exists: ", duplicates[[1]], ". Remove it or edit the existing row before adding this folder again."))
       return()
     }
     new_scrna_inputs(rbind(current, checked[, names(current), drop = FALSE]))
-    new_scrna_input_message(paste0("Added ", sample_id, " (", checked$input_type[[1]], "). Add the next sample or edit its metadata below."))
+    if (NROW(checked) > 1L) {
+      new_scrna_input_message(paste0("Detected and added ", NROW(checked), " FASTQ samples. Cell Ranger will combine lanes within each sample prefix. Review and edit the design metadata below."))
+    } else {
+      new_scrna_input_message(paste0("Added ", checked$sample_id[[1]], " (", checked$input_type[[1]], "). Add the next sample or edit its metadata below."))
+    }
     updateTextInput(session, "new_scrna_sample_name", value = "")
     updateTextInput(session, "new_scrna_matrix_path", value = "")
   }, ignoreInit = TRUE)
@@ -12189,15 +12219,15 @@ server <- function(input, output, session) {
           conditionalPanel("input.new_scrna_manifest_source == 'build'",
             div(class = "read-source-note",
               tags$strong("Add one input folder per sample"),
-              tags$p("Choose either a filtered feature-barcode matrix or a 10x gene-expression FASTQ folder. FASTQ inputs receive their own Cell Ranger count jobs before QC. Repeat for every sample, then edit condition, donor, and technical batch directly in the table.")),
+              tags$p("Choose either a filtered feature-barcode matrix or a 10x gene-expression FASTQ folder. For a FASTQ folder, the app detects every sample prefix and combines its sequencing lanes automatically. Each detected sample receives its own Cell Ranger count job before QC.")),
             radioButtons("new_scrna_folder_type", "Folder contents", choices = c("Filtered feature-barcode matrix" = "filtered_10x_matrix", "10x gene-expression FASTQs" = "fastq_folder"), selected = "filtered_10x_matrix", inline = TRUE),
             div(class = "new-project-path-control",
               textInput("new_scrna_matrix_path", "Sample input folder", value = "", placeholder = "Absolute path containing matrix/features/barcodes or matched R1/R2 FASTQs"),
               actionButton("browse_new_scrna_matrix_path", "Browse server", class = "btn-default")
             ),
-            textInput("new_scrna_sample_name", "Sample name for this folder", value = "", placeholder = "e.g. young_control_1"),
+            textInput("new_scrna_sample_name", "Custom sample name (optional for FASTQs)", value = "", placeholder = "Used for one matrix or one FASTQ sample; multi-sample FASTQ folders are named from their prefixes"),
             div(class = "button-row",
-              actionButton("add_new_scrna_input", "Add sample", class = "btn-primary"),
+              actionButton("add_new_scrna_input", "Detect & add sample(s)", class = "btn-primary"),
               actionButton("remove_last_new_scrna_input", "Remove last", class = "btn-default"),
               actionButton("clear_new_scrna_inputs", "Clear table", class = "btn-default")
             ),

@@ -1388,6 +1388,21 @@ fastq_project <- list(
 validated_fastq <- app_env$validate_scrna_manifest(app_env$scrna_manifest(fastq_project))
 assert(identical(validated_fastq$input_type[[1]], "fastq_folder"), "scRNA sample designs detect matched 10x FASTQ folders")
 assert(identical(app_env$scrna_fastq_sample_names(fastq_dir), "donor03"), "10x FASTQ filename prefixes are inferred for Cell Ranger sample selection")
+pooled_fastq_dir <- file.path(root, "pooled_fastqs")
+dir.create(pooled_fastq_dir)
+pooled_prefixes <- c("Amor_AH07_Y_UT_F", "Amor_AH07_Y_UT_M", "Amor_AH07_O_uPAR_F", "Amor_AH07_O_uPAR_M")
+for (prefix in pooled_prefixes) for (lane in c("L001", "L002")) for (read in c("R1", "R2")) {
+  con <- gzfile(file.path(pooled_fastq_dir, paste0(prefix, "_S1_", lane, "_", read, "_001.fastq.gz")), "wt")
+  writeLines(c("@read", "ACGT", "+", "####"), con)
+  close(con)
+}
+pooled_rows <- app_env$scrna_fastq_input_rows(pooled_fastq_dir)
+assert(
+  NROW(pooled_rows) == length(pooled_prefixes) &&
+    identical(sort(pooled_rows$fastq_sample), sort(pooled_prefixes)) &&
+    length(unique(pooled_rows$input_path)) == 1L,
+  "one pooled FASTQ folder expands into one Cell Ranger design row per sample prefix while lanes remain grouped"
+)
 assert("Cell Ranger count" %in% app_env$scrna_pipeline_order(fastq_project), "FASTQ-backed scRNA projects expose Cell Ranger before input inspection")
 assert(
   grepl("run_scrna_cellranger", app_text, fixed = TRUE) && any(grepl("module load CellRanger/9.0.1", runtime_text, fixed = TRUE)),
