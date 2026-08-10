@@ -10170,13 +10170,17 @@ scrna_metric_card <- function(label, value, note = "", tone = "blue") {
 scrna_discrete_palette <- function(n) {
   n <- suppressWarnings(as.integer(n))
   if (is.na(n) || n < 1L) return(character(0))
-  grDevices::hcl.colors(n, palette = "Dynamic")
+  anchors <- scrna_expression_palette()
+  if (n == 1L) return(anchors[[ceiling(length(anchors) / 2)]])
+  expanded <- grDevices::colorRampPalette(anchors)(n + 2L)
+  expanded[seq.int(2L, n + 1L)]
 }
 
 scrna_expression_palette <- function() {
-  # Explicit hex values work across Plotly versions; named palettes such as
-  # "Viridis" are interpreted inconsistently by older Plotly installations.
-  c("#440154", "#3B528B", "#21918C", "#5EC962", "#FDE725")
+  # Exact fixed anchors from jpplot.cmapjp(): the upper 75% of RdYlBu_r,
+  # beginning at light blue and ending at deep red. Explicit hex values keep
+  # the R/Plotly dashboard consistent with the Scanpy jpplot colormap.
+  c("#90C3DD", "#C2E4EF", "#ECF7E1", "#FEF4AF", "#FDD484", "#FBA25B", "#F0653F", "#D42D26", "#A50026")
 }
 
 scrna_expression_colorscale <- function() {
