@@ -21,8 +21,8 @@ owner_path_pattern <- "(/grid/bsr/home/rouse|/home/rouse|/Users/rouse|rouse@bamd
 assert(!any(grepl(owner_path_pattern, runtime_text, ignore.case = TRUE)), "runtime code contains no hardcoded rouse home, login, or server path")
 scrna_step_meta <- app_env$run_step_meta(list(analysis_key = "scrna", analysis = "scRNA-seq", counts_only = FALSE))
 assert(
-  identical(as.character(scrna_step_meta$step), c("Input inspection", "QC & doublets", "Normalize & PCA", "Integrate & cluster", "Annotate & markers")) && NROW(scrna_step_meta) == 5L,
-  "single-cell run-step metadata exposes the five checkpointed pipeline stages"
+  identical(as.character(scrna_step_meta$step), c("Input inspection", "QC & doublets", "Normalize & PCA", "UMAP & clustering", "Annotate & markers", "Signature scoring", "Differential expression", "Pathway analysis")) && NROW(scrna_step_meta) == 8L,
+  "single-cell run-step metadata exposes the complete checkpointed analysis workflow"
 )
 assert(
   identical(app_env$scrna_stage_step("preprocess"), "Normalize & PCA") &&
@@ -1359,6 +1359,25 @@ assert(
 assert(
   grepl("scanpy_container_check", app_text, fixed = TRUE) && grepl("scrna_manifest_from_setup", app_text, fixed = TRUE),
   "scRNA setup supports an optional manifest and a shared Scanpy container"
+)
+
+object_dir <- file.path(app_env$scrna_output_dir(scrna_project), "objects")
+dir.create(object_dir, recursive = TRUE, showWarnings = FALSE)
+assert(is.null(app_env$scrna_processed_object_info(scrna_project)), "the object download stays unavailable before a final object exists")
+scanpy_object <- file.path(object_dir, "processed_scanpy.h5ad")
+seurat_object <- file.path(object_dir, "processed_seurat.rds")
+writeBin(as.raw(seq_len(16)), scanpy_object)
+writeBin(as.raw(seq_len(8)), seurat_object)
+scrna_project$scrna_engine <- "scanpy"
+download_info <- app_env$scrna_processed_object_info(scrna_project)
+assert(
+  identical(download_info$engine, "scanpy") && identical(download_info$filename, "processed_scanpy.h5ad") && identical(download_info$size, "16 B"),
+  "the scRNA object download selects the project engine's non-empty final object"
+)
+assert(
+  grepl('uiOutput("scrna_processed_object_download_ui")', app_text, fixed = TRUE) &&
+    grepl("output$download_scrna_processed_object <- downloadHandler", server_source, fixed = TRUE),
+  "the three-tab scRNA explorer exposes the processed-object download section and handler"
 )
 
 cat("CodeSpringApp fake-data helper smoke tests passed.\n")

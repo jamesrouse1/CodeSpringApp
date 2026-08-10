@@ -10196,6 +10196,33 @@ scrna_summary_value <- function(project, key, fallback = "") {
   scrna_named_value(scrna_summary_values(project), key, fallback)
 }
 
+scrna_processed_object_info <- function(project) {
+  if (is.null(project) || !isTRUE(is_scrna_project(project))) return(NULL)
+  root <- file.path(scrna_output_dir(project), "objects")
+  candidates <- c(
+    scanpy = file.path(root, "processed_scanpy.h5ad"),
+    seurat = file.path(root, "processed_seurat.rds")
+  )
+  available <- candidates[file.exists(candidates) & vapply(candidates, file_size_for, numeric(1)) > 0]
+  if (!length(available)) return(NULL)
+  preferred_engine <- tolower(as.character(project$scrna_engine %||% "auto")[[1]])
+  if (preferred_engine %in% names(available)) {
+    engine <- preferred_engine
+  } else {
+    engine <- names(available)[[which.max(file.info(available)$mtime)]]
+  }
+  path <- unname(available[[engine]])
+  info <- file.info(path)
+  list(
+    path = path,
+    engine = engine,
+    engine_label = if (identical(engine, "scanpy")) "Scanpy" else "Seurat",
+    filename = basename(path),
+    size = human_file_size(path),
+    modified = info$mtime[[1]]
+  )
+}
+
 scrna_composition_fields <- function(project) {
   path <- file.path(scrna_output_dir(project), "tables", "composition_by_sample.tsv")
   x <- safe_read_table(path, 100000)
@@ -10345,7 +10372,7 @@ scrna_results_explorer_ui <- function() {
     results_explorer_hero("Single-cell RNA-seq Results Explorer"),
     div(class = "main-tabs", tabsetPanel(
       id = "scrna_results_tabs",
-      tabPanel("Interactive UMAP", br(), h3("Interactive UMAP"), tags$p(class = "muted", "Color every cell by metadata or normalized marker expression. Hover for cell identity and metadata; use lasso or box selection to inspect cells."), uiOutput("scrna_embedding_controls_ui"), uiOutput("scrna_embedding_widget_ui"), uiOutput("scrna_selected_cells_ui")),
+      tabPanel("Interactive UMAP", br(), h3("Interactive UMAP"), tags$p(class = "muted", "Color every cell by metadata or normalized marker expression. Hover for cell identity and metadata; use lasso or box selection to inspect cells."), uiOutput("scrna_embedding_controls_ui"), uiOutput("scrna_embedding_widget_ui"), uiOutput("scrna_selected_cells_ui"), br(), uiOutput("scrna_processed_object_download_ui")),
       tabPanel("Violins", br(), h3("Expression Violins"), tags$p(class = "muted", "Compare normalized gene expression or stored signature scores across clusters, cell types, or other categorical metadata."), uiOutput("scrna_violin_controls_ui"), plotOutput("scrna_expression_violin", height = "680px"), downloadButton("download_scrna_expression_violin", "Download current violin", class = "btn-default")),
       tabPanel("QC", br(), h3("Quality Control"), uiOutput("scrna_qc_plot_ui"), br(), h4("QC summary by sample"), table_output("scrna_qc_summary"), br(), h4("Doublet calls by sample"), table_output("scrna_doublet_summary"), br(), tags$details(tags$summary("Individual doublet calls"), table_output("scrna_doublet_calls")))
     ))
@@ -14619,6 +14646,43 @@ server <- function(input, output, session) {
     selected <- selected_choice(input$scrna_umap_plot, files, unname(files)[[1]])
     tagList(selectInput("scrna_umap_plot", "Embedding", choices = files, selected = selected, selectize = FALSE), image_or_file_ui(selected, "760px"))
   })
+  output$scrna_processed_object_download_ui <- renderUI({
+    progress_refresh()
+    p <- current_project(); if (!is_scrna_project(p)) return(NULL)
+    object <- scrna_processed_object_info(p)
+    if (is.null(object)) {
+      return(div(class = "read-source-note",
+        tags$h4("Download processed object"),
+        tags$p("The downloadable final object is created after cell annotation. It is then updated in place whenever signature scoring is run."),
+        tags$p(class = "muted small-note", "The post-UMAP checkpoint is already saved on the server, so annotation can resume without repeating normalization, PCA, or UMAP.")
+      ))
+    }
+    active_annotation <- scrna_summary_value(p, "active_annotation", "")
+    signature_count <- length(grep("^signature__", scrna_embedding_columns(p)))
+    annotation_note <- if (nzchar(active_annotation)) paste0(" Active annotation: ", active_annotation, ".") else ""
+    signature_note <- if (signature_count > 0L) paste0(" Stored signatures: ", signature_count, ".") else " No signature scores have been added yet."
+    div(class = "read-source-note",
+      tags$h4("Download processed object"),
+      tags$p(tags$strong(paste0(object$engine_label, " object: ")), object$filename, " (", object$size, ")"),
+      tags$p("Includes QC-filtered raw counts, normalized expression, cell and gene metadata, PCA, the neighbor graph, UMAP, clusters, and any saved annotations or signature scores.", annotation_note, signature_note),
+      downloadButton("download_scrna_processed_object", paste0("Download ", object$filename), class = "btn-primary"),
+      tags$p(class = "muted small-note", paste0("Last updated ", format(object$modified, "%Y-%m-%d %H:%M %Z"), ". Differential-expression and pathway results stay as separate tables so the reusable object remains focused and portable. The original input checkpoint is retained on the server if QC needs to be revised."))
+    )
+  })
+  output$download_scrna_processed_object <- downloadHandler(
+    filename = function() {
+      object <- scrna_processed_object_info(current_project())
+      req(!is.null(object))
+      object$filename
+    },
+    content = function(file) {
+      object <- scrna_processed_object_info(current_project())
+      req(!is.null(object), file.exists(object$path))
+      copied <- file.copy(object$path, file, overwrite = TRUE, copy.mode = FALSE, copy.date = FALSE)
+      if (!isTRUE(copied)) stop("The processed single-cell object could not be prepared for download.")
+    },
+    contentType = "application/octet-stream"
+  )
   scrna_dashboard_marker_values <- function(project, gene) {
     root <- scrna_output_dir(project)
     scanpy_object <- file.path(root, "objects", "processed_scanpy.h5ad")
