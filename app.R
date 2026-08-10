@@ -10228,18 +10228,9 @@ scrna_results_explorer_ui <- function() {
     results_explorer_hero("Single-cell RNA-seq Results Explorer"),
     div(class = "main-tabs", tabsetPanel(
       id = "scrna_results_tabs",
-    tabPanel("Overview", br(), h3("scRNA-seq Overview"), uiOutput("scrna_overview_ui")),
-    tabPanel("Source input", br(), h3("Source Object Inspection"), tags$p(class = "muted", "This records what was present in the supplied object before CodeSpring starts its reproducible workflow. The source object itself is never changed."), table_output("scrna_input_processing"), br(), uiOutput("scrna_input_plot_ui")),
-    tabPanel("QC", br(), h3("Quality Control"), uiOutput("scrna_qc_plot_ui"), br(), h4("QC summary by sample"), table_output("scrna_qc_summary"), br(), h4("Doublet calls by sample"), table_output("scrna_doublet_summary"), br(), h4("Individual doublet calls"), table_output("scrna_doublet_calls")),
-    tabPanel("Preprocessing", br(), h3("Feature Selection and PCA"), h4("Feature filtering by sample"), tags$p(class = "muted small-note", "Genes are retained when they are detected in at least the selected number of cells within an input library; the analysis retains their union across libraries."), table_output("scrna_feature_filtering"), br(), h4("PCA variance explained"), table_output("scrna_pca_variance"), br(), h4("Highly variable genes"), table_output("scrna_hvg_table")),
-    tabPanel("Cell dashboard", br(), h3("Interactive Cell Dashboard"), tags$p(class = "muted", "Explore the UMAP directly: color cells by cluster, sample, annotation, or selected marker-gene expression. Hover for cell identity and metadata; lasso or box-select cells to inspect them."), uiOutput("scrna_embedding_controls_ui"), uiOutput("scrna_embedding_widget_ui"), uiOutput("scrna_selected_cells_ui"), br(), tags$details(tags$summary("Static UMAP figures and cell metadata"), br(), uiOutput("scrna_umap_plot_ui"), br(), h4("Cell metadata preview"), tags$p(class = "muted small-note", "Previewing the first 5,000 cells. Download the complete metadata table from Downloads."), table_output("scrna_cell_metadata"))),
-    tabPanel("Expression violins", br(), h3("Expression Distributions"), tags$p(class = "muted", "Compare normalized expression for an individual gene or a stored signature score across clusters, cell types, or other categorical metadata."), uiOutput("scrna_violin_controls_ui"), plotOutput("scrna_expression_violin", height = "680px"), downloadButton("download_scrna_expression_violin", "Download current violin", class = "btn-default")),
-    tabPanel("Composition", br(), h3("Cell-type Composition"), tags$p(class = "muted", "Exact cell counts and within-sample proportions are calculated by the workflow before any browser rendering or UMAP sampling."), uiOutput("scrna_composition_plot_ui"), br(), h4("Cells by cluster and annotation"), table_output("scrna_cluster_sizes"), br(), h4("Exact composition table"), tags$p(class = "muted small-note", "This complete table is never grouped or rounded; use it for reporting and download it from Downloads."), table_output("scrna_composition_table")),
-    tabPanel("Markers", br(), h3("Cluster Markers"), tags$p(class = "muted", "Start with the ten strongest markers for one cluster; the complete ranked marker table remains available below and in Downloads."), uiOutput("scrna_top_markers_ui"), table_output("scrna_top_markers"), br(), uiOutput("scrna_marker_score_ui"), tags$details(tags$summary("Full ranked marker table"), br(), table_output("scrna_marker_table"))),
-    tabPanel("Signatures", br(), h3("Signature Scores"), tags$p(class = "muted", "Scores are calculated from normalized expression and retained as metadata for UMAP coloring and downstream grouping."), h4("Gene coverage"), table_output("scrna_signature_coverage"), br(), h4("Summary by sample and annotation"), table_output("scrna_signature_summary")),
-    tabPanel("Differential expression", br(), h3("Differential Expression"), tags$p(class = "muted", "Browse global and population-specific results. Sample-level pseudobulk DESeq2 is the primary inferential result; cell-level Wilcoxon remains exploratory."), uiOutput("scrna_de_result_controls_ui"), table_output("scrna_de_result_table"), br(), tags$details(tags$summary("Run status by population"), br(), table_output("scrna_de_manifest"))),
-    tabPanel("Pathways", br(), h3("Ranked Pathway Analysis"), tags$p(class = "muted", "fgseaMultilevel uses the complete pseudobulk Wald-statistic ranking and reports normalized enrichment scores and FDR. The clean top-20 figure is available in Downloads."), table_output("scrna_pathway_table")),
-      tabPanel("Downloads", br(), h3("Completed Files"), tags$p(class = "muted", "Select a result to preview it in the app or download the original file."), uiOutput("scrna_file_ui"), uiOutput("scrna_file_view"), br(), downloadButton("download_scrna_file", "Download selected file", class = "btn-default"))
+      tabPanel("Interactive UMAP", br(), h3("Interactive UMAP"), tags$p(class = "muted", "Color every cell by metadata or normalized marker expression. Hover for cell identity and metadata; use lasso or box selection to inspect cells."), uiOutput("scrna_embedding_controls_ui"), uiOutput("scrna_embedding_widget_ui"), uiOutput("scrna_selected_cells_ui")),
+      tabPanel("Violins", br(), h3("Expression Violins"), tags$p(class = "muted", "Compare normalized gene expression or stored signature scores across clusters, cell types, or other categorical metadata."), uiOutput("scrna_violin_controls_ui"), plotOutput("scrna_expression_violin", height = "680px"), downloadButton("download_scrna_expression_violin", "Download current violin", class = "btn-default")),
+      tabPanel("QC", br(), h3("Quality Control"), uiOutput("scrna_qc_plot_ui"), br(), h4("QC summary by sample"), table_output("scrna_qc_summary"), br(), h4("Doublet calls by sample"), table_output("scrna_doublet_summary"), br(), tags$details(tags$summary("Individual doublet calls"), table_output("scrna_doublet_calls")))
     ))
   ))
 }
@@ -14399,7 +14390,9 @@ server <- function(input, output, session) {
     cache_path <- file.path(root, "tables", "dashboard_marker_cache", paste0(safe_gene, ".tsv.gz"))
     object_info <- file.info(checkpoint)
     stamp <- paste(project$id %||% project$name, engine, gene, object_info$size, object_info$mtime, sep = "::")
-    cached <- scrna_dashboard_expression_cache()
+    # Do not make the plot reactive to its own cache update; otherwise the
+    # first request for a gene immediately schedules a redundant redraw.
+    cached <- isolate(scrna_dashboard_expression_cache())
     if (identical(cached$stamp %||% "", stamp)) return(cached$values)
     if (!file.exists(cache_path) || file.info(cache_path)$mtime < object_info$mtime) {
       dir.create(dirname(cache_path), recursive = TRUE, showWarnings = FALSE)
@@ -14431,16 +14424,16 @@ server <- function(input, output, session) {
     if (!length(group_choices)) return(div(class = "empty-box", "Complete UMAP and annotation to compare expression distributions by cluster or cell type."))
     mode_choices <- c("Individual gene" = "gene")
     if (length(signatures)) mode_choices <- c(mode_choices, "Stored signature score" = "signature")
-    mode <- selected_choice(input$scrna_violin_value_mode, mode_choices, "gene")
+    mode <- selected_choice(isolate(input$scrna_violin_value_mode), mode_choices, "gene")
     genes <- scrna_dashboard_gene_choices(p)
     signature_choices <- stats::setNames(signatures, gsub("^signature__", "", signatures))
     facet_choices <- c("No facets" = "", stats::setNames(intersect(c("sample_id", "condition", "batch"), columns), intersect(c("sample_id", "condition", "batch"), columns)))
     tagList(
       fluidRow(
         column(3, radioButtons("scrna_violin_value_mode", "Show", choices = mode_choices, selected = mode, inline = FALSE)),
-        column(3, conditionalPanel("input.scrna_violin_value_mode == 'gene'", selectInput("scrna_violin_gene", "Gene", choices = genes, selected = selected_choice(input$scrna_violin_gene, genes, if (length(genes)) genes[[1]] else ""), selectize = TRUE)), conditionalPanel("input.scrna_violin_value_mode == 'signature'", selectInput("scrna_violin_signature", "Signature", choices = signature_choices, selected = selected_choice(input$scrna_violin_signature, signature_choices, if (length(signature_choices)) unname(signature_choices)[[1]] else ""), selectize = FALSE))),
-        column(3, selectInput("scrna_violin_group", "Separate violins by", choices = group_choices, selected = selected_choice(input$scrna_violin_group, group_choices, if ("cluster" %in% group_choices) "cluster" else group_choices[[1]]), selectize = FALSE)),
-        column(3, selectInput("scrna_violin_facet", "Optional facets", choices = facet_choices, selected = selected_choice(input$scrna_violin_facet, facet_choices, ""), selectize = FALSE))
+        column(3, conditionalPanel("input.scrna_violin_value_mode == 'gene'", selectInput("scrna_violin_gene", "Gene", choices = genes, selected = selected_choice(isolate(input$scrna_violin_gene), genes, if (length(genes)) genes[[1]] else ""), selectize = TRUE)), conditionalPanel("input.scrna_violin_value_mode == 'signature'", selectInput("scrna_violin_signature", "Signature", choices = signature_choices, selected = selected_choice(isolate(input$scrna_violin_signature), signature_choices, if (length(signature_choices)) unname(signature_choices)[[1]] else ""), selectize = FALSE))),
+        column(3, selectInput("scrna_violin_group", "Separate violins by", choices = group_choices, selected = selected_choice(isolate(input$scrna_violin_group), group_choices, if ("cluster" %in% group_choices) "cluster" else group_choices[[1]]), selectize = FALSE)),
+        column(3, selectInput("scrna_violin_facet", "Optional facets", choices = facet_choices, selected = selected_choice(isolate(input$scrna_violin_facet), facet_choices, ""), selectize = FALSE))
       ),
       tags$p(class = "muted small-note", if (length(signatures)) "Stored signatures are available because signature scoring has been completed. Gene violins use normalized expression from the processed object." else "Run Signature scoring to add reusable signature-score violins. Gene violins use normalized expression from the processed object.")
     )
@@ -14505,7 +14498,6 @@ server <- function(input, output, session) {
     content = function(file) ggplot2::ggsave(file, scrna_violin_plot_object(), width = 10, height = 6.5, dpi = 220)
   )
   output$scrna_embedding_controls_ui <- renderUI({
-    progress_refresh()
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
     columns <- scrna_embedding_columns(p)
     if (!all(c("UMAP_1", "UMAP_2") %in% columns)) {
@@ -14515,15 +14507,14 @@ server <- function(input, output, session) {
     if (!length(choices)) return(div(class = "empty-box", "The embedding table has coordinates but no cell-level annotation columns to color."))
     tagList(
       fluidRow(
-        column(5, radioButtons("scrna_embedding_color_mode", "Color UMAP by", choices = c("Cell metadata" = "metadata", "Marker expression" = "marker"), selected = input$scrna_embedding_color_mode %||% "metadata", inline = TRUE)),
-        column(5, conditionalPanel("input.scrna_embedding_color_mode == 'metadata'", selectInput("scrna_embedding_color", "Metadata field", choices = choices, selected = selected_choice(input$scrna_embedding_color, choices, choices[[1]]), selectize = FALSE)), conditionalPanel("input.scrna_embedding_color_mode == 'marker'", selectInput("scrna_embedding_gene", "Marker gene", choices = scrna_dashboard_gene_choices(p), selected = selected_choice(input$scrna_embedding_gene, scrna_dashboard_gene_choices(p), ""), selectize = TRUE))),
-        column(2, checkboxInput("scrna_embedding_legend", "Show legend", value = if (is.null(input$scrna_embedding_legend)) TRUE else isTRUE(input$scrna_embedding_legend)), tags$details(tags$summary("Display"), sliderInput("scrna_embedding_point_size", "Point size", min = 1, max = 8, value = input$scrna_embedding_point_size %||% 4, step = 0.5), sliderInput("scrna_embedding_opacity", "Opacity", min = 0.1, max = 1, value = input$scrna_embedding_opacity %||% 0.72, step = 0.05)))
+        column(5, radioButtons("scrna_embedding_color_mode", "Color UMAP by", choices = c("Cell metadata" = "metadata", "Marker expression" = "marker"), selected = isolate(input$scrna_embedding_color_mode) %||% "metadata", inline = TRUE)),
+        column(5, conditionalPanel("input.scrna_embedding_color_mode == 'metadata'", selectInput("scrna_embedding_color", "Metadata field", choices = choices, selected = selected_choice(isolate(input$scrna_embedding_color), choices, choices[[1]]), selectize = FALSE)), conditionalPanel("input.scrna_embedding_color_mode == 'marker'", selectInput("scrna_embedding_gene", "Marker gene", choices = scrna_dashboard_gene_choices(p), selected = selected_choice(isolate(input$scrna_embedding_gene), scrna_dashboard_gene_choices(p), ""), selectize = TRUE))),
+        column(2, checkboxInput("scrna_embedding_legend", "Show legend", value = if (is.null(isolate(input$scrna_embedding_legend))) TRUE else isTRUE(isolate(input$scrna_embedding_legend))), tags$details(tags$summary("Display"), sliderInput("scrna_embedding_point_size", "Point size", min = 1, max = 8, value = isolate(input$scrna_embedding_point_size) %||% 4, step = 0.5), sliderInput("scrna_embedding_opacity", "Opacity", min = 0.1, max = 1, value = isolate(input$scrna_embedding_opacity) %||% 0.72, step = 0.05)))
       ),
       tags$p(class = "muted small-note", "Showing all cells in the saved UMAP.")
     )
   })
   output$scrna_embedding_widget_ui <- renderUI({
-    progress_refresh()
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
     if (!PLOTLY_AVAILABLE) return(div(class = "empty-box", "Interactive UMAP support is not installed on this app server yet. The publication-ready UMAP figures are available below."))
     plotly::plotlyOutput("scrna_embedding_plot", height = "700px")
@@ -14587,7 +14578,6 @@ server <- function(input, output, session) {
             table_output("scrna_selected_cells"))
   })
   if (PLOTLY_AVAILABLE) output$scrna_embedding_plot <- plotly::renderPlotly({
-    progress_refresh()
     p <- current_project()
     color_mode <- input$scrna_embedding_color_mode %||% "metadata"
     color_column <- if (identical(color_mode, "metadata")) scrna_embedding_color_column(p, input$scrna_embedding_color %||% "") else ""
@@ -14612,7 +14602,13 @@ server <- function(input, output, session) {
       value <- x[[color_column]]
     }
     hover_columns <- intersect(c("cell", "sample_id", "condition", "batch", "cluster", "cell_type", "annotation_source"), names(x))
-    hover <- apply(x[, hover_columns, drop = FALSE], 1, function(row) paste(paste(names(row), row, sep = ": "), collapse = "<br>"))
+    # Build hover labels column-wise; this avoids an expensive row-wise apply
+    # when the dashboard contains tens or hundreds of thousands of cells.
+    hover <- rep("", NROW(x))
+    for (column in hover_columns) {
+      part <- paste0(column, ": ", as.character(x[[column]]))
+      hover <- if (identical(column, hover_columns[[1]])) part else paste0(hover, "<br>", part)
+    }
     if (identical(color_mode, "marker")) hover <- paste0(hover, "<br>", marker_gene, ": ", sprintf("%.3f", value))
     force_discrete <- identical(color_mode, "metadata") && color_column %in% scrna_discrete_metadata_fields(p)
     if (!force_discrete && (is.numeric(value) || is.integer(value))) {
