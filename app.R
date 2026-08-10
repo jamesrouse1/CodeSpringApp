@@ -8831,7 +8831,35 @@ scanpy_container_check <- function() {
   list(ready = TRUE, state = "Ready", path = container, detail = "All H5AD jobs use this shared, versioned Scanpy container. No per-user Python environment is created.")
 }
 
-submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto", normalization = "auto", integration = "auto", batch_column = "batch", cluster_resolution = 0.6, min_features = 200, min_counts = 0, max_features = 0, max_percent_mt = 20, min_cells_per_gene = 3, n_pcs = 30, n_neighbors = 15, umap_min_dist = 0.5, umap_spread = 1, umap_metric = "euclidean", umap_init_pos = "spectral", doublet_method = "auto", doublet_rate = 0.05, remove_doublets = TRUE, seed = 1234, scvi_max_epochs = 400, marker_file = "", celltype_file = "", marker_upload = NULL, celltype_upload = NULL, marker_source = "server", celltype_source = "server", annotation_name = "cell_type", signature_file = "", signature_upload = NULL, signature_source = "server", de_group_column = "condition", de_reference = "", de_comparison = "", de_annotation_column = "", de_annotation_values = "all", de_method = "both", de_covariates = character(0), pathway_gmt_file = "", pathway_gmt_upload = NULL, pathway_source = "server") {
+scrna_manual_gene_entry <- function(name, gene_text, label = "Gene set", minimum_genes = 2L) {
+  name <- trimws(as.character(name %||% ""))
+  if (!nzchar(name)) stop(label, " needs a name.")
+  lines <- unlist(strsplit(as.character(gene_text %||% ""), "\\r?\\n", perl = TRUE), use.names = FALSE)
+  genes <- unique(trimws(lines))
+  genes <- genes[nzchar(genes)]
+  if (any(grepl("[,;[:space:]]", genes))) stop("Enter exactly one gene per line; do not use commas, semicolons, or spaces.")
+  if (length(genes) < minimum_genes) stop(label, " needs at least ", minimum_genes, " unique genes.")
+  list(name = name, genes = genes)
+}
+
+write_scrna_manual_gene_sets <- function(project, entries, set_column, directory, prefix) {
+  if (!length(entries)) stop("Add at least one named gene set before submitting this job.")
+  if (is.null(names(entries)) || any(!nzchar(trimws(names(entries))))) stop("Every gene set needs a name.")
+  rows <- do.call(rbind, lapply(seq_along(entries), function(index) {
+    genes <- unique(trimws(as.character(entries[[index]] %||% character(0))))
+    genes <- genes[nzchar(genes)]
+    if (length(genes) < 2L) stop("Each named gene set needs at least two unique genes.")
+    data.frame(set_name = rep(names(entries)[[index]], length(genes)), gene = genes, stringsAsFactors = FALSE)
+  }))
+  names(rows)[names(rows) == "set_name"] <- set_column
+  destination <- file.path(project$data_dir, "uploads", directory)
+  dir.create(destination, recursive = TRUE, showWarnings = FALSE)
+  path <- tempfile(pattern = paste0(prefix, "_"), tmpdir = destination, fileext = ".tsv")
+  utils::write.table(rows, path, sep = "\t", row.names = FALSE, quote = FALSE)
+  normalizePath(path, winslash = "/", mustWork = TRUE)
+}
+
+submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto", normalization = "auto", integration = "auto", batch_column = "batch", cluster_resolution = 0.6, min_features = 200, min_counts = 0, max_features = 0, max_percent_mt = 20, min_cells_per_gene = 3, n_pcs = 30, n_neighbors = 15, umap_min_dist = 0.5, umap_spread = 1, umap_metric = "euclidean", umap_init_pos = "spectral", doublet_method = "auto", doublet_rate = 0.05, remove_doublets = TRUE, seed = 1234, scvi_max_epochs = 400, marker_file = "", celltype_file = "", marker_upload = NULL, celltype_upload = NULL, marker_source = "server", celltype_source = "server", marker_manual = list(), annotation_name = "cell_type", signature_file = "", signature_upload = NULL, signature_source = "server", signature_manual = list(), de_group_column = "condition", de_reference = "", de_comparison = "", de_annotation_column = "", de_annotation_values = "all", de_method = "both", de_covariates = character(0), pathway_gmt_file = "", pathway_gmt_upload = NULL, pathway_source = "server") {
   stage <- tolower(trimws(as.character(stage %||% "inspect")))
   step_label <- tryCatch(scrna_stage_step(stage), error = function(e) "")
   if (!is_scrna_project(project)) return(record_preflight_failure(project, step_label %||% "scRNA processing", "This is not an scRNA-seq project.", "scrna"))
@@ -8901,6 +8929,15 @@ submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto
   annotation_name <- gsub("^_+|_+$", "", annotation_name)
   if (!nzchar(annotation_name)) annotation_name <- "cell_type"
   if (grepl("^[0-9]", annotation_name)) annotation_name <- paste0("annotation_", annotation_name)
+  if (identical(stage, "annotate") && identical(marker_source, "manual")) {
+    manual_path <- tryCatch(
+      write_scrna_manual_gene_sets(project, marker_manual, "cell_type", file.path("annotations", "manual_markers"), paste0(annotation_name, "_markers")),
+      error = function(e) e
+    )
+    if (inherits(manual_path, "error")) return(record_preflight_failure(project, step_label, conditionMessage(manual_path), "scrna"))
+    marker_file <- manual_path
+    marker_source <- "server"
+  }
   if (identical(stage, "annotate") && identical(marker_source, "upload")) {
     marker_file <- copy_uploaded_project_file(marker_upload, file.path(project$data_dir, "uploads", "annotations", "markers"), "marker list", c("tsv", "txt"))
   }
@@ -8909,6 +8946,15 @@ submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto
   }
   if (identical(stage, "score") && identical(signature_source, "upload")) {
     signature_file <- copy_uploaded_project_file(signature_upload, file.path(project$data_dir, "uploads", "signatures"), "signature list", c("tsv", "txt"))
+  }
+  if (identical(stage, "score") && identical(signature_source, "manual")) {
+    manual_path <- tryCatch(
+      write_scrna_manual_gene_sets(project, signature_manual, "signature", file.path("signatures", "manual"), "signatures"),
+      error = function(e) e
+    )
+    if (inherits(manual_path, "error")) return(record_preflight_failure(project, step_label, conditionMessage(manual_path), "scrna"))
+    signature_file <- manual_path
+    signature_source <- "server"
   }
   if (identical(stage, "pathway") && identical(pathway_source, "upload")) {
     pathway_gmt_file <- copy_uploaded_project_file(pathway_gmt_upload, file.path(project$data_dir, "uploads", "pathways"), "GMT collection", c("gmt", "txt"))
@@ -11269,6 +11315,10 @@ server <- function(input, output, session) {
   scrna_qc_defaults_applied <- reactiveVal(character(0))
   scrna_umap_defaults_applied <- reactiveVal(character(0))
   scrna_dashboard_expression_cache <- reactiveVal(list())
+  # Named manual marker/signature collections are stored per project for the
+  # browser session. A separate immutable TSV snapshot is written on submit.
+  scrna_manual_annotation_sets <- reactiveVal(list())
+  scrna_manual_signature_sets <- reactiveVal(list())
   cutrun_normalization_choice <- reactiveVal("spikein")
   genome_browser_mode_state <- reactiveVal("")
   path_browser <- reactiveValues(target = "", mode = "dir", path = CURRENT_HOME, selected_file = "", message = "")
@@ -11961,6 +12011,29 @@ server <- function(input, output, session) {
     selected <- input$project_id
     !is.null(selected) && length(selected) && nzchar(selected) && !identical(selected, "__new__")
   })
+
+  scrna_manual_project_key <- function(project = current_project()) {
+    as.character(project$id %||% project$data_dir %||% project$name %||% "current_project")
+  }
+  scrna_manual_entries <- function(store, project = current_project()) {
+    collections <- store()
+    collections[[scrna_manual_project_key(project)]] %||% list()
+  }
+  set_scrna_manual_entries <- function(store, entries, project = current_project()) {
+    collections <- isolate(store())
+    collections[[scrna_manual_project_key(project)]] <- entries
+    store(collections)
+    invisible(entries)
+  }
+  add_scrna_manual_entry <- function(store, name, gene_text, label) {
+    entry <- scrna_manual_gene_entry(name, gene_text, label, minimum_genes = 2L)
+    entries <- isolate(scrna_manual_entries(store))
+    duplicate <- which(tolower(names(entries)) == tolower(entry$name))
+    if (length(duplicate)) entries <- entries[-duplicate]
+    entries[[entry$name]] <- entry$genes
+    set_scrna_manual_entries(store, entries)
+    entry
+  }
 
   observe({
     viewer_only <- isTRUE(current_project()$external_results)
@@ -13133,6 +13206,61 @@ server <- function(input, output, session) {
     )
   })
 
+  scrna_manual_collection_ui <- function(entries, noun, remove_input, remove_button) {
+    if (!length(entries)) return(div(class = "empty-box", paste0("No ", noun, "s have been added yet.")))
+    cards <- lapply(names(entries), function(name) {
+      genes <- entries[[name]]
+      preview <- paste(head(genes, 8L), collapse = ", ")
+      if (length(genes) > 8L) preview <- paste0(preview, ", …")
+      div(class = "resource-card", tags$strong(name), tags$p(class = "muted small-note", paste(length(genes), "genes")), tags$p(class = "status-path", preview))
+    })
+    tagList(
+      div(class = "resource-strip", cards),
+      fluidRow(
+        column(8, selectInput(remove_input, paste("Remove", noun), choices = names(entries), selected = names(entries)[[1]], selectize = FALSE)),
+        column(4, br(), actionButton(remove_button, paste("Remove selected", noun), class = "btn-default"))
+      )
+    )
+  }
+
+  output$scrna_manual_annotation_entries_ui <- renderUI({
+    scrna_manual_collection_ui(scrna_manual_entries(scrna_manual_annotation_sets), "cell type", "scrna_manual_annotation_remove_name", "scrna_manual_annotation_remove")
+  })
+  output$scrna_manual_signature_entries_ui <- renderUI({
+    scrna_manual_collection_ui(scrna_manual_entries(scrna_manual_signature_sets), "signature", "scrna_manual_signature_remove_name", "scrna_manual_signature_remove")
+  })
+
+  observeEvent(input$scrna_manual_annotation_add, {
+    result <- tryCatch(add_scrna_manual_entry(scrna_manual_annotation_sets, input$scrna_manual_annotation_cell_type, input$scrna_manual_annotation_genes, "Cell type"), error = function(e) e)
+    if (inherits(result, "error")) return(showNotification(conditionMessage(result), type = "error", duration = 7))
+    updateTextInput(session, "scrna_manual_annotation_cell_type", value = "")
+    updateTextAreaInput(session, "scrna_manual_annotation_genes", value = "")
+    showNotification(paste0("Added ", result$name, " (", length(result$genes), " genes)."), type = "message", duration = 4)
+  }, ignoreInit = TRUE)
+  observeEvent(input$scrna_manual_annotation_remove, {
+    name <- input$scrna_manual_annotation_remove_name %||% ""
+    entries <- isolate(scrna_manual_entries(scrna_manual_annotation_sets))
+    if (nzchar(name) && name %in% names(entries)) {
+      entries[[name]] <- NULL
+      set_scrna_manual_entries(scrna_manual_annotation_sets, entries)
+    }
+  }, ignoreInit = TRUE)
+  observeEvent(input$scrna_manual_signature_add, {
+    result <- tryCatch(add_scrna_manual_entry(scrna_manual_signature_sets, input$scrna_manual_signature_name, input$scrna_manual_signature_genes, "Signature"), error = function(e) e)
+    if (inherits(result, "error")) return(showNotification(conditionMessage(result), type = "error", duration = 7))
+    updateTextInput(session, "scrna_manual_signature_name", value = "")
+    updateTextAreaInput(session, "scrna_manual_signature_genes", value = "")
+    showNotification(paste0("Added ", result$name, " (", length(result$genes), " genes)."), type = "message", duration = 4)
+  }, ignoreInit = TRUE)
+  observeEvent(input$scrna_manual_signature_remove, {
+    name <- input$scrna_manual_signature_remove_name %||% ""
+    entries <- isolate(scrna_manual_entries(scrna_manual_signature_sets))
+    if (nzchar(name) && name %in% names(entries)) {
+      entries[[name]] <- NULL
+      set_scrna_manual_entries(scrna_manual_signature_sets, entries)
+    }
+  }, ignoreInit = TRUE)
+
   output$scrna_annotation_settings_ui <- renderUI({
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
     engine <- scrna_ui_engine()
@@ -13145,25 +13273,47 @@ server <- function(input, output, session) {
         tags$p(paste0("The app automatically loads the post-UMAP ", engine_name, " object: checkpoints/", checkpoint_name, ". You do not need to select another object here.")),
         tags$p(paste0("The completed annotated object will be saved as objects/", output_name, "."))
       ),
-      textInput("scrna_annotation_name", "Annotation metadata name", value = input$scrna_annotation_name %||% "cell_type", placeholder = "For example: cell_type_bone_marrow"),
+      textInput("scrna_annotation_name", "Annotation metadata name", value = isolate(input$scrna_annotation_name) %||% "cell_type", placeholder = "For example: cell_type_bone_marrow"),
       tags$p(class = "muted small-note", "Use a new name for each marker system (for example cell_type_broad and cell_type_fine). Existing annotation and signature metadata are retained in the processed object."),
-      tags$p(class = "muted small-note", "The marker list is a TSV with cell_type and gene columns; it works with either engine. An optional cell-to-cell-type mapping takes priority over marker scoring. If neither is supplied, cluster IDs are retained as provisional labels."),
-      radioButtons("scrna_marker_source", "Marker list source", choices = c("Browse or paste a server path" = "server", "Upload from laptop" = "upload"), selected = input$scrna_marker_source %||% "server", inline = TRUE),
-      conditionalPanel("input.scrna_marker_source == 'server'", div(class = "new-project-path-control", textInput("scrna_marker_file", "Marker list", value = input$scrna_marker_file %||% "", placeholder = "Absolute server .tsv with cell_type and gene columns"), actionButton("browse_scrna_marker_file", "Browse server", class = "btn-default"))),
+      radioButtons("scrna_marker_source", "How do you want to provide marker genes?", choices = c("Enter cell types here" = "manual", "Browse or paste a server path" = "server", "Upload from laptop" = "upload"), selected = isolate(input$scrna_marker_source) %||% "manual", inline = TRUE),
+      conditionalPanel("input.scrna_marker_source == 'manual'", div(class = "read-source-note",
+        tags$strong("Add one cell type at a time"),
+        tags$p("Give the cell type a clear name, enter one marker gene per line, and add it to the collection. Re-entering the same cell-type name replaces that entry."),
+        textInput("scrna_manual_annotation_cell_type", "Cell type name", value = "", placeholder = "For example: Monocyte"),
+        textAreaInput("scrna_manual_annotation_genes", "Marker genes — one per line", value = "", rows = 8, placeholder = "Lyz2\nLst1\nCsf1r\nCtss"),
+        actionButton("scrna_manual_annotation_add", "Add or update cell type", class = "btn-default"),
+        br(), br(), tags$h4("Cell types queued for annotation"), uiOutput("scrna_manual_annotation_entries_ui")
+      )),
+      conditionalPanel("input.scrna_marker_source == 'server'", div(class = "new-project-path-control", textInput("scrna_marker_file", "Marker list", value = isolate(input$scrna_marker_file) %||% "", placeholder = "Absolute server .tsv with cell_type and gene columns"), actionButton("browse_scrna_marker_file", "Browse server", class = "btn-default"))),
       conditionalPanel("input.scrna_marker_source == 'upload'", fileInput("scrna_marker_upload", "Marker list from laptop", accept = c(".tsv", ".txt"))),
-      radioButtons("scrna_celltype_source", "Cell-to-cell-type mapping source", choices = c("Browse or paste a server path" = "server", "Upload from laptop" = "upload"), selected = input$scrna_celltype_source %||% "server", inline = TRUE),
-      conditionalPanel("input.scrna_celltype_source == 'server'", div(class = "new-project-path-control", textInput("scrna_celltype_file", "Cell-to-cell-type mapping", value = input$scrna_celltype_file %||% "", placeholder = "Absolute server .tsv with cell/barcode and cell_type columns"), actionButton("browse_scrna_celltype_file", "Browse server", class = "btn-default"))),
-      conditionalPanel("input.scrna_celltype_source == 'upload'", fileInput("scrna_celltype_upload", "Cell-to-cell-type mapping from laptop", accept = c(".tsv", ".txt")))
+      tags$p(class = "muted small-note", "Each cluster is assigned to the cell type with the highest mean normalized marker score. At least two unique genes are required per cell type."),
+      tags$details(tags$summary("Optional direct per-cell mapping"),
+        tags$p(class = "muted small-note", "Use this only when you already have a cell/barcode-to-cell-type table. It takes priority over marker scoring."),
+        checkboxInput("scrna_use_celltype_mapping", "Use a direct per-cell mapping instead of marker scoring", value = isTRUE(isolate(input$scrna_use_celltype_mapping))),
+        conditionalPanel("input.scrna_use_celltype_mapping",
+          radioButtons("scrna_celltype_source", "Cell-to-cell-type mapping source", choices = c("Browse or paste a server path" = "server", "Upload from laptop" = "upload"), selected = isolate(input$scrna_celltype_source) %||% "server", inline = TRUE),
+          conditionalPanel("input.scrna_celltype_source == 'server'", div(class = "new-project-path-control", textInput("scrna_celltype_file", "Cell-to-cell-type mapping", value = isolate(input$scrna_celltype_file) %||% "", placeholder = "Absolute server .tsv with cell/barcode and cell_type columns"), actionButton("browse_scrna_celltype_file", "Browse server", class = "btn-default"))),
+          conditionalPanel("input.scrna_celltype_source == 'upload'", fileInput("scrna_celltype_upload", "Cell-to-cell-type mapping from laptop", accept = c(".tsv", ".txt")))
+        )
+      )
     )
   })
 
   output$scrna_signature_settings_ui <- renderUI({
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
     tagList(
-      tags$p(class = "muted small-note", "TSV format: signature and gene columns. Multiple rows form each signature; multiple signature names can be scored in one run. Scores use normalized expression, never scaled PCA values."),
-      radioButtons("scrna_signature_source", "Signature list source", choices = c("Browse or paste a server path" = "server", "Upload from laptop" = "upload"), selected = input$scrna_signature_source %||% "server", inline = TRUE),
-      conditionalPanel("input.scrna_signature_source == 'server'", div(class = "new-project-path-control", textInput("scrna_signature_file", "Signature list", value = input$scrna_signature_file %||% "", placeholder = "Absolute server .tsv with signature and gene columns"), actionButton("browse_scrna_signature_file", "Browse server", class = "btn-default"))),
-      conditionalPanel("input.scrna_signature_source == 'upload'", fileInput("scrna_signature_upload", "Signature list from laptop", accept = c(".tsv", ".txt")))
+      tags$p(class = "muted small-note", "Add every signature you want to calculate, review the collection, and then click Run signature scoring once. All signatures are scored in the same submitted job using normalized expression, never scaled PCA values."),
+      radioButtons("scrna_signature_source", "How do you want to provide signatures?", choices = c("Enter signatures here" = "manual", "Browse or paste a server path" = "server", "Upload from laptop" = "upload"), selected = isolate(input$scrna_signature_source) %||% "manual", inline = TRUE),
+      conditionalPanel("input.scrna_signature_source == 'manual'", div(class = "read-source-note",
+        tags$strong("Add one signature at a time"),
+        textInput("scrna_manual_signature_name", "Signature name", value = "", placeholder = "For example: Interferon_response"),
+        textAreaInput("scrna_manual_signature_genes", "Signature genes — one per line", value = "", rows = 8, placeholder = "Stat1\nIrf7\nIsg15\nIfit1"),
+        actionButton("scrna_manual_signature_add", "Add or update signature", class = "btn-default"),
+        br(), br(), tags$h4("Signatures queued for scoring"), uiOutput("scrna_manual_signature_entries_ui")
+      )),
+      conditionalPanel("input.scrna_signature_source == 'server'", div(class = "new-project-path-control", textInput("scrna_signature_file", "Signature list", value = isolate(input$scrna_signature_file) %||% "", placeholder = "Absolute server .tsv with signature and gene columns"), actionButton("browse_scrna_signature_file", "Browse server", class = "btn-default"))),
+      conditionalPanel("input.scrna_signature_source == 'upload'", fileInput("scrna_signature_upload", "Signature list from laptop", accept = c(".tsv", ".txt"))),
+      tags$p(class = "muted small-note", "At least two unique genes are required per signature. Missing genes are recorded in the output coverage table; signatures with no usable genes are rejected by the pipeline.")
     )
   })
 
@@ -13667,16 +13817,18 @@ server <- function(input, output, session) {
         remove_doublets = isTRUE(input$scrna_remove_doublets),
         seed = input$scrna_seed %||% 1234,
         scvi_max_epochs = input$scrna_scvi_max_epochs %||% 400,
-        marker_file = input$scrna_marker_file %||% "",
-        celltype_file = input$scrna_celltype_file %||% "",
-        marker_upload = input$scrna_marker_upload,
-        celltype_upload = input$scrna_celltype_upload,
-        marker_source = input$scrna_marker_source %||% "server",
+        marker_file = if (isTRUE(input$scrna_use_celltype_mapping)) "" else input$scrna_marker_file %||% "",
+        celltype_file = if (isTRUE(input$scrna_use_celltype_mapping)) input$scrna_celltype_file %||% "" else "",
+        marker_upload = if (isTRUE(input$scrna_use_celltype_mapping)) NULL else input$scrna_marker_upload,
+        celltype_upload = if (isTRUE(input$scrna_use_celltype_mapping)) input$scrna_celltype_upload else NULL,
+        marker_source = if (isTRUE(input$scrna_use_celltype_mapping)) "server" else input$scrna_marker_source %||% "manual",
         celltype_source = input$scrna_celltype_source %||% "server",
+        marker_manual = isolate(scrna_manual_entries(scrna_manual_annotation_sets, p)),
         annotation_name = input$scrna_annotation_name %||% "cell_type",
         signature_file = input$scrna_signature_file %||% "",
         signature_upload = input$scrna_signature_upload,
-        signature_source = input$scrna_signature_source %||% "server",
+        signature_source = input$scrna_signature_source %||% "manual",
+        signature_manual = isolate(scrna_manual_entries(scrna_manual_signature_sets, p)),
         de_group_column = input$scrna_de_group_column %||% "condition",
         de_reference = input$scrna_de_reference %||% "",
         de_comparison = input$scrna_de_comparison %||% "",
