@@ -1435,6 +1435,17 @@ assert(
   NROW(matrix_rows) == 2L && identical(sort(matrix_rows$sample_id), c("sample_a", "sample_b")),
   "one parent folder discovers multiple filtered feature-barcode matrix subfolders"
 )
+object_project_config <- app_env$new_project_from_inputs(list(
+  new_project_analysis = "scRNA-seq", new_project_name = "object_fixture", new_project_mode = "new",
+  new_results_root = root, new_scrna_start_mode = "object", new_scrna_folder_type = "filtered_10x_matrix"
+))
+fastq_project_config <- app_env$new_project_from_inputs(list(
+  new_project_analysis = "scRNA-seq", new_project_name = "fastq_fixture", new_project_mode = "new",
+  new_results_root = root, new_scrna_start_mode = "new", new_scrna_folder_type = "fastq_folder",
+  new_species = "human", new_genome_version = "refdata-gex-GRCh38-2024-A"
+))
+assert(identical(object_project_config$genome, "auto") && !nzchar(object_project_config$genome_version), "processed scRNA objects do not inherit hidden genome/reference selections")
+assert(identical(fastq_project_config$genome, "human") && identical(fastq_project_config$genome_version, "refdata-gex-GRCh38-2024-A"), "FASTQ scRNA projects retain the selected Cell Ranger transcriptome version")
 assert("Alignment & counting" %in% app_env$scrna_pipeline_order(fastq_project), "FASTQ-backed scRNA projects expose alignment and counting before input inspection")
 assert(
   identical(app_env$canonical_job_step("Cell Ranger count"), "Alignment & counting") && identical(app_env$canonical_job_step("Alignment & counting"), "Alignment & counting"),

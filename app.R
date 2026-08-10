@@ -743,14 +743,17 @@ new_project_from_inputs <- function(input) {
   }
   fastq_dir <- if (length(fastq_dirs)) fastq_dirs[[1]] else ""
   paired <- !tolower(input$new_paired_end %||% "paired") %in% c("single", "se", "n", "no", "false")
+  scrna_fastq_start <- identical(key, "scrna") &&
+    identical(tolower(trimws(input$new_scrna_start_mode %||% "new")), "new") &&
+    identical(tolower(trimws(input$new_scrna_folder_type %||% "filtered_10x_matrix")), "fastq_folder")
   list(
     id = paste0(key, "/", project_name),
     name = project_name,
     label = label,
     analysis = analysis_label(key),
     analysis_key = key,
-    genome = tolower(input$new_species %||% "mouse"),
-    genome_version = input$new_genome_version %||% "",
+    genome = if (identical(key, "scrna") && !scrna_fastq_start) "auto" else tolower(input$new_species %||% "mouse"),
+    genome_version = if (identical(key, "scrna") && !scrna_fastq_start) "" else input$new_genome_version %||% "",
     paired_end = paired,
     results_root = results_root,
     data_dir = data_dir,
@@ -6268,6 +6271,7 @@ genome_reference_catalog <- function() {
 genome_species <- function(project) {
   genome <- tolower(project$genome %||% "mouse")
   project_analysis <- analysis_key(project$analysis_key %||% project$analysis %||% "rna")
+  if (identical(project_analysis, "scrna") && genome %in% c("", "auto", "unknown")) return("auto")
   if (identical(genome, "maize") && identical(project_analysis, "rna")) return("maize")
   if (genome %in% c("human", "mouse")) return(genome)
   if (grepl("^human", genome)) return("human")
@@ -8928,6 +8932,8 @@ cellranger_reference_candidates <- function(project) {
   } else {
     c("refdata-gex-GRCm39-2024-A", "refdata-gex-mm10-2020-A")
   }
+  requested <- trimws(as.character(project$genome_version %||% ""))
+  if (nzchar(requested) && requested %in% names) names <- c(requested, setdiff(names, requested))
   roots <- c(
     "/grid/bsr/data/data/bsr_readable_data/references/cellranger",
     "/grid/bsr/data/data/utama/genome/cellranger",
@@ -9116,7 +9122,7 @@ write_scrna_manual_gene_sets <- function(project, entries, set_column, directory
   normalizePath(path, winslash = "/", mustWork = TRUE)
 }
 
-submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto", normalization = "auto", integration = "auto", batch_column = "batch", cluster_resolution = 0.6, min_features = 200, min_counts = 0, max_features = 0, max_percent_mt = 20, min_cells_per_gene = 3, n_pcs = 30, n_neighbors = 15, umap_min_dist = 0.5, umap_spread = 1, umap_metric = "euclidean", umap_init_pos = "spectral", doublet_method = "auto", doublet_rate = 0.05, remove_doublets = TRUE, seed = 1234, scvi_max_epochs = 400, harmony_theta = 2, harmony_lambda = 1, harmony_max_iter = 20, marker_file = "", celltype_file = "", marker_upload = NULL, celltype_upload = NULL, marker_source = "server", celltype_source = "server", marker_manual = list(), annotation_name = "cell_type", signature_file = "", signature_upload = NULL, signature_source = "server", signature_manual = list(), de_group_column = "condition", de_reference = "", de_comparison = "", de_annotation_column = "", de_annotation_values = "all", de_method = "both", de_covariates = character(0), pathway_library = "MSigDB_Hallmark_2020", pathway_gmt_file = "", pathway_gmt_upload = NULL, pathway_source = "server") {
+submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto", normalization = "auto", integration = "auto", batch_column = "batch", cluster_resolution = 0.6, min_features = 200, min_counts = 0, max_features = 0, max_percent_mt = 20, min_cells_per_gene = 3, n_pcs = 30, n_neighbors = 15, umap_min_dist = 0.5, umap_spread = 1, umap_metric = "euclidean", umap_init_pos = "spectral", doublet_method = "auto", doublet_rate = 0.05, remove_doublets = TRUE, seed = 1234, scvi_max_epochs = 400, harmony_theta = 2, harmony_lambda = 1, harmony_max_iter = 20, marker_file = "", celltype_file = "", marker_upload = NULL, celltype_upload = NULL, marker_source = "server", celltype_source = "server", marker_manual = list(), marker_species = "same", marker_ortholog_file = "", marker_ortholog_upload = NULL, marker_ortholog_source = "server", annotation_name = "cell_type", signature_file = "", signature_upload = NULL, signature_source = "server", signature_manual = list(), signature_species = "same", signature_ortholog_file = "", signature_ortholog_upload = NULL, signature_ortholog_source = "server", de_group_column = "condition", de_reference = "", de_comparison = "", de_annotation_column = "", de_annotation_values = "all", de_method = "both", de_covariates = character(0), pathway_library = "MSigDB_Hallmark_2020", pathway_species = "auto", pathway_ortholog_file = "", pathway_ortholog_upload = NULL, pathway_ortholog_source = "server", pathway_gmt_file = "", pathway_gmt_upload = NULL, pathway_source = "server") {
   stage <- tolower(trimws(as.character(stage %||% "inspect")))
   step_label <- tryCatch(scrna_stage_step(stage), error = function(e) "")
   if (!is_scrna_project(project)) return(record_preflight_failure(project, step_label %||% "scRNA processing", "This is not an scRNA-seq project.", "scrna"))
@@ -9188,6 +9194,15 @@ submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto
   marker_file <- trimws(as.character(marker_file %||% ""))
   celltype_file <- trimws(as.character(celltype_file %||% ""))
   signature_file <- trimws(as.character(signature_file %||% ""))
+  marker_species <- tolower(trimws(as.character(marker_species %||% "same")))
+  signature_species <- tolower(trimws(as.character(signature_species %||% "same")))
+  if (!marker_species %in% c("same", "mouse", "human")) marker_species <- "same"
+  if (!signature_species %in% c("same", "mouse", "human")) signature_species <- "same"
+  marker_ortholog_file <- trimws(as.character(marker_ortholog_file %||% ""))
+  signature_ortholog_file <- trimws(as.character(signature_ortholog_file %||% ""))
+  pathway_species <- tolower(trimws(as.character(pathway_species %||% "auto")))
+  if (!pathway_species %in% c("auto", "mouse", "human")) pathway_species <- "auto"
+  pathway_ortholog_file <- trimws(as.character(pathway_ortholog_file %||% ""))
   pathway_library <- trimws(as.character(pathway_library %||% "MSigDB_Hallmark_2020"))
   pathway_gmt_file <- trimws(as.character(pathway_gmt_file %||% ""))
   annotation_name <- gsub("[^A-Za-z0-9_]+", "_", trimws(as.character(annotation_name %||% "cell_type")))
@@ -9221,10 +9236,23 @@ submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto
     signature_file <- manual_path
     signature_source <- "server"
   }
+  if (identical(stage, "annotate") && !identical(marker_species, "same") && identical(marker_ortholog_source, "upload")) {
+    marker_ortholog_file <- copy_uploaded_project_file(marker_ortholog_upload, file.path(project$data_dir, "uploads", "orthologs"), "marker ortholog table", c("tsv", "txt", "csv"))
+  }
+  if (identical(stage, "score") && !identical(signature_species, "same") && identical(signature_ortholog_source, "upload")) {
+    signature_ortholog_file <- copy_uploaded_project_file(signature_ortholog_upload, file.path(project$data_dir, "uploads", "orthologs"), "signature ortholog table", c("tsv", "txt", "csv"))
+  }
+  bundled_ortholog <- file.path(SCRIPTS_DIR, "reference", "mouse_human_orthologs_MGI.tsv")
+  if (identical(stage, "annotate") && !identical(marker_species, "same") && !nzchar(marker_ortholog_file)) marker_ortholog_file <- bundled_ortholog
+  if (identical(stage, "score") && !identical(signature_species, "same") && !nzchar(signature_ortholog_file)) signature_ortholog_file <- bundled_ortholog
+  if (identical(stage, "pathway") && pathway_species %in% c("auto", "mouse") && identical(pathway_ortholog_source, "upload")) {
+    pathway_ortholog_file <- copy_uploaded_project_file(pathway_ortholog_upload, file.path(project$data_dir, "uploads", "orthologs"), "pathway ortholog table", c("tsv", "txt", "csv"))
+  }
+  if (identical(stage, "pathway") && pathway_species %in% c("auto", "mouse") && !nzchar(pathway_ortholog_file)) pathway_ortholog_file <- bundled_ortholog
   if (identical(stage, "pathway") && identical(pathway_source, "upload")) {
     pathway_gmt_file <- copy_uploaded_project_file(pathway_gmt_upload, file.path(project$data_dir, "uploads", "pathways"), "GMT collection", c("gmt", "txt"))
   }
-  annotation_files <- c("Marker list" = marker_file, "Cell-to-cell-type mapping" = celltype_file, "Signature list" = signature_file, "Pathway GMT" = pathway_gmt_file)
+  annotation_files <- c("Marker list" = marker_file, "Cell-to-cell-type mapping" = celltype_file, "Signature list" = signature_file, "Marker ortholog table" = marker_ortholog_file, "Signature ortholog table" = signature_ortholog_file, "Pathway ortholog table" = pathway_ortholog_file, "Pathway GMT" = pathway_gmt_file)
   for (label in names(annotation_files)) {
     path <- path.expand(annotation_files[[label]])
     if (nzchar(path) && (!startsWith(path, "/") || !file.exists(path) || dir.exists(path) || file.access(path, mode = 4) != 0)) {
@@ -9264,8 +9292,8 @@ submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto
     return(record_preflight_failure(project, "scRNA processing", paste0("Doublet method '", doublet_method, "' is not compatible with the ", resolved_engine, " engine. Choose ", paste(allowed_doublet, collapse = ", "), "."), "scrna"))
   }
   params <- data.frame(
-    key = c("normalization", "integration", "batch_column", "cluster_resolution", "min_features", "min_counts", "max_features", "max_percent_mt", "n_pcs", "n_neighbors", "umap_min_dist", "umap_spread", "umap_metric", "umap_init_pos", "min_cells_per_gene", "doublet_method", "doublet_rate", "remove_doublets", "marker_file", "celltype_file", "annotation_name", "signature_file", "de_group_column", "de_reference", "de_comparison", "de_annotation_column", "de_annotation_values", "de_method", "de_covariates", "pathway_library", "pathway_species", "pathway_gmt_file", "seed", "scvi_max_epochs", "harmony_theta", "harmony_lambda", "harmony_max_iter"),
-    value = as.character(c(normalization, integration, batch_column, checked$cluster_resolution, checked$min_features, checked$min_counts, checked$max_features, checked$max_percent_mt, checked$n_pcs, checked$n_neighbors, checked$umap_min_dist, checked$umap_spread, umap_metric, umap_init_pos, checked$min_cells_per_gene, doublet_method, checked$doublet_rate, isTRUE(remove_doublets), marker_file, celltype_file, annotation_name, signature_file, de_group_column, de_reference, de_comparison, de_annotation_column, paste(unique(as.character(de_annotation_values %||% "all")), collapse = "||"), de_method, paste(unique(as.character(de_covariates %||% character(0))), collapse = ","), pathway_library, genome_species(project), pathway_gmt_file, checked$seed, checked$scvi_max_epochs, checked$harmony_theta, checked$harmony_lambda, checked$harmony_max_iter)),
+    key = c("normalization", "integration", "batch_column", "cluster_resolution", "min_features", "min_counts", "max_features", "max_percent_mt", "n_pcs", "n_neighbors", "umap_min_dist", "umap_spread", "umap_metric", "umap_init_pos", "min_cells_per_gene", "doublet_method", "doublet_rate", "remove_doublets", "marker_file", "celltype_file", "marker_species", "marker_ortholog_file", "annotation_name", "signature_file", "signature_species", "signature_ortholog_file", "de_group_column", "de_reference", "de_comparison", "de_annotation_column", "de_annotation_values", "de_method", "de_covariates", "pathway_library", "pathway_species", "pathway_ortholog_file", "pathway_gmt_file", "seed", "scvi_max_epochs", "harmony_theta", "harmony_lambda", "harmony_max_iter"),
+    value = as.character(c(normalization, integration, batch_column, checked$cluster_resolution, checked$min_features, checked$min_counts, checked$max_features, checked$max_percent_mt, checked$n_pcs, checked$n_neighbors, checked$umap_min_dist, checked$umap_spread, umap_metric, umap_init_pos, checked$min_cells_per_gene, doublet_method, checked$doublet_rate, isTRUE(remove_doublets), marker_file, celltype_file, marker_species, marker_ortholog_file, annotation_name, signature_file, signature_species, signature_ortholog_file, de_group_column, de_reference, de_comparison, de_annotation_column, paste(unique(as.character(de_annotation_values %||% "all")), collapse = "||"), de_method, paste(unique(as.character(de_covariates %||% character(0))), collapse = ","), pathway_library, pathway_species, pathway_ortholog_file, pathway_gmt_file, checked$seed, checked$scvi_max_epochs, checked$harmony_theta, checked$harmony_lambda, checked$harmony_max_iter)),
     stringsAsFactors = FALSE
   )
   # Keep the copied, editable project manifest normalized immediately before
@@ -12130,6 +12158,15 @@ server <- function(input, output, session) {
   observeEvent(input$browse_scrna_signature_file, {
     open_server_browser("scrna_signature_file", "file", input$scrna_signature_file %||% "")
   })
+  observeEvent(input$browse_scrna_marker_ortholog_file, {
+    open_server_browser("scrna_marker_ortholog_file", "file", input$scrna_marker_ortholog_file %||% "")
+  })
+  observeEvent(input$browse_scrna_signature_ortholog_file, {
+    open_server_browser("scrna_signature_ortholog_file", "file", input$scrna_signature_ortholog_file %||% "")
+  })
+  observeEvent(input$browse_scrna_pathway_ortholog_file, {
+    open_server_browser("scrna_pathway_ortholog_file", "file", input$scrna_pathway_ortholog_file %||% "")
+  })
   observeEvent(input$browse_scrna_pathway_gmt_file, {
     open_server_browser("scrna_pathway_gmt_file", "file", input$scrna_pathway_gmt_file %||% "")
   })
@@ -12403,6 +12440,7 @@ server <- function(input, output, session) {
 
   output$new_species_ui <- renderUI({
     key <- analysis_key(input$new_project_analysis %||% input$analysis %||% "RNA-seq")
+    if (identical(key, "scrna") && (!identical(input$new_scrna_start_mode %||% "new", "new") || !identical(input$new_scrna_folder_type %||% "fastq_folder", "fastq_folder"))) return(NULL)
     choices <- c("Mouse" = "mouse", "Human" = "human")
     if (identical(key, "rna")) choices <- c(choices, "Maize" = "maize")
     selected <- isolate(input$new_species) %||% "mouse"
@@ -12411,8 +12449,12 @@ server <- function(input, output, session) {
   })
 
   output$new_genome_version_ui <- renderUI({
+    key <- analysis_key(input$new_project_analysis %||% input$analysis %||% "RNA-seq")
+    if (identical(key, "scrna") && (!identical(input$new_scrna_start_mode %||% "new", "new") || !identical(input$new_scrna_folder_type %||% "fastq_folder", "fastq_folder"))) return(NULL)
     species <- tolower(input$new_species %||% "mouse")
-    choices <- genome_reference_choices(species, input$new_project_analysis %||% input$analysis %||% "RNA-seq")
+    choices <- if (identical(key, "scrna")) {
+      if (identical(species, "human")) c("Human GRCh38 — Cell Ranger 2024-A" = "refdata-gex-GRCh38-2024-A") else c("Mouse GRCm39 — Cell Ranger 2024-A" = "refdata-gex-GRCm39-2024-A")
+    } else genome_reference_choices(species, input$new_project_analysis %||% input$analysis %||% "RNA-seq")
     selected <- isolate(input$new_genome_version)
     if (is.null(selected) || !selected %in% unname(choices)) selected <- unname(choices)[[1]]
     label <- if (identical(species, "maize")) "Maize variety/reference" else "Genome/reference version"
@@ -13799,6 +13841,15 @@ server <- function(input, output, session) {
       )),
       conditionalPanel("input.scrna_marker_source == 'server'", div(class = "new-project-path-control", textInput("scrna_marker_file", "Marker list", value = isolate(input$scrna_marker_file) %||% "", placeholder = "Absolute server .tsv with cell_type and gene columns"), actionButton("browse_scrna_marker_file", "Browse server", class = "btn-default"))),
       conditionalPanel("input.scrna_marker_source == 'upload'", fileInput("scrna_marker_upload", "Marker list from laptop", accept = c(".tsv", ".txt"))),
+      conditionalPanel("!input.scrna_use_celltype_mapping",
+        selectInput("scrna_marker_species", "Species used by these marker genes", choices = c("Same as the expression dataset — no conversion" = "same", "Mouse" = "mouse", "Human" = "human"), selected = isolate(input$scrna_marker_species) %||% "same", selectize = FALSE),
+        conditionalPanel("input.scrna_marker_species != 'same'",
+          tags$p(class = "muted small-note", "If marker and expression species differ, genes are converted before scoring. Leave the table blank to use CodeSpringLab's bundled MGI mouse–human table, or supply the same table used by RNA-seq."),
+          radioButtons("scrna_marker_ortholog_source", "Ortholog table", choices = c("Bundled table or server path" = "server", "Upload from laptop" = "upload"), selected = isolate(input$scrna_marker_ortholog_source) %||% "server", inline = TRUE),
+          conditionalPanel("input.scrna_marker_ortholog_source == 'server'", div(class = "new-project-path-control", textInput("scrna_marker_ortholog_file", "Optional ortholog table path", value = isolate(input$scrna_marker_ortholog_file) %||% "", placeholder = "Blank uses bundled mouse_human_orthologs_MGI.tsv"), actionButton("browse_scrna_marker_ortholog_file", "Browse server", class = "btn-default"))),
+          conditionalPanel("input.scrna_marker_ortholog_source == 'upload'", fileInput("scrna_marker_ortholog_upload", "Ortholog table from laptop", accept = c(".tsv", ".txt", ".csv")))
+        )
+      ),
       tags$p(class = "muted small-note", "Each cluster is assigned to the cell type with the highest mean normalized marker score. At least two unique genes are required per cell type."),
       tags$details(tags$summary("Optional direct per-cell mapping"),
         tags$p(class = "muted small-note", "Use this only when you already have a cell/barcode-to-cell-type table. It takes priority over marker scoring."),
@@ -13826,6 +13877,13 @@ server <- function(input, output, session) {
       )),
       conditionalPanel("input.scrna_signature_source == 'server'", div(class = "new-project-path-control", textInput("scrna_signature_file", "Signature list", value = isolate(input$scrna_signature_file) %||% "", placeholder = "Absolute server .tsv with signature and gene columns"), actionButton("browse_scrna_signature_file", "Browse server", class = "btn-default"))),
       conditionalPanel("input.scrna_signature_source == 'upload'", fileInput("scrna_signature_upload", "Signature list from laptop", accept = c(".tsv", ".txt"))),
+      selectInput("scrna_signature_species", "Species used by these signature genes", choices = c("Same as the expression dataset — no conversion" = "same", "Mouse" = "mouse", "Human" = "human"), selected = isolate(input$scrna_signature_species) %||% "same", selectize = FALSE),
+      conditionalPanel("input.scrna_signature_species != 'same'",
+        tags$p(class = "muted small-note", "If signature and expression species differ, genes are converted before scoring. Leave the table blank to use CodeSpringLab's bundled MGI mouse–human table, or supply the same table used by RNA-seq."),
+        radioButtons("scrna_signature_ortholog_source", "Ortholog table", choices = c("Bundled table or server path" = "server", "Upload from laptop" = "upload"), selected = isolate(input$scrna_signature_ortholog_source) %||% "server", inline = TRUE),
+        conditionalPanel("input.scrna_signature_ortholog_source == 'server'", div(class = "new-project-path-control", textInput("scrna_signature_ortholog_file", "Optional ortholog table path", value = isolate(input$scrna_signature_ortholog_file) %||% "", placeholder = "Blank uses bundled mouse_human_orthologs_MGI.tsv"), actionButton("browse_scrna_signature_ortholog_file", "Browse server", class = "btn-default"))),
+        conditionalPanel("input.scrna_signature_ortholog_source == 'upload'", fileInput("scrna_signature_ortholog_upload", "Ortholog table from laptop", accept = c(".tsv", ".txt", ".csv")))
+      ),
       tags$p(class = "muted small-note", "At least two unique genes are required per signature. Missing genes are recorded in the output coverage table; signatures with no usable genes are rejected by the pipeline.")
     )
   })
@@ -13883,9 +13941,17 @@ server <- function(input, output, session) {
   output$scrna_pathway_settings_ui <- renderUI({
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
     selected_library <- selected_choice(isolate(input$scrna_pathway_library), GSEAPY_GENESET_OPTIONS, "MSigDB_Hallmark_2020")
+    project_species <- genome_species(p)
+    default_pathway_species <- if (project_species %in% c("mouse", "human")) project_species else "auto"
     tagList(
       div(class = "read-source-note", tags$strong("Ranked pathway analysis"), tags$p("Uses the full pseudobulk DESeq2 Wald-statistic ranking with fgseaMultilevel. This avoids choosing an arbitrary DEG cutoff and preserves direction.")),
       selectInput("scrna_pathway_library", "Pathway database", choices = GSEAPY_GENESET_OPTIONS, selected = selected_library, selectize = FALSE),
+      selectInput("scrna_pathway_species", "Species of the differential-expression genes", choices = c("Detect from gene symbols" = "auto", "Mouse — convert to human orthologs" = "mouse", "Human — no conversion" = "human"), selected = isolate(input$scrna_pathway_species) %||% default_pathway_species, selectize = FALSE),
+      conditionalPanel("input.scrna_pathway_species != 'human'",
+        radioButtons("scrna_pathway_ortholog_source", "Ortholog table", choices = c("Bundled table or server path" = "server", "Upload from laptop" = "upload"), selected = isolate(input$scrna_pathway_ortholog_source) %||% "server", inline = TRUE),
+        conditionalPanel("input.scrna_pathway_ortholog_source == 'server'", div(class = "new-project-path-control", textInput("scrna_pathway_ortholog_file", "Optional ortholog table path", value = isolate(input$scrna_pathway_ortholog_file) %||% "", placeholder = "Blank uses bundled mouse_human_orthologs_MGI.tsv"), actionButton("browse_scrna_pathway_ortholog_file", "Browse server", class = "btn-default"))),
+        conditionalPanel("input.scrna_pathway_ortholog_source == 'upload'", fileInput("scrna_pathway_ortholog_upload", "Ortholog table from laptop", accept = c(".tsv", ".txt", ".csv")))
+      ),
       tags$p(class = "muted small-note", "The selected database is downloaded and cached automatically for the job. Mouse gene ranks are converted to human ortholog symbols before testing these pathway collections; the mapping and database source are saved with the results.")
     )
   })
@@ -14357,11 +14423,19 @@ server <- function(input, output, session) {
         marker_source = if (isTRUE(input$scrna_use_celltype_mapping)) "server" else input$scrna_marker_source %||% "manual",
         celltype_source = input$scrna_celltype_source %||% "server",
         marker_manual = isolate(scrna_manual_entries(scrna_manual_annotation_sets, p)),
+        marker_species = input$scrna_marker_species %||% "same",
+        marker_ortholog_file = input$scrna_marker_ortholog_file %||% "",
+        marker_ortholog_upload = input$scrna_marker_ortholog_upload,
+        marker_ortholog_source = input$scrna_marker_ortholog_source %||% "server",
         annotation_name = input$scrna_annotation_name %||% "cell_type",
         signature_file = input$scrna_signature_file %||% "",
         signature_upload = input$scrna_signature_upload,
         signature_source = input$scrna_signature_source %||% "manual",
         signature_manual = isolate(scrna_manual_entries(scrna_manual_signature_sets, p)),
+        signature_species = input$scrna_signature_species %||% "same",
+        signature_ortholog_file = input$scrna_signature_ortholog_file %||% "",
+        signature_ortholog_upload = input$scrna_signature_ortholog_upload,
+        signature_ortholog_source = input$scrna_signature_ortholog_source %||% "server",
         de_group_column = input$scrna_de_group_column %||% "condition",
         de_reference = input$scrna_de_reference %||% "",
         de_comparison = input$scrna_de_comparison %||% "",
@@ -14370,6 +14444,10 @@ server <- function(input, output, session) {
         de_method = if (single_biological_sample) "cell" else input$scrna_de_method %||% "both",
         de_covariates = if (single_biological_sample) character(0) else input$scrna_de_covariates %||% character(0),
         pathway_library = input$scrna_pathway_library %||% "MSigDB_Hallmark_2020",
+        pathway_species = input$scrna_pathway_species %||% "auto",
+        pathway_ortholog_file = input$scrna_pathway_ortholog_file %||% "",
+        pathway_ortholog_upload = input$scrna_pathway_ortholog_upload,
+        pathway_ortholog_source = input$scrna_pathway_ortholog_source %||% "server",
         pathway_gmt_file = "",
         pathway_gmt_upload = NULL,
         pathway_source = "server"
