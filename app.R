@@ -10211,6 +10211,16 @@ scrna_discrete_palette <- function(n) {
   colors[seq_len(n)]
 }
 
+scrna_violin_upper_limit <- function(values, groups, percentile = 0.98) {
+  values <- suppressWarnings(as.numeric(values))
+  groups <- as.character(groups)
+  keep <- is.finite(values) & !is.na(groups) & nzchar(groups)
+  if (!any(keep)) return(NA_real_)
+  grouped <- split(values[keep], groups[keep], drop = TRUE)
+  limits <- vapply(grouped, stats::quantile, numeric(1), probs = percentile, na.rm = TRUE, names = FALSE, type = 7)
+  if (!length(limits) || !any(is.finite(limits))) NA_real_ else max(limits[is.finite(limits)])
+}
+
 scrna_expression_palette <- function() {
   # Exact fixed anchors from jpplot.cmapjp(): the upper 75% of RdYlBu_r,
   # beginning at light blue and ending at deep red. Explicit hex values keep
@@ -14435,7 +14445,7 @@ server <- function(input, output, session) {
         column(3, selectInput("scrna_violin_group", "Separate violins by", choices = group_choices, selected = selected_choice(isolate(input$scrna_violin_group), group_choices, if ("cluster" %in% group_choices) "cluster" else group_choices[[1]]), selectize = FALSE)),
         column(3, selectInput("scrna_violin_facet", "Optional facets", choices = facet_choices, selected = selected_choice(isolate(input$scrna_violin_facet), facet_choices, ""), selectize = FALSE))
       ),
-      tags$p(class = "muted small-note", if (length(signatures)) "Stored signatures are available because signature scoring has been completed. Gene violins use normalized expression from the processed object." else "Run Signature scoring to add reusable signature-score violins. Gene violins use normalized expression from the processed object.")
+      tags$p(class = "muted small-note", paste(if (length(signatures)) "Stored signatures are available because signature scoring has been completed. Gene violins use normalized expression from the processed object." else "Run Signature scoring to add reusable signature-score violins. Gene violins use normalized expression from the processed object.", "The y-axis ends at the highest 98th percentile among the displayed violins so rare extreme cells do not compress the distributions."))
     )
   })
   scrna_violin_data <- reactive({
@@ -14479,6 +14489,8 @@ server <- function(input, output, session) {
     levels <- if (all(is.finite(numeric_groups))) groups[order(numeric_groups)] else sort(groups)
     x$group <- factor(x$group, levels = levels)
     colors <- stats::setNames(scrna_discrete_palette(length(levels)), levels)
+    limit_groups <- if (any(nzchar(x$facet))) interaction(x$group, x$facet, drop = TRUE) else x$group
+    y_upper <- scrna_violin_upper_limit(x$value, limit_groups, 0.98)
     plot <- ggplot2::ggplot(x, ggplot2::aes(x = group, y = value, fill = group)) +
       ggplot2::geom_violin(scale = "width", trim = TRUE, linewidth = 0.35, color = "#374151") +
       ggplot2::geom_boxplot(width = 0.12, outlier.shape = NA, fill = "white", alpha = 0.78, linewidth = 0.3) +
@@ -14486,6 +14498,7 @@ server <- function(input, output, session) {
       ggplot2::labs(title = info$label, x = info$group_label, y = info$y_label) +
       ggplot2::theme_classic(base_size = 12) +
       ggplot2::theme(plot.title = ggplot2::element_text(face = "bold"), axis.text.x = ggplot2::element_text(angle = if (length(levels) > 6L) 45 else 0, hjust = if (length(levels) > 6L) 1 else 0.5))
+    if (is.finite(y_upper) && y_upper > min(x$value, na.rm = TRUE)) plot <- plot + ggplot2::coord_cartesian(ylim = c(NA_real_, y_upper))
     if (nzchar(info$facet_label) && any(nzchar(x$facet))) plot <- plot + ggplot2::facet_wrap(~facet, scales = "free_x")
     plot
   })
