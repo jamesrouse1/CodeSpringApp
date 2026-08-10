@@ -10077,6 +10077,17 @@ scrna_summary_values <- function(project) {
   stats::setNames(values[nzchar(keys)], keys[nzchar(keys)])
 }
 
+scrna_named_value <- function(values, key, fallback = "") {
+  if (!length(values) || !nzchar(key) || !(key %in% names(values))) return(fallback)
+  value <- unname(values[[key]])
+  if (!length(value) || is.na(value[[1]]) || !nzchar(trimws(as.character(value[[1]])))) return(fallback)
+  value[[1]]
+}
+
+scrna_summary_value <- function(project, key, fallback = "") {
+  scrna_named_value(scrna_summary_values(project), key, fallback)
+}
+
 scrna_composition_fields <- function(project) {
   path <- file.path(scrna_output_dir(project), "tables", "composition_by_sample.tsv")
   x <- safe_read_table(path, 100000)
@@ -10101,7 +10112,7 @@ scrna_composition_table <- function(project, annotation_field = "") {
   x <- safe_read_table(generic_path, 100000)
   if (NROW(x) && all(c("sample_id", "annotation_field", "annotation_label", "cells") %in% names(x))) {
     choices <- unique(trimws(as.character(x$annotation_field)))
-    active <- scrna_summary_values(project)[["active_annotation"]] %||% ""
+    active <- scrna_summary_value(project, "active_annotation", "")
     annotation_field <- selected_choice(annotation_field, choices, if (active %in% choices) active else choices[[1]])
     x <- x[as.character(x$annotation_field) == annotation_field, , drop = FALSE]
     x$cell_type <- as.character(x$annotation_label)
@@ -13150,7 +13161,8 @@ server <- function(input, output, session) {
     group_data <- scrna_embedding_table(p, columns = group_column, max_points = Inf)
     group_values <- if (group_column %in% names(group_data)) sort(unique(trimws(as.character(group_data[[group_column]])))) else character(0)
     group_values <- group_values[nzchar(group_values)]
-    annotation_choices <- unique(c(intersect(c(scrna_summary_values(p)[["active_annotation"]] %||% "", "cell_type"), metadata), grep("(^cell_type|annotation|subtype)", metadata, value = TRUE, ignore.case = TRUE), ""))
+    active_annotation <- scrna_summary_value(p, "active_annotation", "")
+    annotation_choices <- unique(c(intersect(c(active_annotation, "cell_type"), metadata), grep("(^cell_type|annotation|subtype)", metadata, value = TRUE, ignore.case = TRUE), ""))
     annotation_choices <- stats::setNames(annotation_choices, ifelse(nzchar(annotation_choices), annotation_choices, "All cells (no annotation subset)"))
     annotation_column <- selected_choice(input$scrna_de_annotation_column, annotation_choices, unname(annotation_choices)[[1]])
     annotation_data <- if (nzchar(annotation_column)) scrna_embedding_table(p, columns = annotation_column, max_points = Inf) else data.frame()
@@ -14173,7 +14185,7 @@ server <- function(input, output, session) {
     summary_path <- file.path(scrna_output_dir(p), "run_summary.txt")
     if (!file.exists(summary_path)) return(div(class = "empty-box", "No completed scRNA workflow is available yet. Submit it from Run Pipeline."))
     summary <- scrna_summary_values(p)
-    value <- function(key, fallback = "—") summary[[key]] %||% fallback
+    value <- function(key, fallback = "—") scrna_named_value(summary, key, fallback)
     tagList(
       div(class = "cutrun-metric-grid compact",
           scrna_metric_card("Cells retained", format_metric_value(suppressWarnings(as.numeric(value("cells_after_qc", NA_real_)))), "After QC and selected doublet handling", "blue"),
