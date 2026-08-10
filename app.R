@@ -2371,6 +2371,7 @@ sample_step_data_paths <- function(project, step, samples, method = "") {
         if (!dir.exists(dir)) character(0) else list.files(dir, pattern = sample_pattern(sample, ".*\\.(fastq|fq)(\\.gz)?$"), full.names = TRUE, ignore.case = TRUE)
       },
       "STAR" = file.path(data_dir, "star", sample),
+      "Alignment & counting" = file.path(data_dir, "cellranger", clean_name(sample, "sample")),
       "Bowtie2" = file.path(data_dir, "bowtie2", sample),
       "SEACR" = {
         root <- file.path(data_dir, "seacr")
@@ -3180,6 +3181,26 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
       detail = details,
       stringsAsFactors = FALSE
     )
+    if (has_fastq) {
+      if (is.null(progress)) progress <- tryCatch(sample_progress(project, active_states, data.frame(), jobs = jobs)$table, error = function(e) data.frame())
+      alignment <- if (NROW(progress)) progress[canonical_job_step(progress$step) == canonical_job_step("Alignment & counting"), , drop = FALSE] else data.frame()
+      if (NROW(alignment)) {
+        alignment_status <- as.character(alignment$status)
+        row <- raw$step == "Alignment & counting"
+        if (any(alignment_status %in% c("Running", "Waiting", "Running, no growth yet"))) {
+          raw$status[row] <- "Active"
+        } else if (all(alignment_status == "Completed")) {
+          raw$status[row] <- "Complete"
+        } else if (any(alignment_status == "Likely failed")) {
+          raw$status[row] <- "Likely failed"
+        } else if (any(alignment_status == "Cancelled")) {
+          raw$status[row] <- "Cancelled"
+        } else if (any(alignment_status == "Completed")) {
+          raw$status[row] <- "Partial"
+          raw$detail[row] <- sprintf("%d/%d samples complete", sum(alignment_status == "Completed"), NROW(alignment))
+        }
+      }
+    }
     raw$status[raw$step %in% names(active_states)] <- "Active"
     raw$status <- normalize_pipeline_status(raw$status)
     return(raw)
@@ -5580,7 +5601,98 @@ sample_step_metrics <- function(project, sample, step, jobs) {
   )
 }
 
+scrna_cellranger_metrics <- function(project, sample) {
+  path <- file.path(scrna_cellranger_output_dir(project, sample), "outs", "metrics_summary.csv")
+  if (!file.exists(path) || file_size_for(path) <= 0) return(c(`Estimated cells` = "", `Mean reads/cell` = ""))
+  metrics <- tryCatch(utils::read.csv(path, check.names = FALSE, stringsAsFactors = FALSE), error = function(e) data.frame())
+  if (!NROW(metrics)) return(c(`Estimated cells` = "", `Mean reads/cell` = ""))
+  normalized <- tolower(gsub("[^a-z0-9]+", "", names(metrics)))
+  pick <- function(candidates) {
+    hit <- match(candidates, normalized, nomatch = 0L)
+    hit <- hit[hit > 0L]
+    if (!length(hit)) return("")
+    as.character(metrics[[hit[[1]]]][[1]] %||% "")
+  }
+  c(
+    `Estimated cells` = pick(c("estimatednumberofcells", "estimatedcells")),
+    `Mean reads/cell` = pick(c("meanreadspercell", "meanrawreadspercell"))
+  )
+}
+
+scrna_alignment_sample_progress <- function(project, jobs = NULL, previous_cache = data.frame()) {
+  manifest <- tryCatch(scrna_fastq_manifest(project), error = function(e) data.frame())
+  if (!NROW(manifest)) return(list(table = data.frame(), cache = previous_cache))
+  if (is.null(jobs)) jobs <- job_history(project)
+  active_states <- toupper(active_slurm_states())
+  completed_states <- c("COMPLETED", "COMPLETED+", "CD")
+  failed_states <- c("TIMEOUT", "FAILED", "NODE_FAIL", "PREEMPTED", "OUT_OF_MEMORY", "BOOT_FAIL")
+  cancelled_states <- c("CANCELLED", "CANCELLED+", "CA")
+  rows <- lapply(as.character(manifest$sample_id), function(sample) {
+    latest <- latest_job_for_sample(jobs, "Alignment & counting", sample)
+    state <- if (NROW(latest) && "slurm_state" %in% names(latest)) toupper(trimws(as.character(latest$slurm_state[[1]]))) else ""
+    elapsed <- if (NROW(latest) && "elapsed" %in% names(latest)) as.character(latest$elapsed[[1]] %||% "") else ""
+    output_dir <- scrna_cellranger_output_dir(project, sample)
+    matrix_dir <- scrna_cellranger_matrix_dir(project, sample)
+    targets <- file.path(matrix_dir, c("matrix.mtx.gz", "barcodes.tsv.gz", "features.tsv.gz"))
+    output_bytes <- sum(vapply(targets, file_size_for, numeric(1)), na.rm = TRUE)
+    complete <- scrna_cellranger_complete(project, sample)
+    deleted_status <- latest_deleted_status(project, "Alignment & counting", sample)
+    status <- if (state %in% c("RUNNING", "COMPLETING")) {
+      "Running"
+    } else if (state %in% active_states) {
+      "Waiting"
+    } else if (complete) {
+      "Completed"
+    } else if (state %in% cancelled_states) {
+      "Cancelled"
+    } else if (state %in% failed_states || state %in% completed_states) {
+      "Likely failed"
+    } else if (nzchar(deleted_status) && output_bytes == 0) {
+      deleted_status
+    } else {
+      "Not started"
+    }
+    note <- if (identical(status, "Likely failed") && state %in% completed_states) {
+      "SLURM completed, but the complete filtered feature-barcode matrix was not found."
+    } else if (identical(status, "Likely failed")) {
+      "The latest Cell Ranger job ended in a failed scheduler state."
+    } else if (identical(status, "Cancelled")) {
+      "The latest Cell Ranger job was cancelled."
+    } else if (identical(status, "Running")) {
+      "Cell Ranger is aligning and quantifying this sample."
+    } else if (identical(status, "Waiting")) {
+      "Submitted; waiting for the scheduler to start Cell Ranger."
+    } else ""
+    metrics <- scrna_cellranger_metrics(project, sample)
+    data.frame(
+      sample = sample,
+      step = "Alignment & counting",
+      status = status,
+      display_status = status,
+      slurm_state = state,
+      time_running = elapsed,
+      output_bytes = output_bytes,
+      target = output_dir,
+      note = note,
+      metric_1_name = names(metrics)[[1]],
+      metric_1_value = unname(metrics[[1]]),
+      metric_2_name = names(metrics)[[2]],
+      metric_2_value = unname(metrics[[2]]),
+      stringsAsFactors = FALSE
+    )
+  })
+  table <- do.call(rbind, rows)
+  cache <- data.frame(
+    path = vapply(as.character(manifest$sample_id), function(sample) file.path(scrna_cellranger_matrix_dir(project, sample), "matrix.mtx.gz"), character(1)),
+    size = vapply(as.character(manifest$sample_id), function(sample) file_size_for(file.path(scrna_cellranger_matrix_dir(project, sample), "matrix.mtx.gz")), numeric(1)),
+    checked = as.character(Sys.time()),
+    stringsAsFactors = FALSE
+  )
+  list(table = table[order(table$sample), , drop = FALSE], cache = cache)
+}
+
 sample_progress <- function(project, active_states = active_job_state_map(project), previous_cache = data.frame(), jobs = NULL) {
+  if (is_scrna_project(project)) return(scrna_alignment_sample_progress(project, jobs = jobs, previous_cache = previous_cache))
   design <- included_design_table(project)
   if (!NROW(design) || !"sample" %in% names(design)) return(list(table = data.frame(), cache = previous_cache))
   sample_steps <- sample_level_steps_for_project(project)
@@ -5845,17 +5957,19 @@ tool_delete_data_method_id <- function(step) {
 }
 
 sample_level_pipeline_steps <- function() {
-  unique(c("Cutadapt", "FastQC", "STAR", "featureCounts", "RSEM (optional)", "Kallisto (optional)", "Bowtie2", "SEACR", "MACS2 (optional)", "MACS2 Peaks"))
+  unique(c("Cutadapt", "FastQC", "STAR", "featureCounts", "RSEM (optional)", "Kallisto (optional)", "Bowtie2", "SEACR", "MACS2 (optional)", "MACS2 Peaks", "Alignment & counting"))
 }
 
 sample_level_steps_for_project <- function(project) {
-  if (is_cutrun_project(project)) c("Cutadapt", "FastQC", "Bowtie2", "SEACR", "MACS2 (optional)")
+  if (is_scrna_project(project)) "Alignment & counting"
+  else if (is_cutrun_project(project)) c("Cutadapt", "FastQC", "Bowtie2", "SEACR", "MACS2 (optional)")
   else if (is_atac_project(project) || is_chip_project(project)) c("Cutadapt", "FastQC", "Bowtie2", "MACS2 Peaks")
   else if (identical(genome_species(project), "maize")) c("Cutadapt", "FastQC", "STAR", "featureCounts")
   else c("Cutadapt", "FastQC", "STAR", "featureCounts", "RSEM (optional)", "Kallisto (optional)")
 }
 
 primary_run_button_id <- function(project, step) {
+  if (is_scrna_project(project) && identical(step, "Alignment & counting")) return("run_scrna_cellranger")
   if (identical(step, "Cutadapt")) return("run_cutadapt")
   if (identical(step, "FastQC")) return("run_fastqc")
   if (identical(step, "Bowtie2")) return(if (is_cutrun_project(project)) "run_cutrun_bowtie2" else if (is_chip_project(project)) "run_chip_bowtie2" else "run_atac_bowtie2")
@@ -5870,6 +5984,7 @@ primary_run_button_id <- function(project, step) {
 }
 
 step_sample_input_id <- function(project, step) {
+  if (is_scrna_project(project) && identical(step, "Alignment & counting")) return("scrna_cellranger_samples")
   prefix <- if (is_cutrun_project(project)) "cutrun" else if (is_atac_project(project)) "atac" else if (is_chip_project(project)) "chip" else "rna"
   suffix <- switch(step,
     "Cutadapt" = "cutadapt_samples",
@@ -6083,16 +6198,19 @@ sample_progress_step_ui <- function(progress_df, step) {
 }
 
 optimistic_step_progress <- function(project, step, input_mode = "", samples = NULL) {
-  design <- safe_read_table(project$design_matrix_path)
-  if (!NROW(design) || !"sample" %in% names(design)) return(data.frame())
-  design_samples <- as.character(design$sample)
+  design <- if (is_scrna_project(project) && identical(step, "Alignment & counting")) {
+    tryCatch(scrna_fastq_manifest(project), error = function(e) data.frame())
+  } else safe_read_table(project$design_matrix_path)
+  sample_column <- if (is_scrna_project(project) && identical(step, "Alignment & counting")) "sample_id" else "sample"
+  if (!NROW(design) || !sample_column %in% names(design)) return(data.frame())
+  design_samples <- as.character(design[[sample_column]])
   design_samples <- design_samples[nzchar(design_samples)]
   requested_samples <- unique(as.character(samples %||% character(0)))
   requested_samples <- requested_samples[nzchar(requested_samples)]
   samples <- if (length(requested_samples)) intersect(design_samples, requested_samples) else design_samples
   if (!length(samples)) return(data.frame())
   rows <- lapply(samples, function(sample) {
-    target <- sample_output_target(project, sample, step)
+    target <- if (is_scrna_project(project) && identical(step, "Alignment & counting")) scrna_cellranger_output_dir(project, sample) else sample_output_target(project, sample, step)
     data.frame(
       sample = sample,
       step = step,
@@ -13263,7 +13381,7 @@ server <- function(input, output, session) {
           if (length(existing_state$annotations)) tags$p(class = "muted small-note", paste("Detected annotation metadata:", paste(existing_state$annotations, collapse = "; "))) else NULL,
           if (reuse_existing) checkboxInput("scrna_show_rebuild_steps", "Show optional QC, normalization, and reclustering controls", value = show_rebuild) else NULL
         ) else NULL,
-        if (has_fastq_inputs) tool_panel("Alignment & counting", status, "Align and quantify each 10x gene-expression FASTQ sample with Cell Ranger before single-cell QC.", uiOutput("scrna_cellranger_settings_ui"), "run_scrna_cellranger", "Run alignment & counting", show_sample_progress = FALSE) else NULL,
+        if (has_fastq_inputs) tool_panel("Alignment & counting", status, "Align and quantify each 10x gene-expression FASTQ sample with Cell Ranger before single-cell QC.", uiOutput("scrna_cellranger_settings_ui"), "run_scrna_cellranger", "Run alignment & counting", show_sample_progress = TRUE) else NULL,
         if (!reuse_existing || show_rebuild) tool_panel("Input inspection", status, "Validate the raw-count input, create an unfiltered QC preview, and report any existing analysis state only when the input is an RDS or H5AD object.", tagList(uiOutput("scrna_inspect_settings_ui"), uiOutput("scrna_input_state_ui"), tags$p(class = "muted small-note", "The input is read only. This first job creates the unfiltered QC plots used to choose filters; it does not change any cutoff fields.")), "run_scrna_inspect", "Inspect input & show QC plots", show_sample_progress = FALSE) else NULL,
         if (!reuse_existing || show_rebuild) tool_panel("QC & doublets", status, "Review the unfiltered QC plots below, choose biologically appropriate cutoffs, then filter cells and record predicted doublets.", tagList(uiOutput("scrna_pre_qc_plot_ui"), uiOutput("scrna_qc_settings_ui"), uiOutput("scrna_post_qc_plot_ui"), tags$p(class = "muted small-note", "The same applied cutoffs are drawn on the before- and after-filter plots. Doublet calls are saved whether or not predicted doublets are removed.")), "run_scrna_qc", "Run QC & doublets", show_sample_progress = FALSE) else NULL,
         if (!reuse_existing || show_rebuild) tool_panel("Normalize & PCA", status, "Normalize retained cells, identify variable genes, scale, and calculate PCA. PCA outputs appear here as soon as this step finishes.", tagList(uiOutput("scrna_preprocess_settings_ui"), uiOutput("scrna_pca_output_ui")), "run_scrna_preprocess", "Run normalization & PCA", show_sample_progress = FALSE) else NULL,

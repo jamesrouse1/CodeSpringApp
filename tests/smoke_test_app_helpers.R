@@ -1430,6 +1430,29 @@ fastq_project <- list(
 validated_fastq <- app_env$validate_scrna_manifest(app_env$scrna_manifest(fastq_project))
 assert(identical(validated_fastq$input_type[[1]], "fastq_folder"), "scRNA sample designs detect matched 10x FASTQ folders")
 assert(identical(app_env$scrna_fastq_sample_names(fastq_dir), "donor03"), "10x FASTQ filename prefixes are inferred for Cell Ranger sample selection")
+alignment_not_started <- app_env$scrna_alignment_sample_progress(fastq_project, jobs = data.frame())$table
+alignment_waiting <- app_env$scrna_alignment_sample_progress(fastq_project, jobs = data.frame(
+  step = "Alignment & counting", sample = "donor03", slurm_state = "Submitted", elapsed = "00:00:00", stringsAsFactors = FALSE
+))$table
+alignment_running <- app_env$scrna_alignment_sample_progress(fastq_project, jobs = data.frame(
+  step = "Alignment & counting", sample = "donor03", slurm_state = "RUNNING", elapsed = "00:04:12", stringsAsFactors = FALSE
+))$table
+alignment_failed <- app_env$scrna_alignment_sample_progress(fastq_project, jobs = data.frame(
+  step = "Alignment & counting", sample = "donor03", slurm_state = "FAILED", elapsed = "00:01:05", stringsAsFactors = FALSE
+))$table
+assert(
+  identical(alignment_not_started$status[[1]], "Not started") &&
+    identical(alignment_waiting$status[[1]], "Waiting") &&
+    identical(alignment_running$status[[1]], "Running") && identical(alignment_running$time_running[[1]], "00:04:12") &&
+    identical(alignment_failed$status[[1]], "Likely failed"),
+  "scRNA alignment progress distinguishes not-started, queued, running, and failed Cell Ranger samples"
+)
+alignment_optimistic <- app_env$optimistic_step_progress(fastq_project, "Alignment & counting", samples = "donor03")
+assert(
+  NROW(alignment_optimistic) == 1L && identical(alignment_optimistic$status[[1]], "Waiting") &&
+    grepl("cellranger/donor03$", alignment_optimistic$target[[1]]),
+  "new Cell Ranger submissions immediately render as waiting for the selected sample"
+)
 pooled_fastq_dir <- file.path(root, "pooled_fastqs")
 dir.create(pooled_fastq_dir)
 pooled_prefixes <- c("Amor_AH07_Y_UT_F", "Amor_AH07_Y_UT_M", "Amor_AH07_O_uPAR_F", "Amor_AH07_O_uPAR_M")
@@ -1502,6 +1525,21 @@ dir.create(matrix_dir, recursive = TRUE)
 for (name in c("matrix.mtx.gz", "features.tsv.gz", "barcodes.tsv.gz")) {
   con <- gzfile(file.path(matrix_dir, name), "wt"); writeLines("fixture", con); close(con)
 }
+writeLines("complete", file.path(app_env$scrna_cellranger_output_dir(fastq_project, "donor03"), "_CELLRANGER_COMPLETE"))
+metrics_path <- file.path(app_env$scrna_cellranger_output_dir(fastq_project, "donor03"), "outs", "metrics_summary.csv")
+utils::write.csv(data.frame(`Estimated Number of Cells` = "1,234", `Mean Reads per Cell` = "45,678", check.names = FALSE), metrics_path, row.names = FALSE, quote = TRUE)
+alignment_complete <- app_env$scrna_alignment_sample_progress(fastq_project, jobs = data.frame(
+  step = "Alignment & counting", sample = "donor03", slurm_state = "COMPLETED", elapsed = "00:31:00", stringsAsFactors = FALSE
+))$table
+alignment_display <- app_env$sample_progress_step_table(alignment_complete, "Alignment & counting")
+alignment_ui <- as.character(app_env$sample_progress_step_ui(alignment_complete, "Alignment & counting"))
+assert(
+  identical(alignment_complete$status[[1]], "Completed") &&
+    all(c("Sample", "Status", "Time running", "Estimated cells", "Mean reads/cell") %in% names(alignment_display)) &&
+    identical(alignment_display$Sample[[1]], "donor03") &&
+    grepl("tool-progress-table", alignment_ui, fixed = TRUE) && grepl("sample-status completed", alignment_ui, fixed = TRUE),
+  "completed Cell Ranger samples use the RNA-seq per-sample status table with elapsed time and available metrics"
+)
 resolved_fastq <- app_env$scrna_resolved_manifest(fastq_project)
 assert(
   identical(resolved_fastq$data$input_type[[1]], "filtered_10x_matrix") && identical(resolved_fastq$data$input_path[[1]], matrix_dir),
