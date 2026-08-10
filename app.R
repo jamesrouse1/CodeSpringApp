@@ -10126,6 +10126,11 @@ scrna_expression_palette <- function() {
   c("#440154", "#3B528B", "#21918C", "#5EC962", "#FDE725")
 }
 
+scrna_expression_colorscale <- function() {
+  colors <- scrna_expression_palette()
+  lapply(seq_along(colors), function(i) list((i - 1) / (length(colors) - 1), colors[[i]]))
+}
+
 scrna_results_explorer_ui <- function() {
   div(class = "native-results-host cutrun-results-host scrna-results-host", div(class = "app-shell cutrun-results-shell",
     results_explorer_hero("Single-cell RNA-seq Results Explorer"),
@@ -14185,7 +14190,7 @@ server <- function(input, output, session) {
         column(4, radioButtons("scrna_embedding_color_mode", "Color UMAP by", choices = c("Cell metadata" = "metadata", "Marker expression" = "marker"), selected = input$scrna_embedding_color_mode %||% "metadata", inline = TRUE)),
         column(4, conditionalPanel("input.scrna_embedding_color_mode == 'metadata'", selectInput("scrna_embedding_color", "Metadata field", choices = choices, selected = selected_choice(input$scrna_embedding_color, choices, choices[[1]]), selectize = FALSE)), conditionalPanel("input.scrna_embedding_color_mode == 'marker'", selectInput("scrna_embedding_gene", "Marker gene", choices = scrna_dashboard_gene_choices(p), selected = selected_choice(input$scrna_embedding_gene, scrna_dashboard_gene_choices(p), ""), selectize = TRUE))),
         column(2, numericInput("scrna_embedding_max_points", "Maximum cells", value = min(30000L, max(2000L, requested_points)), min = 2000, max = 50000, step = 1000)),
-        column(2, br(), checkboxInput("scrna_embedding_legend", "Show legend", value = if (is.null(input$scrna_embedding_legend)) TRUE else isTRUE(input$scrna_embedding_legend)))
+        column(2, checkboxInput("scrna_embedding_legend", "Show legend", value = if (is.null(input$scrna_embedding_legend)) TRUE else isTRUE(input$scrna_embedding_legend)), tags$details(tags$summary("Display"), sliderInput("scrna_embedding_point_size", "Point size", min = 1, max = 8, value = input$scrna_embedding_point_size %||% 4, step = 0.5), sliderInput("scrna_embedding_opacity", "Opacity", min = 0.1, max = 1, value = input$scrna_embedding_opacity %||% 0.72, step = 0.05)))
       )
     )
   })
@@ -14257,6 +14262,11 @@ server <- function(input, output, session) {
     point_limit <- suppressWarnings(as.integer(input$scrna_embedding_max_points %||% 30000L))
     if (is.na(point_limit)) point_limit <- 30000L
     point_limit <- max(2000L, min(50000L, point_limit))
+    point_size <- suppressWarnings(as.numeric(input$scrna_embedding_point_size %||% 4))
+    opacity <- suppressWarnings(as.numeric(input$scrna_embedding_opacity %||% 0.72))
+    if (!is.finite(point_size)) point_size <- 4
+    if (!is.finite(opacity)) opacity <- 0.72
+    point_size <- max(1, min(8, point_size)); opacity <- max(0.1, min(1, opacity))
     x <- scrna_embedding_table(p, columns = c(color_column, "sample_id", "condition", "batch", "cluster", "cell_type", "annotation_source"), max_points = point_limit)
     validate(need(NROW(x), "No valid UMAP coordinates are available for this selection."))
     marker_gene <- ""
@@ -14276,7 +14286,8 @@ server <- function(input, output, session) {
     if (identical(color_mode, "marker")) hover <- paste0(hover, "<br>", marker_gene, ": ", sprintf("%.3f", value))
     if (is.numeric(value) || is.integer(value)) {
       x$.codespring_color <- value
-      plot <- plotly::plot_ly(x, x = ~UMAP_1, y = ~UMAP_2, type = "scattergl", mode = "markers", source = "scrna_embedding", key = ~cell, color = ~.codespring_color, colors = scrna_expression_palette(), text = hover, hoverinfo = "text", marker = list(size = 4, opacity = 0.72))
+      color_title <- if (identical(color_mode, "marker")) marker_gene else color_column
+      plot <- plotly::plot_ly(x, x = ~UMAP_1, y = ~UMAP_2, type = "scattergl", mode = "markers", source = "scrna_embedding", key = ~cell, text = hover, hoverinfo = "text", marker = list(color = x$.codespring_color, colorscale = scrna_expression_colorscale(), showscale = TRUE, colorbar = list(title = color_title), size = point_size, opacity = opacity))
     } else {
       values <- as.character(value); values[is.na(values) | !nzchar(values)] <- "Unassigned"
       validate(need(length(unique(values)) <= 80L, paste0("‘", color_column, "’ has ", length(unique(values)), " distinct values and is not suitable for categorical coloring. Choose a sample, condition, cluster, or cell-type field instead.")))
@@ -14288,7 +14299,7 @@ server <- function(input, output, session) {
         label <- names(groups)[[i]]
         group <- groups[[i]]
         group_hover <- hover[match(group$cell, x$cell)]
-        plot <- plotly::add_markers(plot, data = group, x = ~UMAP_1, y = ~UMAP_2, type = "scattergl", name = label, key = ~cell, text = group_hover, hoverinfo = "text", marker = list(color = colors[[i]], size = 4, opacity = 0.72))
+        plot <- plotly::add_markers(plot, data = group, x = ~UMAP_1, y = ~UMAP_2, type = "scattergl", name = label, key = ~cell, text = group_hover, hoverinfo = "text", marker = list(color = colors[[i]], size = point_size, opacity = opacity))
       }
     }
     plot <- plotly::event_register(plot, "plotly_selected")
