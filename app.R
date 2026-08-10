@@ -10073,6 +10073,18 @@ scrna_composition_fields <- function(project) {
   fields[nzchar(fields)]
 }
 
+scrna_discrete_metadata_fields <- function(project) {
+  # Several categorical fields are legitimately encoded as integers in TSV
+  # output. Their semantic role, not read.delim's inferred storage type,
+  # determines whether Plotly should draw a legend or a continuous scale.
+  unique(c(
+    "cluster", "sample_id", "condition", "batch", "cell_type",
+    "annotation_source", "predicted_doublet", "input_kind",
+    scrna_composition_fields(project),
+    grep("^(annotation_source__|cell_type|celltype|subtype$)", scrna_embedding_columns(project), value = TRUE, ignore.case = TRUE)
+  ))
+}
+
 scrna_composition_table <- function(project, annotation_field = "") {
   generic_path <- file.path(scrna_output_dir(project), "tables", "composition_by_sample.tsv")
   x <- safe_read_table(generic_path, 100000)
@@ -14445,7 +14457,8 @@ server <- function(input, output, session) {
     hover_columns <- intersect(c("cell", "sample_id", "condition", "batch", "cluster", "cell_type", "annotation_source"), names(x))
     hover <- apply(x[, hover_columns, drop = FALSE], 1, function(row) paste(paste(names(row), row, sep = ": "), collapse = "<br>"))
     if (identical(color_mode, "marker")) hover <- paste0(hover, "<br>", marker_gene, ": ", sprintf("%.3f", value))
-    if (is.numeric(value) || is.integer(value)) {
+    force_discrete <- identical(color_mode, "metadata") && color_column %in% scrna_discrete_metadata_fields(p)
+    if (!force_discrete && (is.numeric(value) || is.integer(value))) {
       x$.codespring_color <- value
       color_title <- if (identical(color_mode, "marker")) marker_gene else color_column
       plot <- plotly::plot_ly(x, x = ~UMAP_1, y = ~UMAP_2, type = "scattergl", mode = "markers", source = "scrna_embedding", key = ~cell, text = hover, hoverinfo = "text", marker = list(color = x$.codespring_color, colorscale = scrna_expression_colorscale(), showscale = TRUE, colorbar = list(title = color_title), size = point_size, opacity = opacity))
