@@ -12545,7 +12545,7 @@ server <- function(input, output, session) {
         tool_panel("QC & doublets", status, "Review the unfiltered QC plots below, choose biologically appropriate cutoffs, then filter cells and record predicted doublets.", tagList(uiOutput("scrna_pre_qc_plot_ui"), uiOutput("scrna_qc_settings_ui"), uiOutput("scrna_post_qc_plot_ui"), tags$p(class = "muted small-note", "The same applied cutoffs are drawn on the before- and after-filter plots. Doublet calls are saved whether or not predicted doublets are removed.")), "run_scrna_qc", "Run QC & doublets", show_sample_progress = FALSE),
         tool_panel("Normalize & PCA", status, "Normalize retained cells, identify variable genes, scale, and calculate PCA. PCA outputs appear here as soon as this step finishes.", tagList(uiOutput("scrna_preprocess_settings_ui"), uiOutput("scrna_pca_output_ui")), "run_scrna_preprocess", "Run normalization & PCA", show_sample_progress = FALSE),
         tool_panel("UMAP & clustering", status, "For multiple inputs, optionally correct a technical batch first; then calculate neighbours, UMAP, and clusters. Review the UMAP preview here before annotation.", tagList(uiOutput("scrna_cluster_settings_ui"), uiOutput("scrna_umap_output_ui")), "run_scrna_cluster", "Run UMAP & clustering", show_sample_progress = FALSE),
-        tool_panel("Annotate & markers", status, "Apply an optional cell mapping or marker list, then write markers, final UMAPs, and a portable processed object.", uiOutput("scrna_annotation_settings_ui"), "run_scrna_annotate", "Run annotation & markers", show_sample_progress = FALSE)
+        tool_panel("Annotate & markers", status, "Use the project's saved post-UMAP object, apply an optional cell mapping or marker list, then write markers, final UMAPs, and the processed object for the selected engine.", uiOutput("scrna_annotation_settings_ui"), "run_scrna_annotate", "Run annotation & markers", show_sample_progress = FALSE)
       ))
     }
     if (is_chip_project(p)) {
@@ -13027,8 +13027,17 @@ server <- function(input, output, session) {
 
   output$scrna_annotation_settings_ui <- renderUI({
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
+    engine <- scrna_ui_engine()
+    engine_name <- if (identical(engine, "scanpy")) "Scanpy" else "Seurat"
+    checkpoint_name <- if (identical(engine, "scanpy")) "04_clustered_scanpy.h5ad" else "04_clustered_seurat.rds"
+    output_name <- if (identical(engine, "scanpy")) "processed_scanpy.h5ad" else "processed_seurat.rds"
     tagList(
-      tags$p(class = "muted small-note", "Optional. A cell-to-cell-type mapping takes priority; otherwise the app keeps clusters as provisional labels."),
+      div(class = "read-source-note",
+        tags$strong(paste0(engine_name, " annotation object")),
+        tags$p(paste0("The app automatically loads the post-UMAP ", engine_name, " object: checkpoints/", checkpoint_name, ". You do not need to select another object here.")),
+        tags$p(paste0("The completed annotated object will be saved as objects/", output_name, "."))
+      ),
+      tags$p(class = "muted small-note", "The marker list is a TSV with cell_type and gene columns; it works with either engine. An optional cell-to-cell-type mapping takes priority over marker scoring. If neither is supplied, cluster IDs are retained as provisional labels."),
       radioButtons("scrna_marker_source", "Marker list source", choices = c("Browse or paste a server path" = "server", "Upload from laptop" = "upload"), selected = input$scrna_marker_source %||% "server", inline = TRUE),
       conditionalPanel("input.scrna_marker_source == 'server'", div(class = "new-project-path-control", textInput("scrna_marker_file", "Marker list", value = input$scrna_marker_file %||% "", placeholder = "Absolute server .tsv with cell_type and gene columns"), actionButton("browse_scrna_marker_file", "Browse server", class = "btn-default"))),
       conditionalPanel("input.scrna_marker_source == 'upload'", fileInput("scrna_marker_upload", "Marker list from laptop", accept = c(".tsv", ".txt"))),
