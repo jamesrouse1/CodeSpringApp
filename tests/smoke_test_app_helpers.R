@@ -38,7 +38,7 @@ assert(
 assert(
   !app_env$scrna_uses_input_manifest(list(analysis_key = "scrna", scrna_input_mode = "single")) &&
     app_env$scrna_uses_input_manifest(list(analysis_key = "scrna", scrna_input_mode = "multiple")) &&
-    grepl("Multiple filtered matrices", app_text, fixed = TRUE) &&
+    grepl("Multiple sample inputs", app_text, fixed = TRUE) &&
     grepl("new_scrna_inputs_table", app_text, fixed = TRUE) &&
     grepl("Create it in the app", app_text, fixed = TRUE),
   "single-input scRNA projects keep their internal manifest hidden and reveal it only for multi-input or integration workflows"
@@ -1369,6 +1369,39 @@ assert(
 assert(
   grepl("scanpy_container_check", app_text, fixed = TRUE) && grepl("scrna_manifest_from_setup", app_text, fixed = TRUE),
   "scRNA setup supports an optional manifest and a shared Scanpy container"
+)
+
+fastq_dir <- file.path(root, "donor_fastqs")
+dir.create(fastq_dir)
+for (read in c("R1", "R2")) {
+  con <- gzfile(file.path(fastq_dir, paste0("donor03_S1_L001_", read, "_001.fastq.gz")), "wt")
+  writeLines(c("@read", "ACGT", "+", "####"), con)
+  close(con)
+}
+fastq_manifest_path <- file.path(root, "fastq_scRNA_design.tsv")
+write.table(data.frame(sample_id = "donor03", input_path = fastq_dir, input_type = "fastq_folder", fastq_sample = "donor03"), fastq_manifest_path, sep = "\t", row.names = FALSE, quote = FALSE)
+fastq_project <- list(
+  id = "scrna/fastq", name = "fastq", analysis_key = "scrna", analysis = "scRNA-seq",
+  data_dir = file.path(root, "fastq-scRNA-results", "data"), results_root = file.path(root, "fastq-scRNA-results"),
+  design_matrix_path = fastq_manifest_path, scrna_input_manifest = fastq_manifest_path, scrna_engine = "seurat", scrna_input_mode = "multiple"
+)
+validated_fastq <- app_env$validate_scrna_manifest(app_env$scrna_manifest(fastq_project))
+assert(identical(validated_fastq$input_type[[1]], "fastq_folder"), "scRNA sample designs detect matched 10x FASTQ folders")
+assert(identical(app_env$scrna_fastq_sample_names(fastq_dir), "donor03"), "10x FASTQ filename prefixes are inferred for Cell Ranger sample selection")
+assert("Cell Ranger count" %in% app_env$scrna_pipeline_order(fastq_project), "FASTQ-backed scRNA projects expose Cell Ranger before input inspection")
+assert(
+  grepl("run_scrna_cellranger", app_text, fixed = TRUE) && any(grepl("module load CellRanger/9.0.1", runtime_text, fixed = TRUE)),
+  "the app submits FASTQ samples through the maintained CellRanger/9.0.1 cluster module"
+)
+matrix_dir <- app_env$scrna_cellranger_matrix_dir(fastq_project, "donor03")
+dir.create(matrix_dir, recursive = TRUE)
+for (name in c("matrix.mtx.gz", "features.tsv.gz", "barcodes.tsv.gz")) {
+  con <- gzfile(file.path(matrix_dir, name), "wt"); writeLines("fixture", con); close(con)
+}
+resolved_fastq <- app_env$scrna_resolved_manifest(fastq_project)
+assert(
+  identical(resolved_fastq$data$input_type[[1]], "filtered_10x_matrix") && identical(resolved_fastq$data$input_path[[1]], matrix_dir),
+  "completed Cell Ranger matrices replace FASTQ folders only in the downstream execution manifest"
 )
 
 object_dir <- file.path(app_env$scrna_output_dir(scrna_project), "objects")
