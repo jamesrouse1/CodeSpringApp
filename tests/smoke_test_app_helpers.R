@@ -44,6 +44,16 @@ assert(
     grepl("Use an existing sample-design file instead", app_text, fixed = TRUE),
   "scRNA setup separates processed objects from new single- or multi-sample analyses"
 )
+stale_scrna_manifest <- tempfile(fileext = ".tsv")
+utils::write.table(
+  data.frame(sample_id = paste0("sample_", seq_len(8)), input_path = paste0("/input/sample_", seq_len(8)), stringsAsFactors = FALSE),
+  stale_scrna_manifest, sep = "\t", row.names = FALSE, quote = FALSE
+)
+assert(
+  app_env$scrna_uses_input_manifest(list(analysis_key = "scrna", scrna_input_mode = "single", scrna_input_manifest = stale_scrna_manifest)),
+  "an eight-row scRNA manifest overrides a stale one-input project flag"
+)
+unlink(stale_scrna_manifest)
 assert(
   grepl("scrna_preintegration_umap_ui", app_text, fixed = TRUE) &&
     grepl("02_preintegration_umap_", app_text, fixed = TRUE) &&
@@ -1442,10 +1452,11 @@ writeLines("sample_id\tinput_path", browser_file_fixture)
 assert(identical(normalizePath(app_env$browser_start_path(browser_fixture, "dir"), winslash = "/"), normalizePath(browser_fixture, winslash = "/")), "a pasted absolute folder opens at that exact folder")
 assert(identical(normalizePath(app_env$browser_start_path(browser_file_fixture, "file"), winslash = "/"), normalizePath(browser_fixture, winslash = "/")), "a pasted absolute file opens at its containing folder")
 assert(
-  grepl('tabPanel("Detected Samples & Design"', app_text, fixed = TRUE) &&
+  grepl('tabPanel("Samples & Design"', app_text, fixed = TRUE) &&
+    grepl('updateTabsetPanel(session, "web_main_tabs", selected = "Samples & Design")', server_source, fixed = TRUE) &&
     grepl('output$new_scrna_inputs_table <- render_csl_table', server_source, fixed = TRUE) &&
     grepl('editable = TRUE', server_source, fixed = TRUE),
-  "detected scRNA samples have a dedicated editable design tab"
+  "detected scRNA samples open in the dedicated top-level editable design tab"
 )
 assert(
   grepl('typed_value <- path.expand', server_source, fixed = TRUE) &&

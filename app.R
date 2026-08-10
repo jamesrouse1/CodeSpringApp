@@ -6843,7 +6843,7 @@ missing_read_message <- function(project, pairs, trimmed = FALSE) {
     return(paste(
       "No design_matrix.txt was found for this project.",
       paste("Expected:", project$design_matrix_path),
-      "Create or save the design matrix in the Design Matrix tab before running this step.",
+      "Create or save the design matrix in the Samples & Design tab before running this step.",
       sep = "\n"
     ))
   }
@@ -8780,12 +8780,16 @@ scrna_existing_processed_ready <- function(project) {
 }
 
 scrna_uses_input_manifest <- function(project) {
+  manifest <- scrna_manifest(project)
+  # The manifest is the authoritative source for input count. This also repairs
+  # projects created by older app versions that saved "single" despite having
+  # multiple detected rows.
+  if (NROW(manifest) > 1L) return(TRUE)
   mode <- tolower(trimws(as.character(project$scrna_input_mode %||% "auto")))
   if (identical(mode, "multiple")) return(TRUE)
   if (identical(mode, "single")) return(FALSE)
   # Existing projects created before this setting retain their manifest view
   # when they contain multiple inputs or input-level metadata.
-  manifest <- scrna_manifest(project)
   NROW(manifest) > 1L || length(setdiff(names(manifest), c("sample_id", "input_path"))) > 0L
 }
 
@@ -11606,17 +11610,31 @@ ui <- fluidPage(
                                  if (file.exists(LOGO_PATH)) tags$img(src = file.path("codespring_logo", basename(LOGO_PATH))) else NULL,
                                  if (file.exists(LOGO_CSL_PATH)) tags$img(src = file.path("csl_logo", basename(LOGO_CSL_PATH))) else NULL))
                  )),
-        tabPanel("Design Matrix", br(), uiOutput("design_editor_heading"),
-                 uiOutput("design_matrix_help_ui"),
-                 fluidRow(
-                   column(7, uiOutput("metadata_columns_control_ui")),
-                   column(5, br(),
-                          uiOutput("design_matrix_actions_ui"))
+        tabPanel("Samples & Design", br(),
+                 conditionalPanel(
+                   "input.project_id == '__new__' && input.new_project_analysis == 'scRNA-seq' && input.new_project_mode == 'new' && input.new_scrna_start_mode == 'new'",
+                   h3("Detected Samples & Design"),
+                   uiOutput("new_scrna_detected_summary"),
+                   div(class = "button-row",
+                       actionButton("remove_last_new_scrna_input", "Remove last sample", class = "btn-default"),
+                       actionButton("clear_new_scrna_inputs", "Clear detected samples", class = "btn-default")),
+                   table_output("new_scrna_inputs_table"),
+                   tags$p(class = "muted small-note", tags$strong("Editable design matrix:"), " double-click any cell to change the sample name, path, input type, FASTQ prefix, condition, donor, or technical batch. These rows are saved as the project-local sample manifest when you create the project."),
+                   actionButton("return_to_scrna_input", "Back to input data", class = "btn-default")
                  ),
-                 uiOutput("design_editor_ui"),
-                 br(),
-                 actionButton("save_design", "Save design_matrix.txt", class = "btn-primary"),
-                 verbatimTextOutput("design_save_status")),
+                 conditionalPanel(
+                   "!(input.project_id == '__new__' && input.new_project_analysis == 'scRNA-seq' && input.new_project_mode == 'new' && input.new_scrna_start_mode == 'new')",
+                   uiOutput("design_editor_heading"),
+                   uiOutput("design_matrix_help_ui"),
+                   fluidRow(
+                     column(7, uiOutput("metadata_columns_control_ui")),
+                     column(5, br(), uiOutput("design_matrix_actions_ui"))
+                   ),
+                   uiOutput("design_editor_ui"),
+                   br(),
+                   actionButton("save_design", "Save design_matrix.txt", class = "btn-primary"),
+                   verbatimTextOutput("design_save_status")
+                 )),
         tabPanel("Run Pipeline", br(), h3("Run Pipeline"),
                  tags$p(class = "muted", "Each tool has its own settings. Jobs are submitted with SLURM sbatch and keep running after this app or browser is closed. If a path or design matrix check fails before sbatch, the app writes a pre-submit error log instead of submitting an empty job."),
                  uiOutput("run_resource_strip"),
@@ -12115,7 +12133,7 @@ server <- function(input, output, session) {
       return()
     }
     new_scrna_inputs(rbind(current, checked[, names(current), drop = FALSE]))
-    updateTabsetPanel(session, "new_scrna_input_tabs", selected = "Detected Samples & Design")
+    updateTabsetPanel(session, "web_main_tabs", selected = "Samples & Design")
     if (NROW(checked) > 1L) {
       kind <- if (identical(requested_type, "fastq_folder")) "FASTQ samples; Cell Ranger will combine lanes within each sample prefix" else "filtered matrices"
       new_scrna_input_message(paste0("Detected and added ", NROW(checked), " ", kind, ". Review and edit the design metadata below."))
@@ -12138,6 +12156,10 @@ server <- function(input, output, session) {
     current <- new_scrna_inputs()
     new_scrna_inputs(current[0, , drop = FALSE])
     new_scrna_input_message("Cleared the in-app sample table.")
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$return_to_scrna_input, {
+    updateTabsetPanel(session, "web_main_tabs", selected = "Setup")
   }, ignoreInit = TRUE)
 
   output$new_scrna_input_status <- renderText(new_scrna_input_message())
@@ -12351,9 +12373,6 @@ server <- function(input, output, session) {
           tags$p(class = "muted small-note", "The app detects H5AD versus RDS automatically. Input inspection records existing counts, normalization, PCA, UMAP, clusters, and annotation fields so only relevant continuation options are emphasized.")
         ),
         conditionalPanel("input.new_scrna_start_mode == 'new'",
-          tabsetPanel(id = "new_scrna_input_tabs", selected = "Input Data",
-            tabPanel("Input Data",
-              br(),
               radioButtons("new_scrna_sample_count", "Samples", choices = c("One sample" = "single", "Multiple samples" = "multiple"), selected = "multiple", inline = TRUE),
               radioButtons("new_scrna_folder_type", "Input data", choices = c("10x gene-expression FASTQs" = "fastq_folder", "Filtered feature-barcode matrix" = "filtered_10x_matrix"), selected = "fastq_folder", inline = TRUE),
               conditionalPanel("input.new_scrna_sample_count == 'multiple'",
@@ -12372,19 +12391,6 @@ server <- function(input, output, session) {
                 div(class = "button-row", actionButton("add_new_scrna_input", "Detect & add sample(s)", class = "btn-primary")),
                 textOutput("new_scrna_input_status")
               ),
-              conditionalPanel("input.new_scrna_use_manifest", tags$p(class = "muted small-note", "Open Detected Samples & Design to select the existing sample-design file."))
-            ),
-            tabPanel("Detected Samples & Design",
-              br(),
-              conditionalPanel("!input.new_scrna_use_manifest",
-                uiOutput("new_scrna_detected_summary"),
-                div(class = "button-row",
-                  actionButton("remove_last_new_scrna_input", "Remove last sample", class = "btn-default"),
-                  actionButton("clear_new_scrna_inputs", "Clear detected samples", class = "btn-default")
-                ),
-                table_output("new_scrna_inputs_table"),
-                tags$p(class = "muted small-note", tags$strong("Editable design matrix:"), " double-click any cell to change the sample name, path, input type, FASTQ prefix, condition, donor, or technical batch. Use technical_batch only for library, capture, lane, or sequencing-run effects—not for the biological condition.")
-              ),
               conditionalPanel("input.new_scrna_use_manifest",
                 radioButtons("new_scrna_manifest_source", "Sample-design location", choices = c("Server file" = "server", "Upload from laptop" = "upload"), selected = "server", inline = TRUE),
                 conditionalPanel("input.new_scrna_manifest_source == 'server'",
@@ -12397,8 +12403,6 @@ server <- function(input, output, session) {
                 ),
                 tags$p(class = "muted small-note", "Required columns: sample_id and input_path. Input type is detected automatically when input_type is omitted. A project-local editable copy is created when the project is saved.")
               )
-            )
-          )
         ),
         scrna_results_location_control,
         tags$p(class = "muted small-note", "Engine selection is automatic: Scanpy for H5AD and Seurat for RDS, filtered matrices, or Cell Ranger outputs. Annotation files are requested only at the annotation step.")
@@ -12427,7 +12431,7 @@ server <- function(input, output, session) {
       div(class = "new-project-path-control",
           textInput("new_design_matrix_path", "Design matrix folder", value = default_design_dir, placeholder = "Optional; folder containing or receiving design_matrix.txt"),
           actionButton("browse_new_design_matrix_path", "Browse server", class = "btn-default"),
-          tags$p(class = "muted", "Leave this blank to create the design matrix in the Design Matrix tab after the project is created.")
+          tags$p(class = "muted", "Leave this blank to create the design matrix in the Samples & Design tab after the project is created.")
       ),
       ),
       conditionalPanel(
@@ -12462,7 +12466,7 @@ server <- function(input, output, session) {
           )
         ),
         textInput("new_counts_metadata_cols", "Metadata columns if no design is uploaded", value = "treatment", placeholder = "treatment, batch, sex"),
-        tags$p(class = "muted", "Without a design file, sample names are taken from the count-matrix column names. Complete the metadata values in the Design Matrix tab before running DESeq2.")
+        tags$p(class = "muted", "Without a design file, sample names are taken from the count-matrix column names. Complete the metadata values in the Samples & Design tab before running DESeq2.")
       ),
       if (!identical(new_analysis_key, "scrna")) conditionalPanel(
         "input.new_project_mode != 'existing_results'",
@@ -12576,7 +12580,7 @@ server <- function(input, output, session) {
 
   observe({
     viewer_only <- isTRUE(current_project()$external_results)
-    non_viewer_tabs <- c("Setup", "Design Matrix", "Run Pipeline", "Progress", "Logs", "Methods")
+    non_viewer_tabs <- c("Setup", "Samples & Design", "Run Pipeline", "Progress", "Logs", "Methods")
     if (viewer_only) {
       lapply(non_viewer_tabs, function(tab) hideTab("web_main_tabs", tab, session = session))
       showTab("web_main_tabs", "Results Explorer", session = session)
