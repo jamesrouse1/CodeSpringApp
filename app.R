@@ -3120,7 +3120,7 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
   if (is_scrna_project(project)) {
     out_dir <- file.path(data_dir, "scrna")
     stages <- scrna_pipeline_order()
-    stage_keys <- c("inspect", "qc", "preprocess", "cluster", "annotate")
+    stage_keys <- c("inspect", "qc", "preprocess", "cluster", "annotate", "score", "differential", "pathway")
     marker <- file.path(out_dir, paste0("_STAGE_", toupper(stage_keys), "_COMPLETE"))
     detected <- safe_read_table(file.path(out_dir, "tables", "input_processing_detected.tsv"), 10000)
     detected_any <- function(column) {
@@ -3146,9 +3146,9 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
     raw <- data.frame(
       step = stages,
       status = mapply(status_one, stages, marker, USE.NAMES = FALSE),
-      path = c(file.path(out_dir, "tables", "input_processing_detected.tsv"), file.path(out_dir, "tables", "qc_summary_by_sample.tsv"), file.path(out_dir, "tables", "pca_variance_explained.tsv"), file.path(out_dir, "checkpoints"), file.path(out_dir, "objects")),
-      input = c(project$scrna_engine %||% "auto", "", "", "", ""),
-      detail = source_details,
+      path = c(file.path(out_dir, "tables", "input_processing_detected.tsv"), file.path(out_dir, "tables", "qc_summary_by_sample.tsv"), file.path(out_dir, "tables", "pca_variance_explained.tsv"), file.path(out_dir, "checkpoints"), file.path(out_dir, "objects"), file.path(out_dir, "tables", "signature_scores_summary.tsv"), file.path(out_dir, "tables", "pseudobulk_differential_expression.tsv"), file.path(out_dir, "tables", "pathway_fgsea_ranked.tsv")),
+      input = c(project$scrna_engine %||% "auto", "", "", "", "", "", "", ""),
+      detail = c(source_details, "Scores named gene sets on normalized expression and stores them as cell metadata", "Uses sample-level pseudobulk DESeq2 for primary inference; cell-level Wilcoxon is exploratory", "Runs ranked fgsea from the pseudobulk Wald statistic and a supplied GMT"),
       stringsAsFactors = FALSE
     )
     raw$status[raw$step %in% names(active_states)] <- "Active"
@@ -3392,12 +3392,12 @@ chip_pipeline_order <- function() {
 }
 
 scrna_pipeline_order <- function() {
-  c("Input inspection", "QC & doublets", "Normalize & PCA", "UMAP & clustering", "Annotate & markers")
+  c("Input inspection", "QC & doublets", "Normalize & PCA", "UMAP & clustering", "Annotate & markers", "Signature scoring", "Differential expression", "Pathway analysis")
 }
 
 scrna_stage_step <- function(stage = "inspect") {
   stage <- tolower(trimws(as.character(stage %||% "inspect")))
-  labels <- c(inspect = "Input inspection", qc = "QC & doublets", preprocess = "Normalize & PCA", cluster = "UMAP & clustering", annotate = "Annotate & markers")
+  labels <- c(inspect = "Input inspection", qc = "QC & doublets", preprocess = "Normalize & PCA", cluster = "UMAP & clustering", annotate = "Annotate & markers", score = "Signature scoring", differential = "Differential expression", pathway = "Pathway analysis")
   value <- unname(labels[[stage]])
   if (is.null(value) || !nzchar(value)) stop("Unknown scRNA stage: ", stage)
   value
@@ -8831,7 +8831,7 @@ scanpy_container_check <- function() {
   list(ready = TRUE, state = "Ready", path = container, detail = "All H5AD jobs use this shared, versioned Scanpy container. No per-user Python environment is created.")
 }
 
-submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto", normalization = "auto", integration = "auto", batch_column = "batch", cluster_resolution = 0.6, min_features = 200, min_counts = 0, max_features = 0, max_percent_mt = 20, min_cells_per_gene = 3, n_pcs = 30, n_neighbors = 15, umap_min_dist = 0.5, umap_spread = 1, umap_metric = "euclidean", umap_init_pos = "spectral", doublet_method = "auto", doublet_rate = 0.05, remove_doublets = TRUE, seed = 1234, scvi_max_epochs = 400, marker_file = "", celltype_file = "", marker_upload = NULL, celltype_upload = NULL, marker_source = "server", celltype_source = "server") {
+submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto", normalization = "auto", integration = "auto", batch_column = "batch", cluster_resolution = 0.6, min_features = 200, min_counts = 0, max_features = 0, max_percent_mt = 20, min_cells_per_gene = 3, n_pcs = 30, n_neighbors = 15, umap_min_dist = 0.5, umap_spread = 1, umap_metric = "euclidean", umap_init_pos = "spectral", doublet_method = "auto", doublet_rate = 0.05, remove_doublets = TRUE, seed = 1234, scvi_max_epochs = 400, marker_file = "", celltype_file = "", marker_upload = NULL, celltype_upload = NULL, marker_source = "server", celltype_source = "server", annotation_name = "cell_type", signature_file = "", signature_upload = NULL, signature_source = "server", de_group_column = "condition", de_reference = "", de_comparison = "", de_annotation_column = "", de_annotation_value = "all", de_method = "both", de_covariates = character(0), pathway_gmt_file = "", pathway_gmt_upload = NULL, pathway_source = "server") {
   stage <- tolower(trimws(as.character(stage %||% "inspect")))
   step_label <- tryCatch(scrna_stage_step(stage), error = function(e) "")
   if (!is_scrna_project(project)) return(record_preflight_failure(project, step_label %||% "scRNA processing", "This is not an scRNA-seq project.", "scrna"))
@@ -8895,19 +8895,40 @@ submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto
   }
   marker_file <- trimws(as.character(marker_file %||% ""))
   celltype_file <- trimws(as.character(celltype_file %||% ""))
-  if (identical(marker_source, "upload")) {
+  signature_file <- trimws(as.character(signature_file %||% ""))
+  pathway_gmt_file <- trimws(as.character(pathway_gmt_file %||% ""))
+  annotation_name <- gsub("[^A-Za-z0-9_]+", "_", trimws(as.character(annotation_name %||% "cell_type")))
+  annotation_name <- gsub("^_+|_+$", "", annotation_name)
+  if (!nzchar(annotation_name)) annotation_name <- "cell_type"
+  if (grepl("^[0-9]", annotation_name)) annotation_name <- paste0("annotation_", annotation_name)
+  if (identical(stage, "annotate") && identical(marker_source, "upload")) {
     marker_file <- copy_uploaded_project_file(marker_upload, file.path(project$data_dir, "uploads", "annotations", "markers"), "marker list", c("tsv", "txt"))
   }
-  if (identical(celltype_source, "upload")) {
+  if (identical(stage, "annotate") && identical(celltype_source, "upload")) {
     celltype_file <- copy_uploaded_project_file(celltype_upload, file.path(project$data_dir, "uploads", "annotations", "celltype_mappings"), "cell-to-cell-type mapping", c("tsv", "txt"))
   }
-  annotation_files <- c("Marker list" = marker_file, "Cell-to-cell-type mapping" = celltype_file)
+  if (identical(stage, "score") && identical(signature_source, "upload")) {
+    signature_file <- copy_uploaded_project_file(signature_upload, file.path(project$data_dir, "uploads", "signatures"), "signature list", c("tsv", "txt"))
+  }
+  if (identical(stage, "pathway") && identical(pathway_source, "upload")) {
+    pathway_gmt_file <- copy_uploaded_project_file(pathway_gmt_upload, file.path(project$data_dir, "uploads", "pathways"), "GMT collection", c("gmt", "txt"))
+  }
+  annotation_files <- c("Marker list" = marker_file, "Cell-to-cell-type mapping" = celltype_file, "Signature list" = signature_file, "Pathway GMT" = pathway_gmt_file)
   for (label in names(annotation_files)) {
     path <- path.expand(annotation_files[[label]])
     if (nzchar(path) && (!startsWith(path, "/") || !file.exists(path) || dir.exists(path) || file.access(path, mode = 4) != 0)) {
       return(record_preflight_failure(project, step_label, paste0(label, " must be a readable absolute server file: ", annotation_files[[label]]), "scrna"))
     }
   }
+  if (identical(stage, "score") && !nzchar(signature_file)) return(record_preflight_failure(project, step_label, "Choose a signature TSV with signature and gene columns.", "scrna"))
+  if (identical(stage, "differential")) {
+    de_group_column <- trimws(as.character(de_group_column %||% "")); de_reference <- trimws(as.character(de_reference %||% "")); de_comparison <- trimws(as.character(de_comparison %||% ""))
+    de_method <- tolower(trimws(as.character(de_method %||% "both")))
+    if (!nzchar(de_group_column) || !nzchar(de_reference) || !nzchar(de_comparison) || identical(de_reference, de_comparison)) return(record_preflight_failure(project, step_label, "Choose a sample-level comparison field and two different groups.", "scrna"))
+    if (!de_method %in% c("both", "pseudobulk", "cell", "cell_level")) de_method <- "both"
+  }
+  if (identical(stage, "pathway") && !nzchar(pathway_gmt_file)) return(record_preflight_failure(project, step_label, "Choose a GMT gene-set collection for ranked pathway analysis.", "scrna"))
+  if (identical(stage, "pathway") && !file.exists(file.path(project$data_dir, "scrna", "tables", "pseudobulk_differential_expression.tsv"))) return(record_preflight_failure(project, step_label, "Complete sample-level pseudobulk differential expression before ranked pathway analysis.", "scrna"))
   out_dir <- file.path(project$data_dir, "scrna")
   params_path <- file.path(project$data_dir, "manifest", "scrna_parameters.tsv")
   dir.create(dirname(params_path), recursive = TRUE, showWarnings = FALSE)
@@ -8920,8 +8941,8 @@ submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto
     return(record_preflight_failure(project, "scRNA processing", paste0("Doublet method '", doublet_method, "' is not compatible with the ", resolved_engine, " engine. Choose ", paste(allowed_doublet, collapse = ", "), "."), "scrna"))
   }
   params <- data.frame(
-    key = c("normalization", "integration", "batch_column", "cluster_resolution", "min_features", "min_counts", "max_features", "max_percent_mt", "n_pcs", "n_neighbors", "umap_min_dist", "umap_spread", "umap_metric", "umap_init_pos", "min_cells_per_gene", "doublet_method", "doublet_rate", "remove_doublets", "marker_file", "celltype_file", "seed", "scvi_max_epochs"),
-    value = as.character(c(normalization, integration, batch_column, checked$cluster_resolution, checked$min_features, checked$min_counts, checked$max_features, checked$max_percent_mt, checked$n_pcs, checked$n_neighbors, checked$umap_min_dist, checked$umap_spread, umap_metric, umap_init_pos, checked$min_cells_per_gene, doublet_method, checked$doublet_rate, isTRUE(remove_doublets), marker_file, celltype_file, checked$seed, checked$scvi_max_epochs)),
+    key = c("normalization", "integration", "batch_column", "cluster_resolution", "min_features", "min_counts", "max_features", "max_percent_mt", "n_pcs", "n_neighbors", "umap_min_dist", "umap_spread", "umap_metric", "umap_init_pos", "min_cells_per_gene", "doublet_method", "doublet_rate", "remove_doublets", "marker_file", "celltype_file", "annotation_name", "signature_file", "de_group_column", "de_reference", "de_comparison", "de_annotation_column", "de_annotation_value", "de_method", "de_covariates", "pathway_gmt_file", "seed", "scvi_max_epochs"),
+    value = as.character(c(normalization, integration, batch_column, checked$cluster_resolution, checked$min_features, checked$min_counts, checked$max_features, checked$max_percent_mt, checked$n_pcs, checked$n_neighbors, checked$umap_min_dist, checked$umap_spread, umap_metric, umap_init_pos, checked$min_cells_per_gene, doublet_method, checked$doublet_rate, isTRUE(remove_doublets), marker_file, celltype_file, annotation_name, signature_file, de_group_column, de_reference, de_comparison, de_annotation_column, de_annotation_value, de_method, paste(unique(as.character(de_covariates %||% character(0))), collapse = ","), pathway_gmt_file, checked$seed, checked$scvi_max_epochs)),
     stringsAsFactors = FALSE
   )
   # Keep the copied, editable project manifest normalized immediately before
@@ -8931,7 +8952,7 @@ submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto
   qsub <- file.path(SCRIPTS_DIR, "singleCellRNAseq", "qsub_scrna_pipeline.sh")
   runner <- file.path(SCRIPTS_DIR, "singleCellRNAseq", "scrna_pipeline.sh")
   if (!file.exists(qsub) || !file.exists(runner)) return(record_preflight_failure(project, step_label, "CodeSpringLab single-cell runner scripts were not found. Update CodeSpringLab, then try again.", "scrna"))
-  prior_map <- c(qc = "inspect", preprocess = "qc", cluster = "preprocess", annotate = "cluster")
+  prior_map <- c(qc = "inspect", preprocess = "qc", cluster = "preprocess", annotate = "cluster", score = "annotate", differential = "annotate", pathway = "differential")
   prior <- unname(prior_map[stage]) %||% ""
   prior_marker <- if (nzchar(prior)) file.path(out_dir, paste0("_STAGE_", toupper(prior), "_COMPLETE")) else ""
   if (nzchar(prior_marker) && !file.exists(prior_marker)) return(record_preflight_failure(project, step_label, paste0("Complete ", scrna_stage_step(prior), " before submitting this stage."), "scrna"))
@@ -9557,7 +9578,10 @@ run_step_meta <- function(project = NULL) {
       "Filter cells and genes, calculate QC metrics, and detect/remove doublets while preserving raw counts.",
       "Normalize, select highly variable genes, scale, and calculate PCA from the QC-passed checkpoint.",
       "Apply optional technical-batch integration, then calculate neighbours, UMAP, and clusters.",
-      "Apply supplied or existing annotations, calculate cluster markers, and write the final portable object and tables."
+      "Add a named annotation metadata field, calculate cluster markers, and write exact composition tables.",
+      "Score named gene signatures on normalized expression and retain the scores in the processed object.",
+      "Run sample-level pseudobulk DESeq2 and optional exploratory cell-level Wilcoxon testing.",
+      "Run ranked fgseaMultilevel from the pseudobulk Wald statistic and a supplied GMT collection."
     )
   } else if (!is.null(project) && isTRUE(project$counts_only)) {
     c(
@@ -10042,9 +10066,26 @@ scrna_summary_values <- function(project) {
   stats::setNames(values[nzchar(keys)], keys[nzchar(keys)])
 }
 
-scrna_composition_table <- function(project) {
-  path <- file.path(scrna_output_dir(project), "tables", "cell_type_by_sample.tsv")
-  x <- safe_read_table(path, 10000)
+scrna_composition_fields <- function(project) {
+  path <- file.path(scrna_output_dir(project), "tables", "composition_by_sample.tsv")
+  x <- safe_read_table(path, 100000)
+  fields <- if (NROW(x) && "annotation_field" %in% names(x)) unique(trimws(as.character(x$annotation_field))) else character(0)
+  fields[nzchar(fields)]
+}
+
+scrna_composition_table <- function(project, annotation_field = "") {
+  generic_path <- file.path(scrna_output_dir(project), "tables", "composition_by_sample.tsv")
+  x <- safe_read_table(generic_path, 100000)
+  if (NROW(x) && all(c("sample_id", "annotation_field", "annotation_label", "cells") %in% names(x))) {
+    choices <- unique(trimws(as.character(x$annotation_field)))
+    active <- scrna_summary_values(project)[["active_annotation"]] %||% ""
+    annotation_field <- selected_choice(annotation_field, choices, if (active %in% choices) active else choices[[1]])
+    x <- x[as.character(x$annotation_field) == annotation_field, , drop = FALSE]
+    x$cell_type <- as.character(x$annotation_label)
+  } else {
+    path <- file.path(scrna_output_dir(project), "tables", "cell_type_by_sample.tsv")
+    x <- safe_read_table(path, 10000)
+  }
   required <- c("sample_id", "cell_type", "cells")
   if (!NROW(x) || !all(required %in% names(x))) return(data.frame())
   x$sample_id <- as.character(x$sample_id)
@@ -10143,6 +10184,9 @@ scrna_results_explorer_ui <- function() {
     tabPanel("Cell dashboard", br(), h3("Interactive Cell Dashboard"), tags$p(class = "muted", "Explore the UMAP directly: color cells by cluster, sample, annotation, or selected marker-gene expression. Hover for cell identity and metadata; lasso or box-select cells to inspect them."), uiOutput("scrna_embedding_controls_ui"), uiOutput("scrna_embedding_widget_ui"), uiOutput("scrna_selected_cells_ui"), br(), tags$details(tags$summary("Static UMAP figures and cell metadata"), br(), uiOutput("scrna_umap_plot_ui"), br(), h4("Cell metadata preview"), tags$p(class = "muted small-note", "Previewing the first 5,000 cells. Download the complete metadata table from Downloads."), table_output("scrna_cell_metadata"))),
     tabPanel("Composition", br(), h3("Cell-type Composition"), tags$p(class = "muted", "Exact cell counts and within-sample proportions are calculated by the workflow before any browser rendering or UMAP sampling."), uiOutput("scrna_composition_plot_ui"), br(), h4("Cells by cluster and annotation"), table_output("scrna_cluster_sizes"), br(), h4("Exact composition table"), tags$p(class = "muted small-note", "This complete table is never grouped or rounded; use it for reporting and download it from Downloads."), table_output("scrna_composition_table")),
     tabPanel("Markers", br(), h3("Cluster Markers"), tags$p(class = "muted", "Start with the ten strongest markers for one cluster; the complete ranked marker table remains available below and in Downloads."), uiOutput("scrna_top_markers_ui"), table_output("scrna_top_markers"), br(), uiOutput("scrna_marker_score_ui"), tags$details(tags$summary("Full ranked marker table"), br(), table_output("scrna_marker_table"))),
+    tabPanel("Signatures", br(), h3("Signature Scores"), tags$p(class = "muted", "Scores are calculated from normalized expression and retained as metadata for UMAP coloring and downstream grouping."), h4("Gene coverage"), table_output("scrna_signature_coverage"), br(), h4("Summary by sample and annotation"), table_output("scrna_signature_summary")),
+    tabPanel("Differential expression", br(), h3("Differential Expression"), tags$p(class = "muted", "Sample-level pseudobulk DESeq2 is the primary inferential result. Cell-level testing is displayed separately as exploratory."), h4("Pseudobulk DESeq2"), table_output("scrna_pseudobulk_de"), br(), tags$details(tags$summary("Exploratory cell-level Wilcoxon"), br(), table_output("scrna_cell_de"))),
+    tabPanel("Pathways", br(), h3("Ranked Pathway Analysis"), tags$p(class = "muted", "fgseaMultilevel uses the complete pseudobulk Wald-statistic ranking and reports normalized enrichment scores and FDR. The clean top-20 figure is available in Downloads."), table_output("scrna_pathway_table")),
       tabPanel("Downloads", br(), h3("Completed Files"), tags$p(class = "muted", "Select a result to preview it in the app or download the original file."), uiOutput("scrna_file_ui"), uiOutput("scrna_file_view"), br(), downloadButton("download_scrna_file", "Download selected file", class = "btn-default"))
     ))
   ))
@@ -11531,6 +11575,12 @@ server <- function(input, output, session) {
   observeEvent(input$browse_scrna_celltype_file, {
     open_server_browser("scrna_celltype_file", "file", input$scrna_celltype_file %||% "")
   })
+  observeEvent(input$browse_scrna_signature_file, {
+    open_server_browser("scrna_signature_file", "file", input$scrna_signature_file %||% "")
+  })
+  observeEvent(input$browse_scrna_pathway_gmt_file, {
+    open_server_browser("scrna_pathway_gmt_file", "file", input$scrna_pathway_gmt_file %||% "")
+  })
 
   observeEvent(input$browser_go_path, {
     candidate <- path.expand(trimws(input$browser_manual_path %||% ""))
@@ -12545,7 +12595,10 @@ server <- function(input, output, session) {
         tool_panel("QC & doublets", status, "Review the unfiltered QC plots below, choose biologically appropriate cutoffs, then filter cells and record predicted doublets.", tagList(uiOutput("scrna_pre_qc_plot_ui"), uiOutput("scrna_qc_settings_ui"), uiOutput("scrna_post_qc_plot_ui"), tags$p(class = "muted small-note", "The same applied cutoffs are drawn on the before- and after-filter plots. Doublet calls are saved whether or not predicted doublets are removed.")), "run_scrna_qc", "Run QC & doublets", show_sample_progress = FALSE),
         tool_panel("Normalize & PCA", status, "Normalize retained cells, identify variable genes, scale, and calculate PCA. PCA outputs appear here as soon as this step finishes.", tagList(uiOutput("scrna_preprocess_settings_ui"), uiOutput("scrna_pca_output_ui")), "run_scrna_preprocess", "Run normalization & PCA", show_sample_progress = FALSE),
         tool_panel("UMAP & clustering", status, "For multiple inputs, optionally correct a technical batch first; then calculate neighbours, UMAP, and clusters. Review the UMAP preview here before annotation.", tagList(uiOutput("scrna_cluster_settings_ui"), uiOutput("scrna_umap_output_ui")), "run_scrna_cluster", "Run UMAP & clustering", show_sample_progress = FALSE),
-        tool_panel("Annotate & markers", status, "Use the project's saved post-UMAP object, apply an optional cell mapping or marker list, then write markers, final UMAPs, and the processed object for the selected engine.", uiOutput("scrna_annotation_settings_ui"), "run_scrna_annotate", "Run annotation & markers", show_sample_progress = FALSE)
+        tool_panel("Annotate & markers", status, "Use the project's saved post-UMAP object, add a named annotation metadata field, and immediately write exact composition tables.", uiOutput("scrna_annotation_settings_ui"), "run_scrna_annotate", "Run annotation & markers", show_sample_progress = FALSE),
+        tool_panel("Signature scoring", status, "Score one or more named gene signatures on normalized expression and store every score as reusable cell metadata in the processed object.", uiOutput("scrna_signature_settings_ui"), "run_scrna_score", "Run signature scoring", show_sample_progress = FALSE),
+        tool_panel("Differential expression", status, "Run sample-level pseudobulk DESeq2 for primary inference and, when requested, an exploratory cell-level Wilcoxon comparison.", uiOutput("scrna_differential_settings_ui"), "run_scrna_differential", "Run differential expression", show_sample_progress = FALSE),
+        tool_panel("Pathway analysis", status, "Run ranked fgsea on the pseudobulk DESeq2 Wald statistic using a supplied GMT gene-set collection.", uiOutput("scrna_pathway_settings_ui"), "run_scrna_pathway", "Run pathway analysis", show_sample_progress = FALSE)
       ))
     }
     if (is_chip_project(p)) {
@@ -13037,6 +13090,8 @@ server <- function(input, output, session) {
         tags$p(paste0("The app automatically loads the post-UMAP ", engine_name, " object: checkpoints/", checkpoint_name, ". You do not need to select another object here.")),
         tags$p(paste0("The completed annotated object will be saved as objects/", output_name, "."))
       ),
+      textInput("scrna_annotation_name", "Annotation metadata name", value = input$scrna_annotation_name %||% "cell_type", placeholder = "For example: cell_type_bone_marrow"),
+      tags$p(class = "muted small-note", "Use a new name for each marker system (for example cell_type_broad and cell_type_fine). Existing annotation and signature metadata are retained in the processed object."),
       tags$p(class = "muted small-note", "The marker list is a TSV with cell_type and gene columns; it works with either engine. An optional cell-to-cell-type mapping takes priority over marker scoring. If neither is supplied, cluster IDs are retained as provisional labels."),
       radioButtons("scrna_marker_source", "Marker list source", choices = c("Browse or paste a server path" = "server", "Upload from laptop" = "upload"), selected = input$scrna_marker_source %||% "server", inline = TRUE),
       conditionalPanel("input.scrna_marker_source == 'server'", div(class = "new-project-path-control", textInput("scrna_marker_file", "Marker list", value = input$scrna_marker_file %||% "", placeholder = "Absolute server .tsv with cell_type and gene columns"), actionButton("browse_scrna_marker_file", "Browse server", class = "btn-default"))),
@@ -13044,6 +13099,58 @@ server <- function(input, output, session) {
       radioButtons("scrna_celltype_source", "Cell-to-cell-type mapping source", choices = c("Browse or paste a server path" = "server", "Upload from laptop" = "upload"), selected = input$scrna_celltype_source %||% "server", inline = TRUE),
       conditionalPanel("input.scrna_celltype_source == 'server'", div(class = "new-project-path-control", textInput("scrna_celltype_file", "Cell-to-cell-type mapping", value = input$scrna_celltype_file %||% "", placeholder = "Absolute server .tsv with cell/barcode and cell_type columns"), actionButton("browse_scrna_celltype_file", "Browse server", class = "btn-default"))),
       conditionalPanel("input.scrna_celltype_source == 'upload'", fileInput("scrna_celltype_upload", "Cell-to-cell-type mapping from laptop", accept = c(".tsv", ".txt")))
+    )
+  })
+
+  output$scrna_signature_settings_ui <- renderUI({
+    p <- current_project(); if (!is_scrna_project(p)) return(NULL)
+    tagList(
+      tags$p(class = "muted small-note", "TSV format: signature and gene columns. Multiple rows form each signature; multiple signature names can be scored in one run. Scores use normalized expression, never scaled PCA values."),
+      radioButtons("scrna_signature_source", "Signature list source", choices = c("Browse or paste a server path" = "server", "Upload from laptop" = "upload"), selected = input$scrna_signature_source %||% "server", inline = TRUE),
+      conditionalPanel("input.scrna_signature_source == 'server'", div(class = "new-project-path-control", textInput("scrna_signature_file", "Signature list", value = input$scrna_signature_file %||% "", placeholder = "Absolute server .tsv with signature and gene columns"), actionButton("browse_scrna_signature_file", "Browse server", class = "btn-default"))),
+      conditionalPanel("input.scrna_signature_source == 'upload'", fileInput("scrna_signature_upload", "Signature list from laptop", accept = c(".tsv", ".txt")))
+    )
+  })
+
+  output$scrna_differential_settings_ui <- renderUI({
+    p <- current_project(); if (!is_scrna_project(p)) return(NULL)
+    columns <- scrna_embedding_columns(p)
+    metadata <- setdiff(columns, c("cell", "UMAP_1", "UMAP_2", "input_path", "source_barcode", "annotation_source"))
+    group_choices <- setdiff(metadata, c("sample_id", "cluster", grep("^(signature__|annotation_source__)", metadata, value = TRUE)))
+    if (!length(group_choices)) return(div(class = "empty-box", "Complete annotation so the saved object exposes sample-level comparison metadata."))
+    group_column <- selected_choice(input$scrna_de_group_column, group_choices, if ("condition" %in% group_choices) "condition" else group_choices[[1]])
+    group_data <- scrna_embedding_table(p, columns = group_column, max_points = Inf)
+    group_values <- if (group_column %in% names(group_data)) sort(unique(trimws(as.character(group_data[[group_column]])))) else character(0)
+    group_values <- group_values[nzchar(group_values)]
+    annotation_choices <- unique(c(intersect(c(scrna_summary_values(p)[["active_annotation"]] %||% "", "cell_type"), metadata), grep("(^cell_type|annotation|subtype)", metadata, value = TRUE, ignore.case = TRUE), ""))
+    annotation_choices <- stats::setNames(annotation_choices, ifelse(nzchar(annotation_choices), annotation_choices, "All cells (no annotation subset)"))
+    annotation_column <- selected_choice(input$scrna_de_annotation_column, annotation_choices, unname(annotation_choices)[[1]])
+    annotation_data <- if (nzchar(annotation_column)) scrna_embedding_table(p, columns = annotation_column, max_points = Inf) else data.frame()
+    annotation_values <- if (nzchar(annotation_column) && annotation_column %in% names(annotation_data)) sort(unique(trimws(as.character(annotation_data[[annotation_column]])))) else character(0)
+    annotation_values <- c("All cells" = "all", stats::setNames(annotation_values[nzchar(annotation_values)], annotation_values[nzchar(annotation_values)]))
+    covariate_choices <- setdiff(group_choices, c(group_column, "sample_id"))
+    tagList(
+      div(class = "read-source-note", tags$strong("Inference defaults"), tags$p("Pseudobulk sums raw counts within each biological sample and requires at least two independent samples per group. Cell-level Wilcoxon is optional and explicitly reported as exploratory because cells are not independent replicates.")),
+      selectInput("scrna_de_group_column", "Sample-level comparison field", choices = group_choices, selected = group_column, selectize = FALSE),
+      fluidRow(
+        column(6, selectInput("scrna_de_reference", "Reference group", choices = group_values, selected = selected_choice(input$scrna_de_reference, group_values, if (length(group_values)) group_values[[1]] else ""), selectize = FALSE)),
+        column(6, selectInput("scrna_de_comparison", "Comparison group", choices = group_values, selected = selected_choice(input$scrna_de_comparison, group_values, if (length(group_values) > 1L) group_values[[2]] else ""), selectize = FALSE))
+      ),
+      selectInput("scrna_de_annotation_column", "Annotation field to subset", choices = annotation_choices, selected = annotation_column, selectize = FALSE),
+      selectInput("scrna_de_annotation_value", "Population", choices = annotation_values, selected = selected_choice(input$scrna_de_annotation_value, annotation_values, "all"), selectize = FALSE),
+      selectInput("scrna_de_covariates", "Optional sample-level covariates", choices = covariate_choices, selected = intersect(as.character(input$scrna_de_covariates %||% character(0)), covariate_choices), multiple = TRUE, selectize = TRUE),
+      tags$p(class = "muted small-note", "Use this for a paired subject/donor field or a genuine technical batch. The app checks that the design is full-rank and that every covariate is constant within each biological sample."),
+      radioButtons("scrna_de_method", "Outputs", choices = c("Pseudobulk DESeq2 + exploratory cell-level" = "both", "Pseudobulk DESeq2 only (recommended)" = "pseudobulk", "Exploratory cell-level only" = "cell"), selected = input$scrna_de_method %||% "both")
+    )
+  })
+
+  output$scrna_pathway_settings_ui <- renderUI({
+    p <- current_project(); if (!is_scrna_project(p)) return(NULL)
+    tagList(
+      div(class = "read-source-note", tags$strong("Ranked pathway analysis"), tags$p("Uses the full pseudobulk DESeq2 Wald-statistic ranking with fgseaMultilevel. This avoids choosing an arbitrary DEG cutoff and preserves direction.")),
+      radioButtons("scrna_pathway_source", "GMT source", choices = c("Browse or paste a server path" = "server", "Upload from laptop" = "upload"), selected = input$scrna_pathway_source %||% "server", inline = TRUE),
+      conditionalPanel("input.scrna_pathway_source == 'server'", div(class = "new-project-path-control", textInput("scrna_pathway_gmt_file", "Gene-set collection (GMT)", value = input$scrna_pathway_gmt_file %||% "", placeholder = "Absolute server path to a .gmt file"), actionButton("browse_scrna_pathway_gmt_file", "Browse server", class = "btn-default"))),
+      conditionalPanel("input.scrna_pathway_source == 'upload'", fileInput("scrna_pathway_gmt_upload", "GMT from laptop", accept = c(".gmt", ".txt")))
     )
   })
 
@@ -13508,7 +13615,21 @@ server <- function(input, output, session) {
         marker_upload = input$scrna_marker_upload,
         celltype_upload = input$scrna_celltype_upload,
         marker_source = input$scrna_marker_source %||% "server",
-        celltype_source = input$scrna_celltype_source %||% "server"
+        celltype_source = input$scrna_celltype_source %||% "server",
+        annotation_name = input$scrna_annotation_name %||% "cell_type",
+        signature_file = input$scrna_signature_file %||% "",
+        signature_upload = input$scrna_signature_upload,
+        signature_source = input$scrna_signature_source %||% "server",
+        de_group_column = input$scrna_de_group_column %||% "condition",
+        de_reference = input$scrna_de_reference %||% "",
+        de_comparison = input$scrna_de_comparison %||% "",
+        de_annotation_column = input$scrna_de_annotation_column %||% "",
+        de_annotation_value = input$scrna_de_annotation_value %||% "all",
+        de_method = input$scrna_de_method %||% "both",
+        de_covariates = input$scrna_de_covariates %||% character(0),
+        pathway_gmt_file = input$scrna_pathway_gmt_file %||% "",
+        pathway_gmt_upload = input$scrna_pathway_gmt_upload,
+        pathway_source = input$scrna_pathway_source %||% "server"
       ),
       paste("single-cell", tolower(label))
     )
@@ -13518,6 +13639,9 @@ server <- function(input, output, session) {
   observeEvent(input$run_scrna_preprocess, submit_scrna_stage("preprocess"), ignoreInit = TRUE)
   observeEvent(input$run_scrna_cluster, submit_scrna_stage("cluster"), ignoreInit = TRUE)
   observeEvent(input$run_scrna_annotate, submit_scrna_stage("annotate"), ignoreInit = TRUE)
+  observeEvent(input$run_scrna_score, submit_scrna_stage("score"), ignoreInit = TRUE)
+  observeEvent(input$run_scrna_differential, submit_scrna_stage("differential"), ignoreInit = TRUE)
+  observeEvent(input$run_scrna_pathway, submit_scrna_stage("pathway"), ignoreInit = TRUE)
   observeEvent(input$run_fastqc, {
     trimmed <- isTRUE(input$fastqc_use_trimmed)
     p <- current_project()
@@ -14035,12 +14159,35 @@ server <- function(input, output, session) {
   })
   output$scrna_cluster_sizes <- render_csl_table({
     p <- current_project(); if (!is_scrna_project(p)) return(data.frame())
-    safe_read_table(file.path(scrna_output_dir(p), "tables", "cluster_cell_type_sizes.tsv"), 10000)
+    x <- safe_read_table(file.path(scrna_output_dir(p), "tables", "cluster_annotation_sizes.tsv"), 100000)
+    field <- input$scrna_composition_field %||% ""
+    if (NROW(x) && "annotation_field" %in% names(x) && nzchar(field)) x <- x[as.character(x$annotation_field) == field, , drop = FALSE]
+    if (NROW(x)) x else safe_read_table(file.path(scrna_output_dir(p), "tables", "cluster_cell_type_sizes.tsv"), 10000)
   }, page_length = 50)
   output$scrna_composition_table <- render_csl_table({
     p <- current_project(); if (!is_scrna_project(p)) return(data.frame())
-    scrna_composition_table(p)
+    scrna_composition_table(p, input$scrna_composition_field %||% "")
   }, page_length = 50)
+  output$scrna_signature_coverage <- render_csl_table({
+    p <- current_project(); if (!is_scrna_project(p)) return(data.frame())
+    safe_read_table(file.path(scrna_output_dir(p), "tables", "signature_gene_coverage.tsv"), 10000)
+  }, page_length = 50)
+  output$scrna_signature_summary <- render_csl_table({
+    p <- current_project(); if (!is_scrna_project(p)) return(data.frame())
+    safe_read_table(file.path(scrna_output_dir(p), "tables", "signature_scores_summary.tsv"), 100000)
+  }, page_length = 50, scroll_y = "420px")
+  output$scrna_pseudobulk_de <- render_csl_table({
+    p <- current_project(); if (!is_scrna_project(p)) return(data.frame())
+    safe_read_table(file.path(scrna_output_dir(p), "tables", "pseudobulk_differential_expression.tsv"), 100000)
+  }, page_length = 50, scroll_y = "520px")
+  output$scrna_cell_de <- render_csl_table({
+    p <- current_project(); if (!is_scrna_project(p)) return(data.frame())
+    safe_read_table(file.path(scrna_output_dir(p), "tables", "cell_level_differential_expression.tsv"), 100000)
+  }, page_length = 50, scroll_y = "520px")
+  output$scrna_pathway_table <- render_csl_table({
+    p <- current_project(); if (!is_scrna_project(p)) return(data.frame())
+    safe_read_table(file.path(scrna_output_dir(p), "tables", "pathway_fgsea_ranked.tsv"), 100000)
+  }, page_length = 50, scroll_y = "520px")
   output$scrna_input_processing <- render_csl_table({
     p <- current_project(); if (!is_scrna_project(p)) return(data.frame())
     safe_read_table(file.path(scrna_output_dir(p), "tables", "input_processing_detected.tsv"), 10000)
@@ -14211,22 +14358,27 @@ server <- function(input, output, session) {
   })
   output$scrna_composition_plot_ui <- renderUI({
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
-    x <- scrna_composition_table(p)
+    x <- scrna_composition_table(p, input$scrna_composition_field %||% "")
     if (!NROW(x)) return(div(class = "empty-box", "This completed run predates the exact cell-type composition table. Re-run the scRNA workflow with the current CodeSpringLab version to add it."))
     if (!PLOTLY_AVAILABLE) return(tags$p(class = "muted", "Interactive composition plotting is unavailable on this app server; the exact table is shown below."))
     total_types <- length(unique(x$cell_type))
     choices <- c("All cell types" = "0")
     for (n in c(12L, 20L, 30L)) if (total_types > n) choices[[paste0("Top ", n, " cell types + Other")]] <- as.character(n)
     selected <- selected_choice(input$scrna_composition_max_types, choices, if (total_types > 20L) "20" else "0")
+    fields <- scrna_composition_fields(p)
+    field_selected <- selected_choice(input$scrna_composition_field, fields, if (length(fields)) fields[[1]] else "")
     tagList(
-      fluidRow(column(5, selectInput("scrna_composition_max_types", "Display", choices = choices, selected = selected, selectize = FALSE))),
+      fluidRow(
+        column(5, if (length(fields)) selectInput("scrna_composition_field", "Annotation metadata", choices = fields, selected = field_selected, selectize = FALSE) else NULL),
+        column(5, selectInput("scrna_composition_max_types", "Display", choices = choices, selected = selected, selectize = FALSE))
+      ),
       uiOutput("scrna_composition_plot_note"),
       plotly::plotlyOutput("scrna_composition_plot", height = "620px")
     )
   })
   output$scrna_composition_plot_note <- renderUI({
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
-    x <- scrna_composition_table(p)
+    x <- scrna_composition_table(p, input$scrna_composition_field %||% "")
     max_types <- suppressWarnings(as.integer(input$scrna_composition_max_types %||% 0L))
     total_types <- length(unique(x$cell_type))
     if (!NROW(x) || is.na(max_types) || max_types < 1L || total_types <= max_types) {
@@ -14236,7 +14388,7 @@ server <- function(input, output, session) {
   })
   if (PLOTLY_AVAILABLE) output$scrna_composition_plot <- plotly::renderPlotly({
     p <- current_project()
-    x <- scrna_composition_table(p)
+    x <- scrna_composition_table(p, input$scrna_composition_field %||% "")
     validate(need(NROW(x), "No exact cell-type composition table is available for this run."))
     max_types <- suppressWarnings(as.integer(input$scrna_composition_max_types %||% 0L))
     x <- scrna_composition_for_plot(x, max_types)
