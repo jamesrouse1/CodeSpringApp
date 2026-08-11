@@ -13428,7 +13428,7 @@ server <- function(input, output, session) {
           if (reuse_existing) checkboxInput("scrna_show_rebuild_steps", "Show optional QC, normalization, and reclustering controls", value = show_rebuild) else NULL
         ) else NULL,
         if (has_fastq_inputs) tool_panel("Alignment & counting", status, "Align and quantify each 10x gene-expression FASTQ sample with Cell Ranger before single-cell QC.", uiOutput("scrna_cellranger_settings_ui"), "run_scrna_cellranger", "Run alignment & counting", show_sample_progress = TRUE) else NULL,
-        if (!reuse_existing || show_rebuild) tool_panel("Input inspection", status, "Validate the raw-count input, create an unfiltered QC preview, and report any existing analysis state only when the input is an RDS or H5AD object.", tagList(uiOutput("scrna_inspect_settings_ui"), uiOutput("scrna_input_state_ui"), tags$p(class = "muted small-note", "The input is read only. This first job creates the unfiltered QC plots used to choose filters; it does not change any cutoff fields.")), "run_scrna_inspect", "Inspect input & show QC plots", show_sample_progress = FALSE) else NULL,
+        if (!reuse_existing || show_rebuild) tool_panel("Input inspection", status, "Validate the raw-count input, create an unfiltered QC preview, and report any existing analysis state only when the input is an RDS or H5AD object.", tagList(uiOutput("scrna_inspect_settings_ui"), uiOutput("scrna_input_state_ui"), tags$p(class = "muted small-note", "The input is read only. This first job creates the unfiltered QC plots and auto-fills editable, distribution-aware starting cutoffs for review.")), "run_scrna_inspect", "Inspect input & show QC plots", show_sample_progress = FALSE) else NULL,
         if (!reuse_existing || show_rebuild) tool_panel("QC & doublets", status, "Review the unfiltered QC plots below, choose biologically appropriate cutoffs, then filter cells and record predicted doublets.", tagList(uiOutput("scrna_pre_qc_plot_ui"), uiOutput("scrna_qc_settings_ui"), uiOutput("scrna_post_qc_plot_ui"), tags$p(class = "muted small-note", "The same applied cutoffs are drawn on the before- and after-filter plots. Doublet calls are saved whether or not predicted doublets are removed.")), "run_scrna_qc", "Run QC & doublets", show_sample_progress = FALSE) else NULL,
         if (!reuse_existing || show_rebuild) tool_panel("Normalize & PCA", status, "Normalize retained cells, identify variable genes, scale, and calculate PCA. PCA outputs appear here as soon as this step finishes.", tagList(uiOutput("scrna_preprocess_settings_ui"), uiOutput("scrna_pca_output_ui")), "run_scrna_preprocess", "Run normalization & PCA", show_sample_progress = FALSE) else NULL,
         if (!reuse_existing || show_rebuild) tool_panel("UMAP & clustering", status, "Compare the uncorrected embedding first. For multiple inputs, optionally correct a technical batch; then calculate neighbours, UMAP, and clusters.", tagList(uiOutput("scrna_preintegration_umap_ui"), uiOutput("scrna_cluster_settings_ui"), uiOutput("scrna_umap_output_ui")), "run_scrna_cluster", "Run UMAP & clustering", show_sample_progress = FALSE) else NULL,
@@ -13819,14 +13819,14 @@ server <- function(input, output, session) {
     if (!NROW(global)) return(NULL)
     div(class = "read-source-note",
       tags$strong("Suggested starting cutoffs"),
-      tags$p("Auto-filled from the unfiltered distributions. Lower cutoffs round down and upper cutoffs round up: values below 100 use tens, and larger values use hundreds. The dashed lines on the plot show these suggested values."),
+      tags$p("Auto-filled from robust per-sample distributions using three median absolute deviations (3 MAD). Counts and detected genes are evaluated on a log scale; mitochondrial percentage is evaluated on its original scale. These are conservative, editable starting points rather than automatic biological truth. Dashed lines show the suggestions."),
       div(class = "cutrun-metric-grid compact",
         scrna_metric_card("Minimum detected genes per cell", global$min_features[[1]], "Lower-tail screen", "blue"),
         scrna_metric_card("Minimum total counts per cell", global$min_counts[[1]], "Lower-tail screen", "purple"),
         scrna_metric_card("Maximum detected genes per cell", global$max_features[[1]], "High-complexity screen", "gold"),
         scrna_metric_card("Maximum mitochondrial reads per cell (%)", paste0(global$max_percent_mt[[1]], "%"), "Upper-tail screen", "green")
       ),
-      if (NROW(recommendations) > 1L) tags$p(class = "muted small-note", "For multiple inputs, the global values are conservative across samples; per-sample recommendations are available in Downloads.") else NULL
+      if (NROW(recommendations) > 1L) tags$p(class = "muted small-note", "For multiple inputs, the shared values retain the most permissive recommendation across samples. Review the per-sample rows in Downloads so a lower-RNA or higher-mitochondrial population is not removed simply because another sample has a different distribution.") else NULL
     )
   })
 
