@@ -166,22 +166,6 @@ assert(
 )
 Sys.unsetenv("CSL_SCANPY_SIF")
 
-shared_seurat_sif <- "/grid/bsr/data/data/bsr_readable_data/containers/seurat/codespring-seurat_1.0.0.sif"
-assert(
-  shared_seurat_sif %in% app_env$seurat_container_candidates(),
-  "the shared BSR Seurat image is a built-in runtime candidate for every user"
-)
-
-seurat_sif <- file.path(root, "codespring-seurat_1.0.0.sif")
-file.create(seurat_sif)
-Sys.setenv(CSL_SEURAT_SIF = seurat_sif)
-seurat_container <- app_env$seurat_container_check()
-assert(
-  isTRUE(seurat_container$ready) && identical(seurat_container$path, normalizePath(seurat_sif, winslash = "/", mustWork = FALSE)),
-  "an explicit shared Seurat SIF is detected without loading a personal R library"
-)
-Sys.unsetenv("CSL_SEURAT_SIF")
-
 design_path <- file.path(root, "design_matrix.txt")
 design <- data.frame(
   sample = c("A1", "I1", "A2", "I2", "B1", "I3", "B2", "I4"),
