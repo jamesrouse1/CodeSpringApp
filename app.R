@@ -9076,10 +9076,12 @@ scrna_cellranger_stage_parent <- function(project) {
   normalizePath(file.path(path.expand(configured), project_slug), winslash = "/", mustWork = FALSE)
 }
 
-scrna_cellranger_max_parallel <- function() {
-  value <- suppressWarnings(as.integer(Sys.getenv("CSL_CELLRANGER_MAX_PARALLEL", unset = "1")))
-  if (is.na(value)) value <- 1L
-  max(1L, min(value, 4L))
+scrna_cellranger_max_parallel <- function(sample_count = Inf) {
+  configured <- trimws(Sys.getenv("CSL_CELLRANGER_MAX_PARALLEL", unset = ""))
+  if (!nzchar(configured)) return(sample_count)
+  value <- suppressWarnings(as.integer(configured))
+  if (is.na(value) || value < 1L) return(sample_count)
+  min(value, sample_count)
 }
 
 submit_scrna_cellranger_jobs <- function(project, transcriptome, expected_cells = 0, samples = NULL) {
@@ -9101,7 +9103,7 @@ submit_scrna_cellranger_jobs <- function(project, transcriptome, expected_cells 
   if (!file.exists(qsub) || !file.exists(runner)) return(record_preflight_failure(project, "Alignment & counting", "CodeSpringLab Cell Ranger runner scripts were not found. Update CodeSpringLab, then try again.", "cellranger"))
   jobs <- job_history(project)
   stage_parent <- scrna_cellranger_stage_parent(project)
-  max_parallel <- scrna_cellranger_max_parallel()
+  max_parallel <- as.integer(scrna_cellranger_max_parallel(length(requested)))
   submit_one <- function(sample, dependency_ids = character(0)) {
     row <- fastq[fastq$sample_id == sample, , drop = FALSE][1, , drop = FALSE]
     target <- file.path(scrna_cellranger_matrix_dir(project, sample), "matrix.mtx.gz")
@@ -9135,7 +9137,7 @@ submit_scrna_cellranger_jobs <- function(project, transcriptome, expected_cells 
     if (nzchar(submitted_id)) lane_job_ids[[lane]] <- submitted_id
   }
   paste(c(
-    paste0("Cell Ranger submission is storage-safe: at most ", max_parallel, " sample", if (max_parallel == 1L) "" else "s", " run concurrently; failed pipestances resume from stable staging; BAM generation is disabled."),
+    paste0("Cell Ranger submitted ", length(requested), " independent sample job", if (length(requested) == 1L) "" else "s", "; up to ", max_parallel, " can run concurrently. Failed pipestances resume from stable staging and BAM generation is disabled."),
     messages
   ), collapse = "\n")
 }
@@ -13737,7 +13739,7 @@ server <- function(input, output, session) {
         actionButton("browse_scrna_cellranger_reference", "Browse server", class = "btn-default")
       ),
       numericInput("scrna_cellranger_expected_cells", "Expected recovered cells per sample (0 = automatic)", value = input$scrna_cellranger_expected_cells %||% 0, min = 0, step = 500),
-      tags$p(class = "muted small-note", paste0("Cell Ranger 9.0.1 detects 10x chemistry automatically. R1/R2 lanes are combined per sample. To reduce runtime and storage, jobs use 16 cores, skip BAM generation, retain only the filtered matrix plus small summaries, resume failed staging, and run at most ", scrna_cellranger_max_parallel(), " sample", if (scrna_cellranger_max_parallel() == 1L) "" else "s", " at a time.")),
+      tags$p(class = "muted small-note", "Cell Ranger 9.0.1 detects 10x chemistry automatically. R1/R2 lanes are combined per sample. Jobs run concurrently, use 16 cores, skip BAM generation, retain only the filtered matrix plus small summaries, and resume failed staging."),
       if (!length(candidates)) tags$p(class = "muted small-note", "No standard Cell Ranger reference was detected automatically. Browse to a matching human or mouse refdata-gex transcriptome folder.") else NULL
     )
   })

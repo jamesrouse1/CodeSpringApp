@@ -1521,11 +1521,11 @@ assert(
   "the app submits FASTQ samples through the maintained CellRanger/9.0.1 cluster module"
 )
 assert(
-  identical(app_env$scrna_cellranger_max_parallel(), 1L) &&
+  is.infinite(app_env$scrna_cellranger_max_parallel()) &&
     grepl("dependency_condition = \"afterany\"", app_text, fixed = TRUE) &&
     grepl("BAM generation is disabled", app_text, fixed = TRUE) &&
     any(grepl("--create-bam=false", runtime_text, fixed = TRUE)),
-  "Cell Ranger defaults to one resumable low-disk job at a time with BAM output disabled"
+  "Cell Ranger defaults to concurrent resumable low-disk jobs with BAM output disabled"
 )
 matrix_dir <- app_env$scrna_cellranger_matrix_dir(fastq_project, "donor03")
 dir.create(matrix_dir, recursive = TRUE)
