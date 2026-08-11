@@ -106,6 +106,12 @@ read-only image at
 Maintainers can override that location by setting `CSL_SCANPY_SIF` before
 starting CodeSpringApp.
 
+Seurat jobs preferentially use the shared, read-only image at
+`/grid/bsr/data/data/bsr_readable_data/containers/seurat/codespring-seurat_1.0.0.sif`.
+Until that image is installed, the runner uses the official cluster Seurat
+module in a clean R library context. Maintainers can override the image path
+with `CSL_SEURAT_SIF`.
+
 - Creates or resumes CodeSpringLab projects from saved project configs.
 - Builds and edits design matrices from FASTQ folders.
 - Submits real SLURM `sbatch` jobs for RNA-seq tools plus ATAC-seq, CUT&RUN, and ChIP-seq Bowtie2/peak-calling/differential workflows.

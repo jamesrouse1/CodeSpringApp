@@ -9251,6 +9251,34 @@ scanpy_container_check <- function() {
   list(ready = TRUE, state = "Ready", path = container, detail = "All H5AD jobs use this shared, versioned Scanpy container. No per-user Python environment is created.")
 }
 
+seurat_container_candidates <- function() {
+  configured <- trimws(Sys.getenv("CSL_SEURAT_SIF", unset = ""))
+  shared_bsr <- "/grid/bsr/data/data/bsr_readable_data/containers/seurat/codespring-seurat_1.0.0.sif"
+  unique(c(
+    if (nzchar(configured)) configured else character(0),
+    shared_bsr,
+    file.path(SCRIPTS_DIR, "singleCellRNAseq", "containers", "codespring-seurat_1.0.0.sif")
+  ))
+}
+
+seurat_container_check <- function() {
+  candidates <- seurat_container_candidates()
+  existing <- candidates[file.exists(candidates)]
+  if (!length(existing)) {
+    return(list(
+      ready = FALSE,
+      state = "Using cluster module",
+      path = "",
+      detail = "The shared Seurat container has not been installed yet. Jobs use the official cluster Seurat module as a temporary fallback."
+    ))
+  }
+  container <- normalizePath(existing[[1L]], winslash = "/", mustWork = FALSE)
+  if (file.access(container, mode = 4) != 0) {
+    return(list(ready = FALSE, state = "Using cluster module", path = "", detail = "The shared Seurat image is not readable by this account, so jobs use the official cluster module fallback."))
+  }
+  list(ready = TRUE, state = "Ready", path = container, detail = "All Seurat jobs use this shared, versioned R container. Personal R libraries are not loaded.")
+}
+
 scrna_manual_gene_entry <- function(name, gene_text, label = "Gene set", minimum_genes = 2L) {
   name <- trimws(as.character(name %||% ""))
   if (!nzchar(name)) stop(label, " needs a name.")
@@ -9464,8 +9492,9 @@ submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto
   prior <- unname(prior_map[stage]) %||% ""
   prior_marker <- if (nzchar(prior)) file.path(out_dir, paste0("_STAGE_", toupper(prior), "_COMPLETE")) else ""
   if (nzchar(prior_marker) && !file.exists(prior_marker)) return(record_preflight_failure(project, step_label, paste0("Complete ", scrna_stage_step(prior), " before submitting this stage."), "scrna"))
-  container_path <- if (identical(resolved_engine, "scanpy")) scanpy_container_check()$path else ""
-  submit_sbatch(project, step_label, qsub, c(runner, resolved_engine, manifest_path, out_dir, params_path, stage, container_path), "scrna_pipeline", paste(stage, resolved_engine, normalization, integration), target = file.path(out_dir, paste0("_STAGE_", toupper(stage), "_COMPLETE")), reference = resolved_engine)
+  scanpy_container_path <- if (identical(resolved_engine, "scanpy")) scanpy_container_check()$path else ""
+  seurat_container_path <- seurat_container_check()$path
+  submit_sbatch(project, step_label, qsub, c(runner, resolved_engine, manifest_path, out_dir, params_path, stage, scanpy_container_path, seurat_container_path), "scrna_pipeline", paste(stage, resolved_engine, normalization, integration), target = file.path(out_dir, paste0("_STAGE_", toupper(stage), "_COMPLETE")), reference = resolved_engine)
 }
 
 submit_star_jobs <- function(project, trimmed = FALSE, samples = NULL) {
