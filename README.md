@@ -110,6 +110,13 @@ Seurat jobs use the official versioned cluster Seurat module in a clean R
 library context, preventing personal packages from overriding its compatible
 dependencies.
 
+For multi-sample single-cell projects, `capture_id` records the independent
+droplet capture used for doublet detection and defaults to `sample_id`.
+Multiplexed samples from one 10x channel should share a `capture_id`. CodeSpring
+performs only a minimal low-count prefilter, calls doublets independently per
+capture with an automatically estimated rate, and then applies the complete QC
+thresholds per sample before normalization and integration.
+
 - Creates or resumes CodeSpringLab projects from saved project configs.
 - Builds and edits design matrices from FASTQ folders.
 - Submits real SLURM `sbatch` jobs for RNA-seq tools plus ATAC-seq, CUT&RUN, and ChIP-seq Bowtie2/peak-calling/differential workflows.

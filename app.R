@@ -9150,11 +9150,24 @@ validate_scrna_manifest <- function(manifest, check_paths = TRUE) {
   if (!NROW(manifest)) stop("The single-cell manifest has no sample rows.")
   manifest$sample_id <- trimws(as.character(manifest$sample_id))
   manifest$input_path <- trimws(as.character(manifest$input_path))
+  if (!"capture_id" %in% names(manifest)) manifest$capture_id <- manifest$sample_id
+  manifest$capture_id <- trimws(as.character(manifest$capture_id))
+  manifest$capture_id[!nzchar(manifest$capture_id)] <- manifest$sample_id[!nzchar(manifest$capture_id)]
   if (!"input_type" %in% names(manifest)) manifest$input_type <- ""
   manifest$input_type <- tolower(trimws(as.character(manifest$input_type)))
   if (any(!nzchar(manifest$sample_id))) stop("Every single-cell manifest row needs a sample_id.")
   if (any(!nzchar(manifest$input_path))) stop("Every single-cell manifest row needs an input_path.")
   if (anyDuplicated(manifest$sample_id)) stop("Each sample_id in the single-cell manifest must be unique.")
+  if (any(!nzchar(manifest$capture_id))) stop("Every single-cell manifest row needs a capture_id or sample_id.")
+  if ("expected_doublet_rate" %in% names(manifest)) {
+    raw_rate <- trimws(as.character(manifest$expected_doublet_rate))
+    supplied <- nzchar(raw_rate) & !is.na(raw_rate)
+    parsed <- suppressWarnings(as.numeric(raw_rate))
+    if (any(supplied & (!is.finite(parsed) | parsed <= 0 | parsed >= 1))) stop("expected_doublet_rate must be blank for automatic estimation or a number greater than 0 and less than 1.")
+    rates_by_capture <- split(parsed[supplied], manifest$capture_id[supplied])
+    inconsistent <- names(Filter(function(x) length(unique(x)) > 1L, rates_by_capture))
+    if (length(inconsistent)) stop("expected_doublet_rate must be constant within capture_id: ", inconsistent[[1]])
+  }
   input_paths <- path.expand(manifest$input_path)
   if (any(!startsWith(input_paths, "/"))) {
     stop("Each single-cell input_path must be an absolute server path so the SLURM job can find it reliably.")
@@ -9279,7 +9292,7 @@ write_scrna_manual_gene_sets <- function(project, entries, set_column, directory
   normalizePath(path, winslash = "/", mustWork = TRUE)
 }
 
-submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto", normalization = "auto", integration = "auto", batch_column = "batch", cluster_resolution = 0.6, min_features = 200, min_counts = 0, max_features = 0, max_percent_mt = 20, min_cells_per_gene = 3, n_pcs = 30, n_neighbors = 15, umap_min_dist = 0.5, umap_spread = 1, umap_metric = "euclidean", umap_init_pos = "spectral", doublet_method = "auto", doublet_rate = 0.05, remove_doublets = TRUE, seed = 1234, scvi_max_epochs = 400, harmony_theta = 2, harmony_lambda = 1, harmony_max_iter = 20, marker_file = "", celltype_file = "", marker_upload = NULL, celltype_upload = NULL, marker_source = "server", celltype_source = "server", marker_manual = list(), marker_species = "same", marker_ortholog_file = "", marker_ortholog_upload = NULL, marker_ortholog_source = "server", annotation_name = "cell_type", signature_file = "", signature_upload = NULL, signature_source = "server", signature_manual = list(), signature_species = "same", signature_ortholog_file = "", signature_ortholog_upload = NULL, signature_ortholog_source = "server", de_group_column = "condition", de_reference = "", de_comparison = "", de_annotation_column = "", de_annotation_values = "all", de_method = "both", de_covariates = character(0), pathway_library = "MSigDB_Hallmark_2020", pathway_species = "auto", pathway_ortholog_file = "", pathway_ortholog_upload = NULL, pathway_ortholog_source = "server", pathway_gmt_file = "", pathway_gmt_upload = NULL, pathway_source = "server") {
+submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto", normalization = "auto", integration = "auto", batch_column = "batch", cluster_resolution = 0.6, min_features = 200, min_counts = 0, max_features = 0, max_percent_mt = 20, min_cells_per_gene = 3, n_pcs = 30, n_neighbors = 15, umap_min_dist = 0.5, umap_spread = 1, umap_metric = "euclidean", umap_init_pos = "spectral", doublet_method = "auto", doublet_rate = 0, remove_doublets = TRUE, seed = 1234, scvi_max_epochs = 400, harmony_theta = 2, harmony_lambda = 1, harmony_max_iter = 20, marker_file = "", celltype_file = "", marker_upload = NULL, celltype_upload = NULL, marker_source = "server", celltype_source = "server", marker_manual = list(), marker_species = "same", marker_ortholog_file = "", marker_ortholog_upload = NULL, marker_ortholog_source = "server", annotation_name = "cell_type", signature_file = "", signature_upload = NULL, signature_source = "server", signature_manual = list(), signature_species = "same", signature_ortholog_file = "", signature_ortholog_upload = NULL, signature_ortholog_source = "server", de_group_column = "condition", de_reference = "", de_comparison = "", de_annotation_column = "", de_annotation_values = "all", de_method = "both", de_covariates = character(0), pathway_library = "MSigDB_Hallmark_2020", pathway_species = "auto", pathway_ortholog_file = "", pathway_ortholog_upload = NULL, pathway_ortholog_source = "server", pathway_gmt_file = "", pathway_gmt_upload = NULL, pathway_source = "server") {
   stage <- tolower(trimws(as.character(stage %||% "inspect")))
   step_label <- tryCatch(scrna_stage_step(stage), error = function(e) "")
   if (!is_scrna_project(project)) return(record_preflight_failure(project, step_label %||% "scRNA processing", "This is not an scRNA-seq project.", "scrna"))
@@ -10825,7 +10838,7 @@ scrna_results_explorer_ui <- function() {
       id = "scrna_results_tabs",
       tabPanel("Interactive UMAP", br(), h3("Interactive UMAP"), tags$p(class = "muted", "Color every cell by metadata or normalized marker expression. Hover for cell identity and metadata; use lasso or box selection to inspect cells."), uiOutput("scrna_embedding_controls_ui"), uiOutput("scrna_embedding_widget_ui"), uiOutput("scrna_selected_cells_ui"), br(), uiOutput("scrna_processed_object_download_ui")),
       tabPanel("Violins", br(), h3("Expression Violins"), tags$p(class = "muted", "Compare normalized gene expression or stored signature scores across clusters, cell types, or other categorical metadata."), uiOutput("scrna_violin_controls_ui"), plotOutput("scrna_expression_violin", height = "680px"), downloadButton("download_scrna_expression_violin", "Download current violin", class = "btn-default")),
-      tabPanel("QC", br(), h3("Quality Control"), uiOutput("scrna_qc_plot_ui"), br(), h4("QC summary by sample"), table_output("scrna_qc_summary"), br(), h4("Doublet calls by sample"), table_output("scrna_doublet_summary"), br(), tags$details(tags$summary("Individual doublet calls"), table_output("scrna_doublet_calls")))
+      tabPanel("QC", br(), h3("Quality Control"), uiOutput("scrna_qc_plot_ui"), br(), h4("QC summary by sample"), table_output("scrna_qc_summary"), br(), h4("Doublet calls by capture"), table_output("scrna_doublet_summary"), br(), tags$details(tags$summary("Individual doublet calls"), table_output("scrna_doublet_calls")))
     ))
   ))
 }
@@ -13874,7 +13887,8 @@ server <- function(input, output, session) {
       numericInput("scrna_min_counts", "Minimum total counts per cell", value = input$scrna_min_counts %||% 0, min = 0, step = 100),
       numericInput("scrna_max_percent_mt", "Maximum mitochondrial reads per cell (%)", value = input$scrna_max_percent_mt %||% 20, min = 0, max = 100, step = 1),
       selectInput("scrna_doublet_method", "Doublet detection", choices = choices$doublets, selected = selected_choice(input$scrna_doublet_method, unname(choices$doublets), "auto"), selectize = FALSE),
-      numericInput("scrna_doublet_rate", "Expected doublet rate", value = input$scrna_doublet_rate %||% 0.05, min = 0.001, max = 0.5, step = 0.01),
+      checkboxInput("scrna_auto_doublet_rate", "Estimate the doublet rate automatically for each capture", value = if (is.null(input$scrna_auto_doublet_rate)) TRUE else isTRUE(input$scrna_auto_doublet_rate)),
+      conditionalPanel("!input.scrna_auto_doublet_rate", numericInput("scrna_doublet_rate", "Expected doublet rate", value = input$scrna_doublet_rate %||% 0.05, min = 0.001, max = 0.5, step = 0.01)),
       checkboxInput("scrna_remove_doublets", "Remove predicted doublets before downstream analysis", value = if (is.null(input$scrna_remove_doublets)) TRUE else isTRUE(input$scrna_remove_doublets)),
       tags$details(tags$summary("Advanced QC setting"), numericInput("scrna_max_features", "Maximum detected genes per cell (0 = disabled)", value = input$scrna_max_features %||% 0, min = 0, step = 100))
     )
@@ -14588,7 +14602,7 @@ server <- function(input, output, session) {
         umap_metric = input$scrna_umap_metric %||% "euclidean",
         umap_init_pos = input$scrna_umap_init_pos %||% "spectral",
         doublet_method = input$scrna_doublet_method %||% "auto",
-        doublet_rate = input$scrna_doublet_rate %||% 0.05,
+        doublet_rate = if (isTRUE(input$scrna_auto_doublet_rate)) 0 else input$scrna_doublet_rate %||% 0.05,
         remove_doublets = isTRUE(input$scrna_remove_doublets),
         seed = input$scrna_seed %||% 1234,
         scvi_max_epochs = input$scrna_scvi_max_epochs %||% 400,
