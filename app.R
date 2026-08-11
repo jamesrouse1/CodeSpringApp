@@ -13774,9 +13774,12 @@ server <- function(input, output, session) {
       x <- detected[[column]] %||% rep(FALSE, NROW(detected))
       any(toupper(trimws(as.character(x))) %in% c("TRUE", "YES", "1"), na.rm = TRUE)
     }
-    has_raw_counts <- has("rna_count_layers_detected") || (
-      "raw_count_source" %in% names(detected) && any(!tolower(trimws(as.character(detected$raw_count_source))) %in% c("", "unavailable", "na"), na.rm = TRUE)
-    )
+    has_text <- function(column) {
+      if (!column %in% names(detected)) return(FALSE)
+      x <- tolower(trimws(as.character(detected[[column]])))
+      any(!is.na(x) & !x %in% c("", "na", "n/a", "none", "unavailable"))
+    }
+    has_raw_counts <- has_text("rna_count_layers_detected") || has_text("raw_count_source")
     yes_no <- function(value) if (isTRUE(value)) "Yes" else "No"
     input_kinds <- tolower(trimws(as.character(detected$input_kind %||% "")))
     is_raw_matrix <- length(input_kinds) && all(input_kinds == "filtered_10x_matrix")
@@ -13795,10 +13798,10 @@ server <- function(input, output, session) {
     }
     div(class = "cutrun-metric-grid compact",
       scrna_metric_card("Raw counts", yes_no(has_raw_counts), "Required for reproducible processing", if (has_raw_counts) "green" else "gold"),
-      scrna_metric_card("Normalized data", yes_no(has("rna_normalized_layers_detected") || has("sct_detected")), "Detected in the supplied source", "blue"),
+      scrna_metric_card("Normalized data", yes_no(has_text("rna_normalized_layers_detected") || has("sct_detected")), "Detected in the supplied source", "blue"),
       scrna_metric_card("PCA / UMAP", paste(yes_no(has("pca_detected")), "/", yes_no(has("umap_detected"))), "Detected in the supplied source", "purple"),
       scrna_metric_card("Clusters", yes_no(has("clusters_detected")), "Detected in the supplied source", "gold"),
-      scrna_metric_card("Annotations", yes_no(has("annotation_columns_detected")), "Existing cell-type column detected", "blue")
+      scrna_metric_card("Annotations", yes_no(has_text("annotation_columns_detected")), "Existing cell-type column detected", "blue")
     )
   })
 
