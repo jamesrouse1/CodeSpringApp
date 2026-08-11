@@ -725,7 +725,7 @@ app_env$genome_resources <- function(project) list(
   kallisto_index = file.path(runner_test_root, "transcripts.idx"),
   rsem_index = file.path(runner_test_root, "rsem")
 )
-app_env$submit_sbatch <- function(project, step, script, args, log_name, input_mode = "", sample = "", target = "", reference = "", dependency_ids = character(0)) {
+app_env$submit_sbatch <- function(project, step, script, args, log_name, input_mode = "", sample = "", target = "", reference = "", dependency_ids = character(0), dependency_condition = "afterok") {
   captured_submissions[[length(captured_submissions) + 1L]] <<- list(step = step, script = script, args = args, target = target)
   paste("Submitted", step, sample)
 }
@@ -1519,6 +1519,13 @@ assert(
 assert(
   grepl("run_scrna_cellranger", app_text, fixed = TRUE) && any(grepl("module load CellRanger/9.0.1", runtime_text, fixed = TRUE)),
   "the app submits FASTQ samples through the maintained CellRanger/9.0.1 cluster module"
+)
+assert(
+  identical(app_env$scrna_cellranger_max_parallel(), 1L) &&
+    grepl("dependency_condition = \"afterany\"", app_text, fixed = TRUE) &&
+    grepl("BAM generation is disabled", app_text, fixed = TRUE) &&
+    any(grepl("--create-bam=false", runtime_text, fixed = TRUE)),
+  "Cell Ranger defaults to one resumable low-disk job at a time with BAM output disabled"
 )
 matrix_dir <- app_env$scrna_cellranger_matrix_dir(fastq_project, "donor03")
 dir.create(matrix_dir, recursive = TRUE)

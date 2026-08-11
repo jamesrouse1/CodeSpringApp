@@ -6625,7 +6625,7 @@ submit_screen_message <- function(step, sample = "", job_id = "", input_mode = "
   paste(lines, collapse = "\n")
 }
 
-submit_sbatch <- function(project, step, script, args, log_name, input_mode = "", sample = "", target = "", reference = "", dependency_ids = character(0)) {
+submit_sbatch <- function(project, step, script, args, log_name, input_mode = "", sample = "", target = "", reference = "", dependency_ids = character(0), dependency_condition = "afterok") {
   log_dir <- file.path(dirname(project$data_dir), "log")
   dir.create(log_dir, recursive = TRUE, showWarnings = FALSE)
   tool_slug <- clean_name(log_name, clean_name(step, "job"))
@@ -6641,8 +6641,9 @@ submit_sbatch <- function(project, step, script, args, log_name, input_mode = ""
   cat("", file = stderr)
   job_name <- job_name_for(project, step, sample)
   dep <- dependency_ids[nzchar(dependency_ids)]
+  dependency_condition <- if (identical(dependency_condition, "afterany")) "afterany" else "afterok"
   cmd <- c("sbatch", "--open-mode=append", "-J", job_name, "-e", stderr, "-o", stdout)
-  if (length(dep)) cmd <- c(cmd, paste0("--dependency=afterok:", paste(dep, collapse = ":")))
+  if (length(dep)) cmd <- c(cmd, paste0("--dependency=", dependency_condition, ":", paste(dep, collapse = ":")))
   cmd <- c(cmd, script, args)
   writeLines(c(
     paste("time:", format(Sys.time(), "%Y-%m-%d %H:%M:%S")),
@@ -6652,6 +6653,7 @@ submit_sbatch <- function(project, step, script, args, log_name, input_mode = ""
     paste("log_scope:", scope),
     paste("target:", target %||% ""),
     paste("dependencies:", paste(dep, collapse = ",")),
+    paste("dependency_condition:", dependency_condition),
     paste("stdout:", stdout),
     paste("stderr:", stderr),
     paste("command:", paste(shQuote(cmd), collapse = " "))
@@ -9067,6 +9069,19 @@ cellranger_reference_candidates <- function(project) {
   candidates[dir.exists(candidates) & file.exists(file.path(candidates, "reference.json"))]
 }
 
+scrna_cellranger_stage_parent <- function(project) {
+  configured <- trimws(Sys.getenv("CSL_CELLRANGER_SCRATCH_ROOT", unset = ""))
+  if (!nzchar(configured)) return(file.path(project$data_dir, "cellranger"))
+  project_slug <- clean_name(project$id %||% project$name, "scrna_project")
+  normalizePath(file.path(path.expand(configured), project_slug), winslash = "/", mustWork = FALSE)
+}
+
+scrna_cellranger_max_parallel <- function() {
+  value <- suppressWarnings(as.integer(Sys.getenv("CSL_CELLRANGER_MAX_PARALLEL", unset = "1")))
+  if (is.na(value)) value <- 1L
+  max(1L, min(value, 4L))
+}
+
 submit_scrna_cellranger_jobs <- function(project, transcriptome, expected_cells = 0, samples = NULL) {
   fastq <- tryCatch(scrna_fastq_manifest(project), error = function(e) e)
   if (inherits(fastq, "error")) return(record_preflight_failure(project, "Alignment & counting", conditionMessage(fastq), "cellranger"))
@@ -9085,7 +9100,9 @@ submit_scrna_cellranger_jobs <- function(project, transcriptome, expected_cells 
   runner <- file.path(SCRIPTS_DIR, "singleCellRNAseq", "cellranger_count.sh")
   if (!file.exists(qsub) || !file.exists(runner)) return(record_preflight_failure(project, "Alignment & counting", "CodeSpringLab Cell Ranger runner scripts were not found. Update CodeSpringLab, then try again.", "cellranger"))
   jobs <- job_history(project)
-  messages <- vapply(requested, function(sample) {
+  stage_parent <- scrna_cellranger_stage_parent(project)
+  max_parallel <- scrna_cellranger_max_parallel()
+  submit_one <- function(sample, dependency_ids = character(0)) {
     row <- fastq[fastq$sample_id == sample, , drop = FALSE][1, , drop = FALSE]
     target <- file.path(scrna_cellranger_matrix_dir(project, sample), "matrix.mtx.gz")
     if (file.exists(target) && file_size_for(target) > 0) return(paste(sample, "already has a completed Cell Ranger matrix; skipped."))
@@ -9101,12 +9118,26 @@ submit_scrna_cellranger_jobs <- function(project, transcriptome, expected_cells 
     if (nzchar(fastq_sample) && length(detected_prefixes) && !fastq_sample %in% detected_prefixes) return(paste0("ERROR: fastq_sample '", fastq_sample, "' was not found in ", row$input_path[[1]], ". Detected: ", paste(detected_prefixes, collapse = ", ")))
     submit_sbatch(
       project, "Alignment & counting", qsub,
-      c(sample, row$input_path[[1]], fastq_sample, transcriptome, file.path(project$data_dir, "cellranger"), expected_cells, runner),
-      "cellranger_count", paste0("CellRanger/9.0.1; expected_cells=", expected_cells), sample = sample,
-      target = target, reference = transcriptome
+      c(sample, row$input_path[[1]], fastq_sample, transcriptome, file.path(project$data_dir, "cellranger"), expected_cells, stage_parent, runner),
+      "cellranger_count", paste0("CellRanger/9.0.1; expected_cells=", expected_cells, "; BAM disabled; max_parallel=", max_parallel), sample = sample,
+      target = target, reference = transcriptome, dependency_ids = dependency_ids, dependency_condition = "afterany"
     )
-  }, character(1))
-  paste(messages, collapse = "\n")
+  }
+  # Keep a small fixed number of Cell Ranger jobs active. Each lane is a SLURM
+  # afterany chain so a failed sample cannot permanently block later samples.
+  lane_job_ids <- rep("", max_parallel)
+  messages <- character(length(requested))
+  for (i in seq_along(requested)) {
+    lane <- ((i - 1L) %% max_parallel) + 1L
+    dependency_ids <- lane_job_ids[[lane]]
+    messages[[i]] <- submit_one(requested[[i]], dependency_ids)
+    submitted_id <- parse_sbatch_job_id(messages[[i]])
+    if (nzchar(submitted_id)) lane_job_ids[[lane]] <- submitted_id
+  }
+  paste(c(
+    paste0("Cell Ranger submission is storage-safe: at most ", max_parallel, " sample", if (max_parallel == 1L) "" else "s", " run concurrently; failed pipestances resume from stable staging; BAM generation is disabled."),
+    messages
+  ), collapse = "\n")
 }
 
 validate_scrna_manifest <- function(manifest, check_paths = TRUE) {
@@ -13706,7 +13737,7 @@ server <- function(input, output, session) {
         actionButton("browse_scrna_cellranger_reference", "Browse server", class = "btn-default")
       ),
       numericInput("scrna_cellranger_expected_cells", "Expected recovered cells per sample (0 = automatic)", value = input$scrna_cellranger_expected_cells %||% 0, min = 0, step = 500),
-      tags$p(class = "muted small-note", "Cell Ranger 9.0.1 detects 10x chemistry automatically. Each sample runs as a separate SLURM job. R1/R2 lanes in the sample folder are combined, and the filtered matrix becomes that sample's downstream input."),
+      tags$p(class = "muted small-note", paste0("Cell Ranger 9.0.1 detects 10x chemistry automatically. R1/R2 lanes are combined per sample. To reduce runtime and storage, jobs use 16 cores, skip BAM generation, retain only the filtered matrix plus small summaries, resume failed staging, and run at most ", scrna_cellranger_max_parallel(), " sample", if (scrna_cellranger_max_parallel() == 1L) "" else "s", " at a time.")),
       if (!length(candidates)) tags$p(class = "muted small-note", "No standard Cell Ranger reference was detected automatically. Browse to a matching human or mouse refdata-gex transcriptome folder.") else NULL
     )
   })
