@@ -6668,7 +6668,7 @@ submit_screen_message <- function(step, sample = "", job_id = "", input_mode = "
   paste(lines, collapse = "\n")
 }
 
-submit_sbatch <- function(project, step, script, args, log_name, input_mode = "", sample = "", target = "", reference = "", dependency_ids = character(0), dependency_condition = "afterok") {
+submit_sbatch <- function(project, step, script, args, log_name, input_mode = "", sample = "", target = "", reference = "", dependency_ids = character(0), dependency_condition = "afterok", sbatch_options = character(0)) {
   log_dir <- file.path(dirname(project$data_dir), "log")
   dir.create(log_dir, recursive = TRUE, showWarnings = FALSE)
   tool_slug <- clean_name(log_name, clean_name(step, "job"))
@@ -6686,6 +6686,9 @@ submit_sbatch <- function(project, step, script, args, log_name, input_mode = ""
   dep <- dependency_ids[nzchar(dependency_ids)]
   dependency_condition <- if (identical(dependency_condition, "afterany")) "afterany" else "afterok"
   cmd <- c("sbatch", "--open-mode=append", "-J", job_name, "-e", stderr, "-o", stdout)
+  sbatch_options <- unique(trimws(as.character(sbatch_options %||% character(0))))
+  sbatch_options <- sbatch_options[nzchar(sbatch_options)]
+  if (length(sbatch_options)) cmd <- c(cmd, sbatch_options)
   if (length(dep)) cmd <- c(cmd, paste0("--dependency=", dependency_condition, ":", paste(dep, collapse = ":")))
   cmd <- c(cmd, script, args)
   writeLines(c(
@@ -9611,7 +9614,21 @@ submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto
   prior_marker <- if (nzchar(prior)) file.path(out_dir, paste0("_STAGE_", toupper(prior), "_COMPLETE")) else ""
   if (nzchar(prior_marker) && !file.exists(prior_marker)) return(record_preflight_failure(project, step_label, paste0("Complete ", scrna_stage_step(prior), " before submitting this stage."), "scrna"))
   scanpy_container_path <- if (identical(resolved_engine, "scanpy")) scanpy_container_check()$path else ""
-  submit_sbatch(project, step_label, qsub, c(runner, resolved_engine, manifest_path, out_dir, params_path, stage, scanpy_container_path), "scrna_pipeline", paste(stage, resolved_engine, normalization, integration), target = file.path(out_dir, paste0("_STAGE_", toupper(stage), "_COMPLETE")), reference = resolved_engine)
+  sbatch_options <- character(0)
+  if (identical(stage, "annotate") && identical(resolved_engine, "seurat") && nzchar(reference_file)) {
+    object_candidates <- c(
+      file.path(out_dir, "objects", "processed_seurat.rds"),
+      file.path(out_dir, "checkpoints", "04_clustered_seurat.rds")
+    )
+    object_candidates <- object_candidates[file.exists(object_candidates)]
+    query_file <- if (length(object_candidates)) object_candidates[[1]] else ""
+    input_bytes <- sum(file.info(c(query_file, reference_file)[nzchar(c(query_file, reference_file))])$size, na.rm = TRUE)
+    # Compressed Seurat objects expand substantially during anchor projection.
+    # Match the proven Alex/Baccin workflow's ~120 GB allowance when the saved
+    # query plus reference exceeds 8 GiB, while retaining 64 GB for small jobs.
+    if (is.finite(input_bytes) && input_bytes > 8 * 1024^3) sbatch_options <- "--mem=128G"
+  }
+  submit_sbatch(project, step_label, qsub, c(runner, resolved_engine, manifest_path, out_dir, params_path, stage, scanpy_container_path), "scrna_pipeline", paste(stage, resolved_engine, normalization, integration), target = file.path(out_dir, paste0("_STAGE_", toupper(stage), "_COMPLETE")), reference = resolved_engine, sbatch_options = sbatch_options)
 }
 
 submit_star_jobs <- function(project, trimmed = FALSE, samples = NULL) {

@@ -1660,6 +1660,12 @@ assert(
     grepl("its dynamic upload controls stay", app_text, fixed = TRUE),
   "background status refreshes preserve an open reference-upload annotation panel"
 )
+assert(
+  grepl('sbatch_options = character(0)', app_text, fixed = TRUE) &&
+    grepl('input_bytes > 8 * 1024^3', app_text, fixed = TRUE) &&
+    grepl('sbatch_options <- "--mem=128G"', app_text, fixed = TRUE),
+  "large Seurat reference-transfer jobs automatically request the memory allowance validated by the Alex/Baccin workflow"
+)
 idle_reference_html <- as.character(app_env$scrna_reference_label_selector_content(
   list(status = "idle", project_id = "scrna/test", choices = data.frame()),
   "scrna/test"
