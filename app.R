@@ -14003,18 +14003,16 @@ server <- function(input, output, session) {
         tags$p(class = "muted small-note", "Automatic integration treats each input sample as one group by default. Use a broader technical-batch field only when multiple input samples came from the same library or run; never group by biological condition.")
       )
     }
-    umap_controls <- if (identical(scrna_ui_engine(), "scanpy")) {
-      tagList(
+    umap_controls <- tagList(
         tags$h4("UMAP parameters"),
         radioButtons("scrna_umap_focus", "Emphasize", choices = c("Local structure (nearby subpopulations)" = "local", "Global structure (broader population relationships)" = "global"), selected = input$scrna_umap_focus %||% "local", inline = TRUE),
-        tags$p(class = "muted small-note", "The selected focus auto-fills neighbours and minimum distance. The PCA elbow auto-fills the recommended number of PCs after Normalize & PCA; all values remain editable."),
+        tags$p(class = "muted small-note", "The selected focus auto-fills neighbours and minimum distance. The PCA elbow auto-fills the recommended number of PCs after Normalize & PCA; all values remain editable and are applied consistently in Seurat and Scanpy."),
         fluidRow(
           column(4, numericInput("scrna_n_neighbors", "Neighbours", value = input$scrna_n_neighbors %||% 15, min = 2, max = 200, step = 1)),
           column(4, numericInput("scrna_umap_min_dist", "Minimum distance", value = input$scrna_umap_min_dist %||% 0.5, min = 0, max = 2, step = 0.05)),
           column(4, numericInput("scrna_n_pcs", "Principal components", value = input$scrna_n_pcs %||% 30, min = 5, max = 100, step = 1))
         )
       )
-    } else NULL
     tagList(
       integration_controls,
       umap_controls,
@@ -14240,7 +14238,7 @@ server <- function(input, output, session) {
     if (new_project_view) scrna_batch_default_project(project_key)
     tagList(
       selectInput("scrna_batch_column", "Integration grouping", choices = choices, selected = previous, selectize = FALSE),
-      tags$p(class = "muted small-note", "By default, each input sample is one integration group. Change this only when several inputs belong to the same technical batch; never use a biological condition as the integration field.")
+      tags$p(class = "muted small-note", "By default, each input sample is one integration group. Change this only when several inputs belong to the same technical batch; never use a biological condition as the integration field. Harmony adjusts PCA coordinates for neighbors, clustering, and UMAP; raw counts remain unchanged and are used for pseudobulk differential expression.")
     )
   })
 
@@ -14263,7 +14261,8 @@ server <- function(input, output, session) {
     div(class = "read-source-note",
       tags$strong("Recommended starting point"),
       tags$p(paste0(NROW(manifest), " input sample", if (NROW(manifest) == 1L) "" else "s", "; ", normalizer)),
-      tags$p(integration_note)
+      tags$p(integration_note),
+      tags$p("Always compare the integrated and unintegrated views. If condition and integration group are confounded, correction can attenuate real condition-specific states; in that case use a genuine technical-batch field or run without integration.")
     )
   })
 
