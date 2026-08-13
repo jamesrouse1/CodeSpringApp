@@ -1962,6 +1962,16 @@ job_history <- function(project, force_refresh = FALSE) {
       }
     }
   }
+  # A job is initially called Submitted before the scheduler is queried. If
+  # neither squeue nor sacct can resolve an older record, do not leave every
+  # historical pipeline step looking active forever. The short grace period
+  # still covers the normal delay between sbatch accepting a job and the job
+  # becoming visible to SLURM.
+  unresolved_submitted <- jobs$slurm_state == "Submitted"
+  if (any(unresolved_submitted)) {
+    recent <- if ("time" %in% names(jobs)) recent_submission(jobs$time) else rep(FALSE, NROW(jobs))
+    jobs$slurm_state[unresolved_submitted & !recent] <- "Finished or not in queue"
+  }
   jobs$input_mode <- vapply(as.character(jobs$output), extract_output_field, character(1), key = "input_mode")
   jobs$sample <- vapply(as.character(jobs$output), extract_output_field, character(1), key = "sample")
   jobs$target <- vapply(as.character(jobs$output), extract_output_field, character(1), key = "target")
@@ -2651,6 +2661,12 @@ format_elapsed_seconds <- function(seconds) {
 
 active_slurm_states <- function() {
   c("PENDING", "CONFIGURING", "COMPLETING", "RUNNING", "SUSPENDED", "Submitted")
+}
+
+recent_submission <- function(time, max_age_seconds = 300, now = Sys.time()) {
+  submitted <- suppressWarnings(as.POSIXct(as.character(time %||% ""), format = "%Y-%m-%d %H:%M:%S"))
+  age <- suppressWarnings(as.numeric(difftime(now, submitted, units = "secs")))
+  is.finite(age) & age >= 0 & age <= max_age_seconds
 }
 
 escape_job_table <- function(df) {
@@ -13006,6 +13022,13 @@ server <- function(input, output, session) {
     }
     native_registered_id("")
     native_results_loaded_project("")
+    # Status tables belong to the previously selected project until the fresh
+    # scheduler/output scan below completes. Clear them immediately so those
+    # colors cannot be rendered against the newly selected project's steps.
+    job_history_state(data.frame())
+    sample_progress_state(data.frame())
+    project_status_state(data.frame())
+    submission_holds(list())
     p <- current_project()
     run_cards_refresh(Sys.time())
     updateTextInput(session, "metadata_cols", value = paste(project_metadata_cols(p), collapse = ", "))

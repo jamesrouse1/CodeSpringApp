@@ -1448,6 +1448,16 @@ assert(
   "progress polling is bounded so scheduler latency cannot repeatedly freeze the Shiny event loop"
 )
 assert(
+  isTRUE(app_env$recent_submission(format(Sys.time(), "%Y-%m-%d %H:%M:%S"), now = Sys.time())) &&
+    !isTRUE(app_env$recent_submission("2020-01-01 00:00:00", now = Sys.time())),
+  "only newly submitted unresolved jobs retain the temporary active status"
+)
+assert(
+  grepl("project_status_state(data.frame())", server_source, fixed = TRUE) &&
+    grepl("submission_holds(list())", server_source, fixed = TRUE),
+  "switching projects clears status colors and submission handoff state before refreshing"
+)
+assert(
   grepl("previous_cache$value", app_text, fixed = TRUE) &&
     grepl("sacct_ids <- setdiff(ids, ids_seen)", app_text, fixed = TRUE),
   "terminal SLURM states are cached and active queue jobs are not redundantly queried through sacct"
