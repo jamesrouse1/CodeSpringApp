@@ -1646,6 +1646,13 @@ assert(
     grepl("This metadata-only step adds the transferred label", app_text, fixed = TRUE),
   "cluster-marker discovery is an explicit optional annotation setting rather than an automatic large-cell calculation"
 )
+assert(
+  grepl('button_ui = uiOutput("scrna_annotation_run_button_ui")', app_text, fixed = TRUE) &&
+    grepl('output$scrna_annotation_run_button_ui <- renderUI', app_text, fixed = TRUE) &&
+    grepl('if (!ready || is.null(input$scrna_reference_label_column)) return(NULL)', app_text, fixed = TRUE) &&
+    grepl('"Run reference annotation"', app_text, fixed = TRUE),
+  "the annotation submit button renders only after its dynamic controls and inspected reference labels are ready"
+)
 idle_reference_html <- as.character(app_env$scrna_reference_label_selector_content(
   list(status = "idle", project_id = "scrna/test", choices = data.frame()),
   "scrna/test"

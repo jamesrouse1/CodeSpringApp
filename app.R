@@ -10326,7 +10326,7 @@ pipeline_stepper_ui <- function(project, status = NULL) {
   }))
 }
 
-tool_panel <- function(step, status, description, controls, button_id, button_label, progress_df = data.frame(), status_step = step, show_sample_progress = TRUE, show_job_actions = TRUE) {
+tool_panel <- function(step, status, description, controls, button_id, button_label, progress_df = data.frame(), status_step = step, show_sample_progress = TRUE, show_job_actions = TRUE, button_ui = NULL) {
   st <- status$status[match(status_step, status$step)] %||% "Not started"
   mode <- status$input[match(status_step, status$step)] %||% ""
   cls <- status_css_key(st)
@@ -10342,7 +10342,7 @@ tool_panel <- function(step, status, description, controls, button_id, button_la
     ),
     div(class = "tool-body",
         controls,
-        actionButton(button_id, button_label, class = "btn-primary"),
+        if (!is.null(button_ui)) button_ui else actionButton(button_id, button_label, class = "btn-primary"),
         uiOutput(tool_message_output_id(step)),
         if (isTRUE(show_sample_progress) && status_step %in% sample_level_pipeline_steps()) uiOutput(tool_progress_ui_output_id(status_step)) else NULL,
         if (isTRUE(show_sample_progress) && status_step %in% sample_level_pipeline_steps()) uiOutput(tool_retry_ui_output_id(status_step)) else NULL,
@@ -13102,13 +13102,13 @@ server <- function(input, output, session) {
     if (!isTRUE(existing_project_selected())) {
       return(data.frame(
         field = c("Project", "Analysis", "Species", "Genome/reference", "Paired-end"),
-        value = c("New project", p$analysis, genome_species(p), project_reference_label(p), as.character(p$paired_end)),
+        value = c("New project", p$analysis %||% "", genome_species(p), project_reference_label(p), as.character(p$paired_end %||% "")),
         stringsAsFactors = FALSE
       ))
     }
     data.frame(
       field = c("Project", "Analysis", "Species", "Genome/reference", "Reference key", "Paired-end", "Results root", "Data folder", "FASTQ folder(s)", "Design matrix"),
-      value = c(p$label, p$analysis, genome_species(p), project_reference_label(p), genome_reference_key(p), as.character(p$paired_end), p$results_root, p$data_dir, paste(project_fastq_dirs(p), collapse = "\n"), p$design_matrix_path),
+      value = c(p$label %||% "", p$analysis %||% "", genome_species(p), project_reference_label(p), genome_reference_key(p) %||% "", as.character(p$paired_end %||% ""), p$results_root %||% "", p$data_dir %||% "", paste(project_fastq_dirs(p), collapse = "\n"), p$design_matrix_path %||% ""),
       stringsAsFactors = FALSE
     )
   })
@@ -13720,7 +13720,7 @@ server <- function(input, output, session) {
         if (!reuse_existing || show_rebuild) tool_panel("QC & doublets", status, "Review the unfiltered QC plots below, choose biologically appropriate cutoffs, then filter cells and record predicted doublets.", tagList(uiOutput("scrna_pre_qc_plot_ui"), uiOutput("scrna_qc_settings_ui"), uiOutput("scrna_post_qc_plot_ui"), tags$p(class = "muted small-note", "The same applied cutoffs are drawn on the before- and after-filter plots. Doublet calls are saved whether or not predicted doublets are removed.")), "run_scrna_qc", "Run QC & doublets", show_sample_progress = FALSE) else NULL,
         if (!reuse_existing || show_rebuild) tool_panel("Normalize & PCA", status, "Normalize retained cells, identify variable genes, scale, and calculate PCA. PCA outputs appear here as soon as this step finishes.", tagList(uiOutput("scrna_preprocess_settings_ui"), uiOutput("scrna_pca_output_ui")), "run_scrna_preprocess", "Run normalization & PCA", show_sample_progress = FALSE) else NULL,
         if (!reuse_existing || show_rebuild) tool_panel("UMAP & clustering", status, "Compare the uncorrected embedding first. For multiple inputs, optionally correct a technical batch; then calculate neighbours, UMAP, and clusters.", tagList(uiOutput("scrna_preintegration_umap_ui"), uiOutput("scrna_cluster_settings_ui"), uiOutput("scrna_umap_output_ui")), "run_scrna_cluster", "Run UMAP & clustering", show_sample_progress = FALSE) else NULL,
-        tool_panel("Annotate & markers", status, "Use the project's saved post-UMAP object, add a named annotation metadata field, and immediately write exact composition tables.", uiOutput("scrna_annotation_settings_ui"), "run_scrna_annotate", "Run annotation & markers", show_sample_progress = FALSE),
+        tool_panel("Annotate & markers", status, "Use the project's saved post-UMAP object to add a named annotation metadata field.", uiOutput("scrna_annotation_settings_ui"), "run_scrna_annotate", "Run annotation", show_sample_progress = FALSE, button_ui = uiOutput("scrna_annotation_run_button_ui")),
         tool_panel("Signature scoring", status, "Score one or more named gene signatures on normalized expression and store every score as reusable cell metadata in the processed object.", uiOutput("scrna_signature_settings_ui"), "run_scrna_score", "Run signature scoring", show_sample_progress = FALSE),
         tool_panel("Differential expression", status, "Use pseudobulk DESeq2 when independent biological samples are available; one-sample projects instead offer exploratory cell-level comparisons between annotated populations.", uiOutput("scrna_differential_settings_ui"), "run_scrna_differential", "Run differential expression", show_sample_progress = FALSE),
         tool_panel("Pathway analysis", status, "Choose a pathway database and run ranked fgsea on the pseudobulk DESeq2 Wald statistic.", uiOutput("scrna_pathway_settings_ui"), "run_scrna_pathway", "Run pathway analysis", show_sample_progress = FALSE)
@@ -14403,6 +14403,25 @@ server <- function(input, output, session) {
         tags$p(class = "muted small-note", "Optional and potentially slow for large datasets.")
       )
     )
+  })
+
+  output$scrna_annotation_run_button_ui <- renderUI({
+    p <- current_project()
+    if (!is_scrna_project(p)) return(NULL)
+    # Dynamic annotation controls are recreated when the method or source
+    # changes. Do not expose a submit action until those controls are mounted.
+    method <- input$scrna_annotation_method %||% ""
+    if (!nzchar(method)) return(NULL)
+    if (identical(method, "reference")) {
+      state <- scrna_reference_inspection()
+      same_project <- identical(as.character(state$project_id %||% ""), as.character(p$id %||% p$name))
+      ready <- same_project && identical(state$status %||% "", "ready") && NROW(state$choices %||% data.frame()) > 0L
+      if (!ready || is.null(input$scrna_reference_label_column)) return(NULL)
+      return(actionButton("run_scrna_annotate", "Run reference annotation", class = "btn-primary"))
+    }
+    if (identical(method, "markers") && is.null(input$scrna_marker_source)) return(NULL)
+    if (identical(method, "mapping") && is.null(input$scrna_celltype_source)) return(NULL)
+    actionButton("run_scrna_annotate", "Run annotation", class = "btn-primary")
   })
 
   output$scrna_signature_settings_ui <- renderUI({
