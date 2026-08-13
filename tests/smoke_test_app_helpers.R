@@ -1653,6 +1653,13 @@ assert(
     grepl('"Run reference annotation"', app_text, fixed = TRUE),
   "the annotation submit button renders only after its dynamic controls and inspected reference labels are ready"
 )
+assert(
+  grepl("cslReportOpenToolPanels", app_text, fixed = TRUE) &&
+    grepl("preserve_reference_annotation", app_text, fixed = TRUE) &&
+    grepl('"tool_panel_annotate_markers" %in% isolate(open_tool_panels())', app_text, fixed = TRUE) &&
+    grepl("its dynamic upload controls stay", app_text, fixed = TRUE),
+  "background status refreshes preserve an open reference-upload annotation panel"
+)
 idle_reference_html <- as.character(app_env$scrna_reference_label_selector_content(
   list(status = "idle", project_id = "scrna/test", choices = data.frame()),
   "scrna/test"

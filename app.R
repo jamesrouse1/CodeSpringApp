@@ -11823,13 +11823,22 @@ ui <- fluidPage(
           } catch (error) {}
         });
       }
+      function cslReportOpenToolPanels() {
+        var ids = $('details.tool-panel[open]').map(function() { return this.id || ''; }).get().filter(Boolean).sort();
+        var signature = ids.join('|');
+        if (window.cslLastOpenToolPanels === signature) return;
+        window.cslLastOpenToolPanels = signature;
+        if (window.Shiny) Shiny.setInputValue('csl_open_tool_panels', {ids: ids, nonce: Date.now()}, {priority: 'event'});
+      }
       $(document).on('toggle', 'details.tool-panel', function() {
         try {
           window.sessionStorage.setItem(cslToolPanelKey(this), this.open ? 'open' : 'closed');
         } catch (error) {}
+        window.setTimeout(cslReportOpenToolPanels, 0);
       });
       $(function() {
         cslRestoreToolPanels(document);
+        window.setTimeout(cslReportOpenToolPanels, 0);
         if (window.MutationObserver && document.body) {
           new MutationObserver(function(mutations) {
             mutations.forEach(function(mutation) {
@@ -11837,6 +11846,7 @@ ui <- fluidPage(
                 if (node.nodeType === 1) cslRestoreToolPanels(node);
               });
             });
+            window.setTimeout(cslReportOpenToolPanels, 0);
           }).observe(document.body, {childList: true, subtree: true});
         }
       });
@@ -12037,6 +12047,7 @@ server <- function(input, output, session) {
   tool_messages <- reactiveVal(list())
   progress_refresh <- reactiveVal(Sys.time())
   run_cards_refresh <- reactiveVal(Sys.time())
+  open_tool_panels <- reactiveVal(character(0))
   native_registered_id <- reactiveVal("")
   native_results_refresh <- reactiveVal(0L)
   native_results_loaded_project <- reactiveVal("")
@@ -12142,7 +12153,11 @@ server <- function(input, output, session) {
     sample_size_cache(res$cache)
     sample_progress_state(res$table)
     project_status_state(status)
-    if (!identical(status_signature(old_status), status_signature(status))) {
+    annotation_ui <- isolate(scrna_annotation_ui_state(p))
+    preserve_reference_annotation <- is_scrna_project(p) &&
+      identical(annotation_ui$method %||% "", "reference") &&
+      "tool_panel_annotate_markers" %in% isolate(open_tool_panels())
+    if (!identical(status_signature(old_status), status_signature(status)) && !preserve_reference_annotation) {
       run_cards_refresh(Sys.time())
     }
     progress_refresh(Sys.time())
@@ -13053,6 +13068,19 @@ server <- function(input, output, session) {
     }
     if (isTRUE(existing_project_selected())) safe_refresh_progress_now("project switch")
   }, ignoreInit = FALSE)
+
+  observeEvent(input$csl_open_tool_panels, {
+    previous <- isolate(open_tool_panels())
+    current <- unique(as.character(input$csl_open_tool_panels$ids %||% character(0)))
+    current <- current[nzchar(current)]
+    open_tool_panels(current)
+    # Apply any deferred status repaint once the user intentionally closes the
+    # annotation card. While it is open, its dynamic upload controls stay
+    # mounted and cannot flicker or lose their visible selection.
+    if ("tool_panel_annotate_markers" %in% previous && !"tool_panel_annotate_markers" %in% current) {
+      run_cards_refresh(Sys.time())
+    }
+  }, ignoreInit = TRUE)
 
   observeEvent(input$cutrun_normalization_mode, {
     choice <- selected_choice(input$cutrun_normalization_mode, c("CPM", "spikein", "none"), isolate(cutrun_normalization_choice()))
