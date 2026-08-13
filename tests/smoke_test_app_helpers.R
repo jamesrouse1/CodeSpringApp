@@ -1642,7 +1642,8 @@ assert(
 assert(
   grepl('checkboxInput("scrna_find_cluster_markers"', app_text, fixed = TRUE) &&
     grepl('find_cluster_markers = isTRUE(input$scrna_find_cluster_markers)', app_text, fixed = TRUE) &&
-    grepl('"find_cluster_markers"', app_text, fixed = TRUE),
+    grepl('"find_cluster_markers"', app_text, fixed = TRUE) &&
+    grepl("This metadata-only step adds the transferred label", app_text, fixed = TRUE),
   "cluster-marker discovery is an explicit optional annotation setting rather than an automatic large-cell calculation"
 )
 idle_reference_html <- as.character(app_env$scrna_reference_label_selector_content(

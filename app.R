@@ -14390,7 +14390,7 @@ server <- function(input, output, session) {
         ) else NULL,
         uiOutput("scrna_reference_inspect_button_ui"),
         uiOutput("scrna_reference_label_selector_ui"),
-        tags$p(class = "muted small-note", "The output includes the transferred label, maximum prediction score, label counts, and a transfer audit table.")
+        tags$p(class = "muted small-note", "This metadata-only step adds the transferred label and prediction score to the Seurat object and writes the per-cell labels, label summary, and transfer audit. It does not regenerate UMAPs, markers, dashboards, or composition tables.")
       ),
       conditionalPanel("input.scrna_annotation_method == 'mapping'",
         tags$p(class = "muted small-note", "Use this when you already have a cell/barcode-to-cell-type table."),
@@ -14398,8 +14398,10 @@ server <- function(input, output, session) {
         conditionalPanel("input.scrna_celltype_source == 'server'", div(class = "new-project-path-control", textInput("scrna_celltype_file", "Cell-to-cell-type mapping", value = isolate(input$scrna_celltype_file) %||% "", placeholder = "Absolute server .tsv with cell/barcode and cell_type columns"), actionButton("browse_scrna_celltype_file", "Browse server", class = "btn-default"))),
         conditionalPanel("input.scrna_celltype_source == 'upload'", fileInput("scrna_celltype_upload", "Cell-to-cell-type mapping from laptop", accept = c(".tsv", ".txt")))
       ),
-      checkboxInput("scrna_find_cluster_markers", "Also calculate marker genes for every cluster", value = FALSE),
-      tags$p(class = "muted small-note", "Optional and potentially slow for large datasets. It is not required for reference label transfer, annotation UMAPs, or composition tables.")
+      conditionalPanel("input.scrna_annotation_method != 'reference'",
+        checkboxInput("scrna_find_cluster_markers", "Also calculate marker genes for every cluster", value = FALSE),
+        tags$p(class = "muted small-note", "Optional and potentially slow for large datasets.")
+      )
     )
   })
 
