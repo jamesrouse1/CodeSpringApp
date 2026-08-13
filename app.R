@@ -9347,6 +9347,54 @@ read_scrna_reference_label_choices <- function(path) {
   choices[!duplicated(choices$value), , drop = FALSE]
 }
 
+scrna_reference_label_selector_content <- function(state, project_key, selected = "") {
+  state <- state %||% list()
+  same_project <- identical(as.character(state$project_id %||% ""), as.character(project_key %||% ""))
+  status <- if (same_project) state$status %||% "idle" else "idle"
+  choices <- if (same_project && is.data.frame(state$choices)) state$choices else data.frame()
+  status_text <- switch(
+    status,
+    submitted = paste0("Reading the reference", if (nzchar(state$job_id %||% "")) paste0(" (job ", state$job_id, ")") else "", "…"),
+    ready = state$message %||% "Reference label choices are ready.",
+    error = state$message %||% "Reference inspection failed.",
+    "Choose a reference object, then inspect it to load the labels that actually exist in that object."
+  )
+  if (identical(status, "submitted")) {
+    return(div(
+      class = "summary-job-status active",
+      div(class = "summary-job-heading", tags$strong("Reference inspection is running"), tags$span(if (nzchar(state$job_id %||% "")) paste("SLURM job", state$job_id) else "Submitted")),
+      div(class = "summary-job-track", div(class = "summary-job-bar active", style = "width:100%")),
+      tags$p(class = "muted small-note", status_text, " This panel refreshes automatically.")
+    ))
+  }
+  if (identical(status, "error")) {
+    return(div(class = "summary-job-status failed", tags$strong("Reference inspection needs attention"), tags$p(class = "muted small-note", status_text)))
+  }
+  if (!identical(status, "ready")) return(tags$p(class = "muted small-note", status_text))
+  if (!NROW(choices) || !all(c("value", "source", "label_count", "non_missing_cells") %in% names(choices))) {
+    return(div(class = "summary-job-status failed", tags$strong("No usable reference labels found"), tags$p(class = "muted small-note", "Inspect this reference again and review its job log.")))
+  }
+  labels <- paste0(choices$source, " (", choices$label_count, " labels)")
+  values <- stats::setNames(as.character(choices$value), labels)
+  selected <- as.character(selected %||% "")
+  if (!selected %in% unname(values)) selected <- unname(values)[[1]]
+  tagList(
+    radioButtons("scrna_reference_label_column", "Reference labels to transfer", choices = values, selected = selected, inline = FALSE),
+    div(
+      class = "resource-strip",
+      lapply(seq_len(NROW(choices)), function(i) div(
+        class = "resource-card",
+        tags$strong(paste0(choices$source[[i]], " — ", choices$label_count[[i]], " labels")),
+        tags$p(class = "muted small-note", paste(format_metric_value(choices$non_missing_cells[[i]]), "labeled cells")),
+        if ("preview" %in% names(choices) && nzchar(trimws(as.character(choices$preview[[i]])))) {
+          tags$p(class = "status-path reference-label-preview", paste("Examples:", choices$preview[[i]]))
+        } else NULL
+      ))
+    ),
+    div(class = "summary-job-status complete", tags$strong("Reference labels ready"), tags$p(class = "muted small-note", status_text))
+  )
+}
+
 submit_scrna_reference_inspection <- function(project, reference_file) {
   reference_file <- normalizePath(reference_file, winslash = "/", mustWork = TRUE)
   extension <- tolower(tools::file_ext(reference_file))
@@ -12552,46 +12600,10 @@ server <- function(input, output, session) {
 
   output$scrna_reference_label_selector_ui <- renderUI({
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
-    state <- scrna_reference_inspection()
-    same_project <- identical(as.character(state$project_id %||% ""), as.character(p$id %||% p$name))
-    status <- if (same_project) state$status %||% "idle" else "idle"
-    choices <- if (same_project) state$choices else data.frame()
-    if (!is.data.frame(choices) || !NROW(choices)) {
-      values <- c("Active identities" = "")
-    } else {
-      labels <- paste0(choices$source, " (", choices$label_count, " labels)")
-      values <- stats::setNames(as.character(choices$value), labels)
-    }
-    selected <- isolate(input$scrna_reference_label_column) %||% ""
-    if (!selected %in% unname(values)) selected <- ""
-    status_text <- switch(
-      status,
-      submitted = paste0("Reading the reference", if (nzchar(state$job_id %||% "")) paste0(" (job ", state$job_id, ")") else "", "…"),
-      ready = state$message %||% "Reference label choices are ready.",
-      error = state$message %||% "Reference inspection failed.",
-      "Select a reference, then inspect it to load its valid label fields."
-    )
-    tagList(
-      radioButtons("scrna_reference_label_column", "Reference labels to transfer", choices = values, selected = selected, inline = FALSE),
-      if (is.data.frame(choices) && NROW(choices)) div(
-        class = "resource-strip",
-        lapply(seq_len(NROW(choices)), function(i) div(
-          class = "resource-card",
-          tags$strong(paste0(choices$source[[i]], " — ", choices$label_count[[i]], " labels")),
-          tags$p(class = "muted small-note", paste(format_metric_value(choices$non_missing_cells[[i]]), "labeled cells")),
-          if ("preview" %in% names(choices) && nzchar(trimws(as.character(choices$preview[[i]])))) {
-            tags$p(class = "status-path reference-label-preview", paste("Examples:", choices$preview[[i]]))
-          } else NULL
-        ))
-      ) else NULL,
-      if (identical(status, "submitted")) div(
-        class = "summary-job-status active",
-        div(class = "summary-job-heading", tags$strong("Reference inspection is running"), tags$span(if (nzchar(state$job_id %||% "")) paste("SLURM job", state$job_id) else "Submitted")),
-        div(class = "summary-job-track", div(class = "summary-job-bar active", style = "width:100%")),
-        tags$p(class = "muted small-note", status_text, " This panel refreshes automatically.")
-      ) else if (identical(status, "ready")) div(class = "summary-job-status complete", tags$strong("Reference labels ready"), tags$p(class = "muted small-note", status_text))
-      else if (identical(status, "error")) div(class = "summary-job-status failed", tags$strong("Reference inspection needs attention"), tags$p(class = "muted small-note", status_text))
-      else tags$p(class = "muted small-note", status_text)
+    scrna_reference_label_selector_content(
+      scrna_reference_inspection(),
+      p$id %||% p$name,
+      isolate(input$scrna_reference_label_column) %||% ""
     )
   })
   observeEvent(input$browse_scrna_signature_file, {
@@ -14285,17 +14297,20 @@ server <- function(input, output, session) {
     }
   }, ignoreInit = TRUE)
 
-  observeEvent(input$scrna_annotation_method, {
-    set_scrna_annotation_ui_value("method", input$scrna_annotation_method)
+  # These intent inputs are emitted only by an actual click. Observing the
+  # ordinary dynamic-radio values would also see Shiny remove/recreate the
+  # controls and could overwrite a user's choice with the default.
+  observeEvent(input$scrna_annotation_method_intent, {
+    set_scrna_annotation_ui_value("method", input$scrna_annotation_method_intent)
   }, ignoreInit = TRUE)
-  observeEvent(input$scrna_marker_source, {
-    set_scrna_annotation_ui_value("marker_source", input$scrna_marker_source)
+  observeEvent(input$scrna_marker_source_intent, {
+    set_scrna_annotation_ui_value("marker_source", input$scrna_marker_source_intent)
   }, ignoreInit = TRUE)
-  observeEvent(input$scrna_reference_source, {
-    set_scrna_annotation_ui_value("reference_source", input$scrna_reference_source)
+  observeEvent(input$scrna_reference_source_intent, {
+    set_scrna_annotation_ui_value("reference_source", input$scrna_reference_source_intent)
   }, ignoreInit = TRUE)
-  observeEvent(input$scrna_celltype_source, {
-    set_scrna_annotation_ui_value("celltype_source", input$scrna_celltype_source)
+  observeEvent(input$scrna_celltype_source_intent, {
+    set_scrna_annotation_ui_value("celltype_source", input$scrna_celltype_source_intent)
   }, ignoreInit = TRUE)
 
   output$scrna_annotation_settings_ui <- renderUI({
@@ -14313,6 +14328,21 @@ server <- function(input, output, session) {
     selected_method <- ui_state$method %||% isolate(input$scrna_annotation_method) %||% "markers"
     if (!selected_method %in% unname(annotation_methods)) selected_method <- "markers"
     tagList(
+      tags$script(HTML("(function(){
+        var bindings = {
+          scrna_annotation_method: 'scrna_annotation_method_intent',
+          scrna_marker_source: 'scrna_marker_source_intent',
+          scrna_reference_source: 'scrna_reference_source_intent',
+          scrna_celltype_source: 'scrna_celltype_source_intent'
+        };
+        Object.keys(bindings).forEach(function(name){
+          var eventName = 'click.cslAnnotationIntent_' + name;
+          $(document).off(eventName, 'input[name=\"' + name + '\"]');
+          $(document).on(eventName, 'input[name=\"' + name + '\"]', function(){
+            if (window.Shiny) Shiny.setInputValue(bindings[name], this.value, {priority: 'event'});
+          });
+        });
+      })();")),
       div(class = "read-source-note",
         tags$strong(paste0(engine_name, " annotation object")),
         tags$p(paste0("The app automatically loads the post-UMAP ", engine_name, " object: checkpoints/", checkpoint_name, ". You do not need to select another object here.")),
@@ -14898,8 +14928,8 @@ server <- function(input, output, session) {
     single_biological_sample <- length(scrna_biological_sample_ids(p)) <= 1L
     integration_choice <- if (!multiple_inputs || isTRUE(input$scrna_cluster_without_integration)) "none" else input$scrna_integration %||% "auto"
     annotation_ui <- isolate(scrna_annotation_ui_state(p))
-    annotation_method <- input$scrna_annotation_method %||% annotation_ui$method %||% "markers"
-    reference_source <- input$scrna_reference_source %||% annotation_ui$reference_source %||% "server"
+    annotation_method <- annotation_ui$method %||% input$scrna_annotation_method %||% "markers"
+    reference_source <- annotation_ui$reference_source %||% input$scrna_reference_source %||% "server"
     inspected_reference <- isolate(scrna_reference_inspection())
     retained_reference <- identical(as.character(inspected_reference$project_id %||% ""), as.character(p$id %||% p$name)) &&
       nzchar(inspected_reference$reference_file %||% "") && file.exists(inspected_reference$reference_file %||% "")

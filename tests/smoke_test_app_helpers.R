@@ -1633,6 +1633,40 @@ assert(
     grepl("reference-label-preview", app_text, fixed = TRUE),
   "reference annotation retains the selected method/upload and shows readable label previews"
 )
+idle_reference_html <- as.character(app_env$scrna_reference_label_selector_content(
+  list(status = "idle", project_id = "scrna/test", choices = data.frame()),
+  "scrna/test"
+))
+submitted_reference_html <- as.character(app_env$scrna_reference_label_selector_content(
+  list(status = "submitted", project_id = "scrna/test", job_id = "123", choices = data.frame()),
+  "scrna/test"
+))
+ready_reference_html <- as.character(app_env$scrna_reference_label_selector_content(
+  list(
+    status = "ready", project_id = "scrna/test", message = "Ready",
+    choices = data.frame(value = c("", "cell_type"), source = c("Active identities", "cell_type"), label_count = c(32L, 22L), non_missing_cells = c(7497L, 7497L), preview = c("A | B", "C | D"), stringsAsFactors = FALSE)
+  ),
+  "scrna/test"
+))
+other_project_reference_html <- as.character(app_env$scrna_reference_label_selector_content(
+  list(status = "ready", project_id = "scrna/other", choices = data.frame(value = "", source = "Active identities", label_count = 32L, non_missing_cells = 7497L)),
+  "scrna/test"
+))
+assert(
+  !grepl("Active identities", idle_reference_html, fixed = TRUE) &&
+    !grepl("scrna_reference_label_column", idle_reference_html, fixed = TRUE) &&
+    !grepl("scrna_reference_label_column", submitted_reference_html, fixed = TRUE) &&
+    grepl("Active identities (32 labels)", ready_reference_html, fixed = TRUE) &&
+    grepl("cell_type (22 labels)", ready_reference_html, fixed = TRUE) &&
+    !grepl("Active identities", other_project_reference_html, fixed = TRUE),
+  "reference labels render only after a successful inspection of the current project's actual reference"
+)
+assert(
+  grepl("scrna_annotation_method_intent", app_text, fixed = TRUE) &&
+    grepl("click.cslAnnotationIntent_", app_text, fixed = TRUE) &&
+    grepl("annotation_method <- annotation_ui$method %||% input$scrna_annotation_method", app_text, fixed = TRUE),
+  "annotation method and source persistence is driven by explicit user intent rather than dynamic-control recreation"
+)
 assert(
   is.infinite(app_env$scrna_cellranger_max_parallel()) &&
     grepl("dependency_condition = \"afterany\"", app_text, fixed = TRUE) &&
