@@ -187,6 +187,22 @@ assert(
     grepl("RPCA (anchor-based; smaller datasets)", app_text, fixed = TRUE),
   "Seurat automatic integration uses scalable Harmony while retaining explicit anchor methods for smaller datasets"
 )
+embedding_test_root <- tempfile("scrna_embedding_views_")
+dir.create(file.path(embedding_test_root, "scrna", "tables"), recursive = TRUE)
+embedding_project <- list(data_dir = embedding_test_root, analysis_key = "scrna", analysis = "scRNA-seq")
+utils::write.table(
+  data.frame(cell = c("c1", "c2"), UMAP_1 = c(10, 20), UMAP_2 = c(30, 40), cluster = c("0", "1"), condition = c("control", "treated")),
+  file.path(embedding_test_root, "scrna", "tables", "umap_coordinates.tsv"), sep = "\t", row.names = FALSE, quote = FALSE
+)
+utils::write.table(
+  data.frame(cell = c("c1", "c2"), UMAP_1 = c(-1, -2), UMAP_2 = c(-3, -4), sample_id = c("s1", "s2")),
+  file.path(embedding_test_root, "scrna", "tables", "preintegration_umap_coordinates.tsv"), sep = "\t", row.names = FALSE, quote = FALSE
+)
+embedding_views <- app_env$scrna_embedding_view_choices(embedding_project)
+unintegrated_embedding <- app_env$scrna_embedding_table(embedding_project, columns = c("cluster", "condition", "sample_id"), max_points = Inf, view = "unintegrated")
+assert(identical(unname(embedding_views), c("integrated", "unintegrated")), "interactive UMAP offers integrated and unintegrated coordinates when both tables exist")
+assert(identical(unintegrated_embedding$UMAP_1, c(-1, -2)) && identical(as.character(unintegrated_embedding$cluster), c("0", "1")), "unintegrated UMAP retains its coordinates and joins final annotations by exact cell ID")
+unlink(embedding_test_root, recursive = TRUE, force = TRUE)
 assert(identical(unname(app_env$analysis_choices()), c("RNA-seq", "scRNA-seq", "ATAC-seq", "CUT&RUN", "ChIP-seq")), "all analysis selectors use one canonical order and spelling")
 for (key in c("rna", "atac", "cutrun", "chip")) {
   tabs <- app_env$results_explorer_tabs(key)

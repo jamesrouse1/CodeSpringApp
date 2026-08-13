@@ -10557,8 +10557,23 @@ scrna_de_result_file_choices <- function(project, method = c("pseudobulk", "cell
   stats::setNames(files, labels)
 }
 
-scrna_embedding_columns <- function(project) {
-  path <- file.path(scrna_output_dir(project), "tables", "umap_coordinates.tsv")
+scrna_embedding_path <- function(project, view = "integrated") {
+  file <- if (identical(tolower(view %||% "integrated"), "unintegrated")) "preintegration_umap_coordinates.tsv" else "umap_coordinates.tsv"
+  file.path(scrna_output_dir(project), "tables", file)
+}
+
+scrna_embedding_view_choices <- function(project) {
+  paths <- c(
+    integrated = scrna_embedding_path(project, "integrated"),
+    unintegrated = scrna_embedding_path(project, "unintegrated")
+  )
+  ready <- vapply(paths, function(path) file.exists(path) && file_size_for(path) > 0, logical(1))
+  labels <- c(integrated = "Integrated / final UMAP", unintegrated = "Unintegrated UMAP (before correction)")
+  stats::setNames(names(paths)[ready], labels[names(paths)[ready]])
+}
+
+scrna_embedding_columns <- function(project, view = "integrated") {
+  path <- scrna_embedding_path(project, view)
   if (!file.exists(path) || file_size_for(path) <= 0) return(character(0))
   header <- tryCatch(readLines(path, warn = FALSE, n = 1L), error = function(e) character(0))
   if (!length(header)) return(character(0))
@@ -10586,12 +10601,17 @@ scrna_dashboard_gene_choices <- function(project) {
   genes[nzchar(genes)]
 }
 
-scrna_embedding_table <- function(project, columns = character(0), max_points = 30000L, cells = character(0)) {
-  path <- file.path(scrna_output_dir(project), "tables", "umap_coordinates.tsv")
-  headers <- scrna_embedding_columns(project)
+scrna_embedding_table <- function(project, columns = character(0), max_points = 30000L, cells = character(0), view = "integrated") {
+  view <- if (identical(tolower(view %||% "integrated"), "unintegrated")) "unintegrated" else "integrated"
+  path <- scrna_embedding_path(project, view)
+  headers <- scrna_embedding_columns(project, view)
   required <- c("cell", "UMAP_1", "UMAP_2")
   if (!file.exists(path) || !all(required %in% headers)) return(data.frame())
-  keep <- unique(c(required, intersect(as.character(columns %||% character(0)), headers)))
+  requested_columns <- as.character(columns %||% character(0))
+  final_headers <- if (identical(view, "unintegrated")) scrna_embedding_columns(project, "integrated") else character(0)
+  available <- unique(c(headers, final_headers))
+  keep <- unique(c(required, intersect(requested_columns, available)))
+  path_keep <- intersect(keep, headers)
   info <- file.info(path)
   max_points <- suppressWarnings(as.numeric(max_points))
   if (!length(max_points) || is.na(max_points[[1]]) || max_points[[1]] <= 0) max_points <- Inf else max_points <- max_points[[1]]
@@ -10600,12 +10620,26 @@ scrna_embedding_table <- function(project, columns = character(0), max_points = 
   # small and must return the exact selected cells rather than a sampled view.
   use_cache <- !length(requested_cells)
   display_scope <- if (is.finite(max_points)) as.character(max_points) else "all_cells"
-  signature <- paste(normalizePath(path, winslash = "/", mustWork = TRUE), info$size[[1]], as.numeric(info$mtime[[1]]), display_scope, paste(keep, collapse = "\r"), sep = "|")
+  final_path <- scrna_embedding_path(project, "integrated")
+  final_info <- if (identical(view, "unintegrated") && file.exists(final_path)) file.info(final_path) else NULL
+  final_signature <- if (!is.null(final_info)) paste(final_info$size[[1]], as.numeric(final_info$mtime[[1]]), sep = "@") else ""
+  signature <- paste(normalizePath(path, winslash = "/", mustWork = TRUE), info$size[[1]], as.numeric(info$mtime[[1]]), view, final_signature, display_scope, paste(keep, collapse = "\r"), sep = "|")
   if (use_cache && exists(signature, envir = SCRNA_EMBEDDING_CACHE, inherits = FALSE)) return(get(signature, envir = SCRNA_EMBEDDING_CACHE, inherits = FALSE))
   classes <- stats::setNames(rep("NULL", length(headers)), headers)
-  classes[keep] <- NA_character_
+  classes[path_keep] <- NA_character_
   x <- tryCatch(utils::read.delim(path, check.names = FALSE, stringsAsFactors = FALSE, colClasses = classes), error = function(e) data.frame())
   if (!NROW(x) || !all(required %in% names(x))) return(data.frame())
+  missing_metadata <- setdiff(keep, names(x))
+  if (length(missing_metadata) && identical(view, "unintegrated") && file.exists(final_path)) {
+    final_classes <- stats::setNames(rep("NULL", length(final_headers)), final_headers)
+    final_keep <- unique(c("cell", intersect(missing_metadata, final_headers)))
+    final_classes[final_keep] <- NA_character_
+    metadata <- tryCatch(utils::read.delim(final_path, check.names = FALSE, stringsAsFactors = FALSE, colClasses = final_classes), error = function(e) data.frame())
+    if (NROW(metadata) && "cell" %in% names(metadata)) {
+      index <- match(as.character(x$cell), as.character(metadata$cell))
+      for (column in setdiff(final_keep, "cell")) x[[column]] <- metadata[[column]][index]
+    }
+  }
   x$UMAP_1 <- suppressWarnings(as.numeric(x$UMAP_1)); x$UMAP_2 <- suppressWarnings(as.numeric(x$UMAP_2))
   x <- x[is.finite(x$UMAP_1) & is.finite(x$UMAP_2), , drop = FALSE]
   if (length(requested_cells)) x <- x[x$cell %in% requested_cells, , drop = FALSE]
@@ -15574,7 +15608,10 @@ server <- function(input, output, session) {
     }
     choices <- scrna_embedding_color_choices(p)
     if (!length(choices)) return(div(class = "empty-box", "The embedding table has coordinates but no cell-level annotation columns to color."))
+    embedding_views <- scrna_embedding_view_choices(p)
+    selected_view <- selected_choice(isolate(input$scrna_embedding_view), embedding_views, if ("integrated" %in% unname(embedding_views)) "integrated" else unname(embedding_views)[[1]])
     tagList(
+      if (length(embedding_views) > 1L) selectInput("scrna_embedding_view", "UMAP coordinates", choices = embedding_views, selected = selected_view, selectize = FALSE) else NULL,
       fluidRow(
         column(5, radioButtons("scrna_embedding_color_mode", "Color UMAP by", choices = c("Cell metadata" = "metadata", "Marker expression" = "marker"), selected = isolate(input$scrna_embedding_color_mode) %||% "metadata", inline = TRUE)),
         column(5, conditionalPanel("input.scrna_embedding_color_mode == 'metadata'", selectInput("scrna_embedding_color", "Metadata field", choices = choices, selected = selected_choice(isolate(input$scrna_embedding_color), choices, choices[[1]]), selectize = FALSE)), conditionalPanel("input.scrna_embedding_color_mode == 'marker'", selectInput("scrna_embedding_gene", "Marker gene", choices = scrna_dashboard_gene_choices(p), selected = selected_choice(isolate(input$scrna_embedding_gene), scrna_dashboard_gene_choices(p), ""), selectize = TRUE))),
@@ -15648,6 +15685,7 @@ server <- function(input, output, session) {
   })
   if (PLOTLY_AVAILABLE) output$scrna_embedding_plot <- plotly::renderPlotly({
     p <- current_project()
+    embedding_view <- input$scrna_embedding_view %||% "integrated"
     color_mode <- input$scrna_embedding_color_mode %||% "metadata"
     color_column <- if (identical(color_mode, "metadata")) scrna_embedding_color_column(p, input$scrna_embedding_color %||% "") else ""
     if (identical(color_mode, "metadata")) validate(need(nzchar(color_column), "The embedding table has no cell-level annotation columns to color."))
@@ -15656,7 +15694,7 @@ server <- function(input, output, session) {
     if (!is.finite(point_size)) point_size <- 4
     if (!is.finite(opacity)) opacity <- 0.72
     point_size <- max(1, min(8, point_size)); opacity <- max(0.1, min(1, opacity))
-    x <- scrna_embedding_table(p, columns = c(color_column, "sample_id", "condition", "batch", "cluster", "cell_type", "annotation_source"), max_points = Inf)
+    x <- scrna_embedding_table(p, columns = c(color_column, "sample_id", "condition", "batch", "cluster", "cell_type", "annotation_source"), max_points = Inf, view = embedding_view)
     validate(need(NROW(x), "No valid UMAP coordinates are available for this selection."))
     marker_gene <- ""
     if (identical(color_mode, "marker")) {
@@ -15715,7 +15753,7 @@ server <- function(input, output, session) {
     cells <- cells[nzchar(cells)]
     if (!length(cells)) return(data.frame())
     cells <- utils::head(cells, 2000L)
-    x <- scrna_embedding_table(p, columns = c("sample_id", "condition", "batch", "cluster", "cell_type", "annotation_source"), cells = cells)
+    x <- scrna_embedding_table(p, columns = c("sample_id", "condition", "batch", "cluster", "cell_type", "annotation_source"), cells = cells, view = input$scrna_embedding_view %||% "integrated")
     preferred <- intersect(c("cell", "sample_id", "condition", "batch", "cluster", "cell_type", "annotation_source", "UMAP_1", "UMAP_2"), names(x))
     x[, preferred, drop = FALSE]
   }, page_length = 50, scroll_y = "360px")
