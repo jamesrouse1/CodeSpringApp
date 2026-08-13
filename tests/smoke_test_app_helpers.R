@@ -1639,6 +1639,12 @@ assert(
     grepl("bundled MGI ortholog table", app_text, fixed = TRUE),
   "reference annotation submits the bundled ortholog table and explains automatic mouse-human conversion"
 )
+assert(
+  grepl('checkboxInput("scrna_find_cluster_markers"', app_text, fixed = TRUE) &&
+    grepl('find_cluster_markers = isTRUE(input$scrna_find_cluster_markers)', app_text, fixed = TRUE) &&
+    grepl('"find_cluster_markers"', app_text, fixed = TRUE),
+  "cluster-marker discovery is an explicit optional annotation setting rather than an automatic large-cell calculation"
+)
 idle_reference_html <- as.character(app_env$scrna_reference_label_selector_content(
   list(status = "idle", project_id = "scrna/test", choices = data.frame()),
   "scrna/test"
