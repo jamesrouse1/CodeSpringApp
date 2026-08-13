@@ -146,9 +146,16 @@ assert(
   "counts-only projects support laptop uploads and server-side file browsing"
 )
 assert(
-  grepl("CODE_SPRING_UPLOAD_LIMIT_BYTES <- 500 * 1024^2", app_text, fixed = TRUE) &&
+  grepl("CODE_SPRING_UPLOAD_LIMIT_BYTES <- 2 * 1024^3", app_text, fixed = TRUE) &&
     grepl("shiny.maxRequestSize", app_text, fixed = TRUE),
-  "local count-matrix uploads support files larger than Shiny's 5 MB default"
+  "large local uploads, including Seurat references, support files up to 2 GB"
+)
+assert(
+  grepl("Seurat reference label transfer", app_text, fixed = TRUE) &&
+    grepl("scrna_reference_file", app_text, fixed = TRUE) &&
+    grepl("reference_label_column", app_text, fixed = TRUE) &&
+    grepl("c(\"rda\", \"rds\")", app_text, fixed = TRUE),
+  "Seurat projects accept server-side or uploaded .rda/.rds references for label transfer"
 )
 assert(
   grepl("Use selected file", server_source, fixed = TRUE) &&
