@@ -9319,6 +9319,38 @@ write_scrna_manual_gene_sets <- function(project, entries, set_column, directory
   normalizePath(path, winslash = "/", mustWork = TRUE)
 }
 
+read_scrna_reference_label_choices <- function(path) {
+  if (!file.exists(path) || file.info(path)$size <= 0) return(data.frame())
+  choices <- tryCatch(utils::read.delim(path, check.names = FALSE, stringsAsFactors = FALSE), error = function(e) data.frame())
+  required <- c("value", "source", "label_count", "non_missing_cells")
+  if (!NROW(choices) || !all(required %in% names(choices))) return(data.frame())
+  choices$value[is.na(choices$value)] <- ""
+  choices$source <- trimws(as.character(choices$source))
+  choices$label_count <- suppressWarnings(as.integer(choices$label_count))
+  choices <- choices[nzchar(choices$source) & is.finite(choices$label_count) & choices$label_count >= 2L, , drop = FALSE]
+  choices[!duplicated(choices$value), , drop = FALSE]
+}
+
+submit_scrna_reference_inspection <- function(project, reference_file) {
+  reference_file <- normalizePath(reference_file, winslash = "/", mustWork = TRUE)
+  extension <- tolower(tools::file_ext(reference_file))
+  if (!extension %in% c("rda", "rds")) stop("Choose a Seurat .rda or .rds reference.")
+  output_dir <- file.path(project$data_dir, "scrna", "reference_metadata")
+  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+  fingerprint <- paste(basename(reference_file), file.info(reference_file)$size, as.numeric(file.info(reference_file)$mtime), sep = "_")
+  output_path <- file.path(output_dir, paste0(clean_name(fingerprint, "reference"), "_label_choices.tsv"))
+  if (file.exists(output_path)) unlink(output_path)
+  qsub <- file.path(SCRIPTS_DIR, "singleCellRNAseq", "qsub_inspect_seurat_reference.sh")
+  runner <- file.path(SCRIPTS_DIR, "singleCellRNAseq", "inspect_seurat_reference.R")
+  if (!file.exists(qsub) || !file.exists(runner)) stop("CodeSpringLab reference-inspection scripts are unavailable. Update CodeSpringLab and try again.")
+  message <- submit_sbatch(
+    project, "Inspect reference labels", qsub, c(reference_file, output_path, runner),
+    "scrna_reference_labels", paste("Seurat reference", basename(reference_file)),
+    target = output_path, reference = reference_file
+  )
+  list(message = message, output_path = output_path, reference_file = reference_file, job_id = parse_sbatch_job_id(message))
+}
+
 submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto", normalization = "auto", integration = "auto", batch_column = "batch", cluster_resolution = 0.6, min_features = 200, min_counts = 0, max_features = 0, max_percent_mt = 20, min_cells_per_gene = 3, n_pcs = 30, n_neighbors = 15, umap_min_dist = 0.5, umap_spread = 1, umap_metric = "euclidean", umap_init_pos = "spectral", doublet_method = "auto", doublet_rate = 0, remove_doublets = TRUE, seed = 1234, scvi_max_epochs = 400, harmony_theta = 2, harmony_lambda = 1, harmony_max_iter = 20, marker_file = "", celltype_file = "", reference_file = "", marker_upload = NULL, celltype_upload = NULL, reference_upload = NULL, marker_source = "server", celltype_source = "server", reference_source = "server", reference_label_column = "", marker_manual = list(), marker_species = "same", marker_ortholog_file = "", marker_ortholog_upload = NULL, marker_ortholog_source = "server", annotation_name = "cell_type", signature_file = "", signature_upload = NULL, signature_source = "server", signature_manual = list(), signature_species = "same", signature_ortholog_file = "", signature_ortholog_upload = NULL, signature_ortholog_source = "server", de_group_column = "condition", de_reference = "", de_comparison = "", de_annotation_column = "", de_annotation_values = "all", de_method = "both", de_covariates = character(0), pathway_library = "MSigDB_Hallmark_2020", pathway_species = "auto", pathway_ortholog_file = "", pathway_ortholog_upload = NULL, pathway_ortholog_source = "server", pathway_gmt_file = "", pathway_gmt_upload = NULL, pathway_source = "server") {
   if (missing(batch_column)) batch_column <- "sample_id"
   stage <- tolower(trimws(as.character(stage %||% "inspect")))
@@ -11961,6 +11993,7 @@ server <- function(input, output, session) {
   # browser session. A separate immutable TSV snapshot is written on submit.
   scrna_manual_annotation_sets <- reactiveVal(list())
   scrna_manual_signature_sets <- reactiveVal(list())
+  scrna_reference_inspection <- reactiveVal(list(status = "idle", reference_file = "", output_path = "", job_id = "", choices = data.frame(), message = ""))
   cutrun_normalization_choice <- reactiveVal("spikein")
   genome_browser_mode_state <- reactiveVal("")
   path_browser <- reactiveValues(target = "", mode = "dir", path = CURRENT_HOME, selected_file = "", message = "")
@@ -12427,6 +12460,66 @@ server <- function(input, output, session) {
   })
   observeEvent(input$browse_scrna_reference_file, {
     open_server_browser("scrna_reference_file", "file", input$scrna_reference_file %||% "")
+  })
+  observeEvent(input$inspect_scrna_reference_labels, {
+    p <- current_project()
+    source <- input$scrna_reference_source %||% "server"
+    result <- tryCatch({
+      reference_file <- if (identical(source, "upload")) {
+        copy_uploaded_project_file(
+          input$scrna_reference_upload,
+          file.path(p$data_dir, "uploads", "annotations", "seurat_references"),
+          "Seurat reference object", c("rda", "rds")
+        )
+      } else {
+        path.expand(trimws(input$scrna_reference_file %||% ""))
+      }
+      if (!nzchar(reference_file) || !file.exists(reference_file)) stop("Choose an existing Seurat .rda or .rds reference first.")
+      submit_scrna_reference_inspection(p, reference_file)
+    }, error = function(e) e)
+    if (inherits(result, "error")) {
+      scrna_reference_inspection(list(status = "error", reference_file = "", output_path = "", job_id = "", choices = data.frame(), message = conditionMessage(result)))
+      showNotification(conditionMessage(result), type = "error", duration = 8)
+      return()
+    }
+    scrna_reference_inspection(c(result, list(status = "submitted", choices = data.frame())))
+    showNotification("Reference inspection submitted. Label choices will appear here when it finishes.", type = "message", duration = 6)
+  }, ignoreInit = TRUE)
+
+  observe({
+    state <- scrna_reference_inspection()
+    if (!identical(state$status %||% "", "submitted")) return()
+    invalidateLater(2500, session)
+    choices <- read_scrna_reference_label_choices(state$output_path %||% "")
+    if (!NROW(choices)) return()
+    state$status <- "ready"
+    state$choices <- choices
+    state$message <- paste0("Loaded ", NROW(choices), " valid label source", if (NROW(choices) == 1L) "" else "s", " from ", basename(state$reference_file), ".")
+    scrna_reference_inspection(state)
+  })
+
+  output$scrna_reference_label_selector_ui <- renderUI({
+    state <- scrna_reference_inspection()
+    choices <- state$choices
+    if (!is.data.frame(choices) || !NROW(choices)) {
+      values <- c("Active identities" = "")
+    } else {
+      labels <- paste0(choices$source, " — ", choices$label_count, " labels")
+      values <- stats::setNames(as.character(choices$value), labels)
+    }
+    selected <- isolate(input$scrna_reference_label_column) %||% ""
+    if (!selected %in% unname(values)) selected <- ""
+    status_text <- switch(
+      state$status %||% "idle",
+      submitted = paste0("Reading the reference", if (nzchar(state$job_id %||% "")) paste0(" (job ", state$job_id, ")") else "", "…"),
+      ready = state$message %||% "Reference label choices are ready.",
+      error = state$message %||% "Reference inspection failed.",
+      "Select a reference, then inspect it to load its valid label fields."
+    )
+    tagList(
+      selectInput("scrna_reference_label_column", "Reference labels to transfer", choices = values, selected = selected, selectize = FALSE),
+      tags$p(class = "muted small-note", status_text)
+    )
   })
   observeEvent(input$browse_scrna_signature_file, {
     open_server_browser("scrna_signature_file", "file", input$scrna_signature_file %||% "")
@@ -14144,7 +14237,8 @@ server <- function(input, output, session) {
         radioButtons("scrna_reference_source", "Seurat reference source", choices = c("Browse or paste a server path" = "server", "Upload from laptop" = "upload"), selected = isolate(input$scrna_reference_source) %||% "server", inline = TRUE),
         conditionalPanel("input.scrna_reference_source == 'server'", div(class = "new-project-path-control", textInput("scrna_reference_file", "Seurat reference object", value = isolate(input$scrna_reference_file) %||% "", placeholder = "Absolute server path to a .rda or .rds reference"), actionButton("browse_scrna_reference_file", "Browse server", class = "btn-default"))),
         conditionalPanel("input.scrna_reference_source == 'upload'", fileInput("scrna_reference_upload", "Seurat reference from laptop", accept = c(".rda", ".rds"))),
-        textInput("scrna_reference_label_column", "Optional reference label column", value = isolate(input$scrna_reference_label_column) %||% "", placeholder = "Blank uses the reference's active identities"),
+        actionButton("inspect_scrna_reference_labels", "Inspect reference labels", class = "btn-default"),
+        uiOutput("scrna_reference_label_selector_ui"),
         tags$p(class = "muted small-note", "The output includes the transferred label, maximum prediction score, label counts, and a transfer audit table.")
       ),
       conditionalPanel("input.scrna_annotation_method == 'mapping'",

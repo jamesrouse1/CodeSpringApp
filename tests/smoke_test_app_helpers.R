@@ -153,10 +153,19 @@ assert(
 assert(
   grepl("Seurat reference label transfer", app_text, fixed = TRUE) &&
     grepl("scrna_reference_file", app_text, fixed = TRUE) &&
-    grepl("reference_label_column", app_text, fixed = TRUE) &&
+    grepl("Inspect reference labels", app_text, fixed = TRUE) &&
+    grepl("scrna_reference_label_selector_ui", app_text, fixed = TRUE) &&
     grepl("c(\"rda\", \"rds\")", app_text, fixed = TRUE),
-  "Seurat projects accept server-side or uploaded .rda/.rds references for label transfer"
+  "Seurat projects inspect server-side or uploaded references and select a valid label source"
 )
+reference_choice_file <- tempfile(fileext = ".tsv")
+utils::write.table(
+  data.frame(value = c("", "cell_type"), source = c("Active identities", "cell_type"), label_count = c(4, 4), non_missing_cells = c(100, 100), stringsAsFactors = FALSE),
+  reference_choice_file, sep = "\t", row.names = FALSE, quote = FALSE
+)
+reference_choices <- app_env$read_scrna_reference_label_choices(reference_choice_file)
+assert(NROW(reference_choices) == 2L && identical(reference_choices$value, c("", "cell_type")), "reference label-choice files preserve active identities and valid metadata fields")
+unlink(reference_choice_file)
 assert(
   grepl("Use selected file", server_source, fixed = TRUE) &&
     grepl("file.access(value, mode = 4)", server_source, fixed = TRUE),
