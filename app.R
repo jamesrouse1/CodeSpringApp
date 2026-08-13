@@ -11993,6 +11993,7 @@ server <- function(input, output, session) {
   # browser session. A separate immutable TSV snapshot is written on submit.
   scrna_manual_annotation_sets <- reactiveVal(list())
   scrna_manual_signature_sets <- reactiveVal(list())
+  scrna_annotation_ui_settings <- reactiveVal(list())
   scrna_reference_inspection <- reactiveVal(list(status = "idle", project_id = "", reference_file = "", output_path = "", job_id = "", choices = data.frame(), message = ""))
   cutrun_normalization_choice <- reactiveVal("spikein")
   genome_browser_mode_state <- reactiveVal("")
@@ -12463,7 +12464,7 @@ server <- function(input, output, session) {
   })
   observeEvent(input$inspect_scrna_reference_labels, {
     p <- current_project()
-    source <- input$scrna_reference_source %||% "server"
+    source <- input$scrna_reference_source %||% isolate(scrna_annotation_ui_state(p)$reference_source) %||% "server"
     result <- tryCatch({
       reference_file <- if (identical(source, "upload")) {
         copy_uploaded_project_file(
@@ -12542,7 +12543,7 @@ server <- function(input, output, session) {
     if (!is.data.frame(choices) || !NROW(choices)) {
       values <- c("Active identities" = "")
     } else {
-      labels <- paste0(choices$source, " — ", choices$label_count, " labels")
+      labels <- paste0(choices$source, " (", choices$label_count, " labels)")
       values <- stats::setNames(as.character(choices$value), labels)
     }
     selected <- isolate(input$scrna_reference_label_column) %||% ""
@@ -12555,7 +12556,18 @@ server <- function(input, output, session) {
       "Select a reference, then inspect it to load its valid label fields."
     )
     tagList(
-      selectInput("scrna_reference_label_column", "Reference labels to transfer", choices = values, selected = selected, selectize = FALSE),
+      radioButtons("scrna_reference_label_column", "Reference labels to transfer", choices = values, selected = selected, inline = FALSE),
+      if (is.data.frame(choices) && NROW(choices)) div(
+        class = "resource-strip",
+        lapply(seq_len(NROW(choices)), function(i) div(
+          class = "resource-card",
+          tags$strong(paste0(choices$source[[i]], " — ", choices$label_count[[i]], " labels")),
+          tags$p(class = "muted small-note", paste(format_metric_value(choices$non_missing_cells[[i]]), "labeled cells")),
+          if ("preview" %in% names(choices) && nzchar(trimws(as.character(choices$preview[[i]])))) {
+            tags$p(class = "status-path reference-label-preview", paste("Examples:", choices$preview[[i]]))
+          } else NULL
+        ))
+      ) else NULL,
       if (identical(status, "submitted")) div(
         class = "summary-job-status active",
         div(class = "summary-job-heading", tags$strong("Reference inspection is running"), tags$span(if (nzchar(state$job_id %||% "")) paste("SLURM job", state$job_id) else "Submitted")),
@@ -12946,6 +12958,23 @@ server <- function(input, output, session) {
     collections[[scrna_manual_project_key(project)]] <- entries
     store(collections)
     invisible(entries)
+  }
+  scrna_annotation_ui_state <- function(project = current_project()) {
+    states <- scrna_annotation_ui_settings()
+    states[[scrna_manual_project_key(project)]] %||% list(
+      method = "markers", marker_source = "manual", reference_source = "server", celltype_source = "server"
+    )
+  }
+  set_scrna_annotation_ui_value <- function(name, value, project = current_project()) {
+    value <- trimws(as.character(value %||% ""))
+    if (!nzchar(value)) return(invisible(NULL))
+    states <- isolate(scrna_annotation_ui_settings())
+    key <- scrna_manual_project_key(project)
+    state <- states[[key]] %||% list(method = "markers", marker_source = "manual", reference_source = "server", celltype_source = "server")
+    state[[name]] <- value
+    states[[key]] <- state
+    scrna_annotation_ui_settings(states)
+    invisible(value)
   }
   add_scrna_manual_entry <- function(store, name, gene_text, label) {
     entry <- scrna_manual_gene_entry(name, gene_text, label, minimum_genes = 2L)
@@ -14233,6 +14262,19 @@ server <- function(input, output, session) {
     }
   }, ignoreInit = TRUE)
 
+  observeEvent(input$scrna_annotation_method, {
+    set_scrna_annotation_ui_value("method", input$scrna_annotation_method)
+  }, ignoreInit = TRUE)
+  observeEvent(input$scrna_marker_source, {
+    set_scrna_annotation_ui_value("marker_source", input$scrna_marker_source)
+  }, ignoreInit = TRUE)
+  observeEvent(input$scrna_reference_source, {
+    set_scrna_annotation_ui_value("reference_source", input$scrna_reference_source)
+  }, ignoreInit = TRUE)
+  observeEvent(input$scrna_celltype_source, {
+    set_scrna_annotation_ui_value("celltype_source", input$scrna_celltype_source)
+  }, ignoreInit = TRUE)
+
   output$scrna_annotation_settings_ui <- renderUI({
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
     engine <- scrna_ui_engine()
@@ -14241,7 +14283,11 @@ server <- function(input, output, session) {
     output_name <- if (identical(engine, "scanpy")) "processed_scanpy.h5ad" else "processed_seurat.rds"
     annotation_methods <- c("Marker-list scoring" = "markers", "Direct per-cell mapping" = "mapping")
     if (identical(engine, "seurat")) annotation_methods <- c(annotation_methods, "Seurat reference label transfer" = "reference")
-    selected_method <- isolate(input$scrna_annotation_method) %||% "markers"
+    ui_state <- isolate(scrna_annotation_ui_state(p))
+    inspection_state <- isolate(scrna_reference_inspection())
+    retained_reference <- identical(as.character(inspection_state$project_id %||% ""), as.character(p$id %||% p$name)) &&
+      nzchar(inspection_state$reference_file %||% "") && file.exists(inspection_state$reference_file %||% "")
+    selected_method <- ui_state$method %||% isolate(input$scrna_annotation_method) %||% "markers"
     if (!selected_method %in% unname(annotation_methods)) selected_method <- "markers"
     tagList(
       div(class = "read-source-note",
@@ -14253,7 +14299,7 @@ server <- function(input, output, session) {
       tags$p(class = "muted small-note", "Use a new name for each marker system (for example cell_type_broad and cell_type_fine). Existing annotation and signature metadata are retained in the processed object."),
       radioButtons("scrna_annotation_method", "Annotation method", choices = annotation_methods, selected = selected_method, inline = TRUE),
       conditionalPanel("input.scrna_annotation_method == 'markers'",
-      radioButtons("scrna_marker_source", "How do you want to provide marker genes?", choices = c("Enter cell types here" = "manual", "Browse or paste a server path" = "server", "Upload from laptop" = "upload"), selected = isolate(input$scrna_marker_source) %||% "manual", inline = TRUE),
+      radioButtons("scrna_marker_source", "How do you want to provide marker genes?", choices = c("Enter cell types here" = "manual", "Browse or paste a server path" = "server", "Upload from laptop" = "upload"), selected = ui_state$marker_source %||% "manual", inline = TRUE),
       conditionalPanel("input.scrna_marker_source == 'manual'", div(class = "read-source-note",
         tags$strong("Add one cell type at a time"),
         tags$p("Give the cell type a clear name, enter one marker gene per line, and add it to the collection. Re-entering the same cell-type name replaces that entry."),
@@ -14279,16 +14325,21 @@ server <- function(input, output, session) {
           tags$p("Choose a saved Seurat .rda or .rds reference. CodeSpringLab transfers its active identities to the query using normalized RNA and Seurat anchors; the query's existing integrated and unintegrated UMAPs are retained."),
           tags$p("Large references are best selected by server path. Laptop uploads up to 2 GB are supported and copied into this project." )
         ),
-        radioButtons("scrna_reference_source", "Seurat reference source", choices = c("Browse or paste a server path" = "server", "Upload from laptop" = "upload"), selected = isolate(input$scrna_reference_source) %||% "server", inline = TRUE),
+        radioButtons("scrna_reference_source", "Seurat reference source", choices = c("Browse or paste a server path" = "server", "Upload from laptop" = "upload"), selected = ui_state$reference_source %||% "server", inline = TRUE),
         conditionalPanel("input.scrna_reference_source == 'server'", div(class = "new-project-path-control", textInput("scrna_reference_file", "Seurat reference object", value = isolate(input$scrna_reference_file) %||% "", placeholder = "Absolute server path to a .rda or .rds reference"), actionButton("browse_scrna_reference_file", "Browse server", class = "btn-default"))),
         conditionalPanel("input.scrna_reference_source == 'upload'", fileInput("scrna_reference_upload", "Seurat reference from laptop", accept = c(".rda", ".rds"))),
+        if (identical(ui_state$reference_source %||% "server", "upload") && retained_reference) div(
+          class = "summary-job-status complete",
+          tags$strong("Uploaded reference retained for this project"),
+          tags$p(class = "muted small-note", basename(inspection_state$reference_file), "You do not need to upload it again when this panel refreshes.")
+        ) else NULL,
         uiOutput("scrna_reference_inspect_button_ui"),
         uiOutput("scrna_reference_label_selector_ui"),
         tags$p(class = "muted small-note", "The output includes the transferred label, maximum prediction score, label counts, and a transfer audit table.")
       ),
       conditionalPanel("input.scrna_annotation_method == 'mapping'",
         tags$p(class = "muted small-note", "Use this when you already have a cell/barcode-to-cell-type table."),
-        radioButtons("scrna_celltype_source", "Cell-to-cell-type mapping source", choices = c("Browse or paste a server path" = "server", "Upload from laptop" = "upload"), selected = isolate(input$scrna_celltype_source) %||% "server", inline = TRUE),
+        radioButtons("scrna_celltype_source", "Cell-to-cell-type mapping source", choices = c("Browse or paste a server path" = "server", "Upload from laptop" = "upload"), selected = ui_state$celltype_source %||% "server", inline = TRUE),
         conditionalPanel("input.scrna_celltype_source == 'server'", div(class = "new-project-path-control", textInput("scrna_celltype_file", "Cell-to-cell-type mapping", value = isolate(input$scrna_celltype_file) %||% "", placeholder = "Absolute server .tsv with cell/barcode and cell_type columns"), actionButton("browse_scrna_celltype_file", "Browse server", class = "btn-default"))),
         conditionalPanel("input.scrna_celltype_source == 'upload'", fileInput("scrna_celltype_upload", "Cell-to-cell-type mapping from laptop", accept = c(".tsv", ".txt")))
       )
@@ -14823,7 +14874,13 @@ server <- function(input, output, session) {
     multiple_inputs <- NROW(scrna_manifest(p)) > 1L
     single_biological_sample <- length(scrna_biological_sample_ids(p)) <= 1L
     integration_choice <- if (!multiple_inputs || isTRUE(input$scrna_cluster_without_integration)) "none" else input$scrna_integration %||% "auto"
-    annotation_method <- input$scrna_annotation_method %||% "markers"
+    annotation_ui <- isolate(scrna_annotation_ui_state(p))
+    annotation_method <- input$scrna_annotation_method %||% annotation_ui$method %||% "markers"
+    reference_source <- input$scrna_reference_source %||% annotation_ui$reference_source %||% "server"
+    inspected_reference <- isolate(scrna_reference_inspection())
+    retained_reference <- identical(as.character(inspected_reference$project_id %||% ""), as.character(p$id %||% p$name)) &&
+      nzchar(inspected_reference$reference_file %||% "") && file.exists(inspected_reference$reference_file %||% "")
+    use_retained_reference <- identical(annotation_method, "reference") && identical(reference_source, "upload") && retained_reference
     run_submission(
       label,
       submit_scrna_pipeline_job(
@@ -14855,13 +14912,13 @@ server <- function(input, output, session) {
         harmony_max_iter = input$scrna_harmony_max_iter %||% 20,
         marker_file = if (identical(annotation_method, "markers")) input$scrna_marker_file %||% "" else "",
         celltype_file = if (identical(annotation_method, "mapping")) input$scrna_celltype_file %||% "" else "",
-        reference_file = if (identical(annotation_method, "reference")) input$scrna_reference_file %||% "" else "",
+        reference_file = if (use_retained_reference) inspected_reference$reference_file else if (identical(annotation_method, "reference")) input$scrna_reference_file %||% "" else "",
         marker_upload = if (identical(annotation_method, "markers")) input$scrna_marker_upload else NULL,
         celltype_upload = if (identical(annotation_method, "mapping")) input$scrna_celltype_upload else NULL,
-        reference_upload = if (identical(annotation_method, "reference")) input$scrna_reference_upload else NULL,
+        reference_upload = if (identical(annotation_method, "reference") && !use_retained_reference) input$scrna_reference_upload else NULL,
         marker_source = if (identical(annotation_method, "markers")) input$scrna_marker_source %||% "manual" else "server",
         celltype_source = if (identical(annotation_method, "mapping")) input$scrna_celltype_source %||% "server" else "server",
-        reference_source = if (identical(annotation_method, "reference")) input$scrna_reference_source %||% "server" else "server",
+        reference_source = if (use_retained_reference) "server" else if (identical(annotation_method, "reference")) reference_source else "server",
         reference_label_column = if (identical(annotation_method, "reference")) input$scrna_reference_label_column %||% "" else "",
         marker_manual = isolate(scrna_manual_entries(scrna_manual_annotation_sets, p)),
         marker_species = input$scrna_marker_species %||% "same",

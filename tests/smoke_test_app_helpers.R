@@ -1618,6 +1618,12 @@ assert(
   "reference-label inspection has a persistent running state and disabled progress button"
 )
 assert(
+  grepl("scrna_annotation_ui_settings", app_text, fixed = TRUE) &&
+    grepl("Uploaded reference retained for this project", app_text, fixed = TRUE) &&
+    grepl("reference-label-preview", app_text, fixed = TRUE),
+  "reference annotation retains the selected method/upload and shows readable label previews"
+)
+assert(
   is.infinite(app_env$scrna_cellranger_max_parallel()) &&
     grepl("dependency_condition = \"afterany\"", app_text, fixed = TRUE) &&
     grepl("BAM generation is disabled", app_text, fixed = TRUE) &&
