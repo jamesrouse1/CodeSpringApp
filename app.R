@@ -723,7 +723,9 @@ new_project_from_inputs <- function(input) {
     design_path <- file.path(data_dir, "manifest", "design_matrix.txt")
     fastq_dirs <- character(0)
   } else {
-    results_root <- normalizePath(path.expand(input$new_results_root %||% DEFAULT_RESULTS_ROOT), winslash = "/", mustWork = FALSE)
+    requested_results_root <- trimws(as.character(input$new_results_root %||% ""))
+    if (!nzchar(requested_results_root)) requested_results_root <- DEFAULT_RESULTS_ROOT
+    results_root <- normalizePath(path.expand(requested_results_root), winslash = "/", mustWork = FALSE)
     data_dir <- file.path(results_root, project_name, "data")
     if (identical(key, "scrna")) {
       design_path <- file.path(data_dir, "manifest", "scrna_samples.tsv")
@@ -12493,11 +12495,14 @@ server <- function(input, output, session) {
     if (!identical(input$project_id, "__new__")) return(NULL)
     new_analysis_key <- analysis_key(input$new_project_analysis %||% input$analysis %||% "RNA-seq")
     example <- example_dataset_paths(new_analysis_key)
-    default_fastq_dir <- example$fastq_dir %||% ""
-    default_design_dir <- example$design_dir %||% ""
+    # A normal new project must never inherit bundled example inputs. The
+    # example paths are populated only by the explicit Use Example Dataset
+    # action below.
+    default_fastq_dir <- ""
+    default_design_dir <- ""
     scrna_results_location_control <- if (identical(new_analysis_key, "scrna")) tagList(
       div(class = "new-project-path-control",
-        textInput("new_results_root", "Results output storage location", value = DEFAULT_RESULTS_ROOT, placeholder = "Where CodeSpringApp should store this project's results"),
+        textInput("new_results_root", "Results output storage location", value = "", placeholder = paste("Optional; defaults to", DEFAULT_RESULTS_ROOT)),
         actionButton("browse_new_results_root", "Browse server", class = "btn-default")
       ),
       checkboxInput("new_clear_existing_results", "Clear existing results if this project folder already exists", value = FALSE)
@@ -12652,7 +12657,7 @@ server <- function(input, output, session) {
       if (!identical(new_analysis_key, "scrna")) conditionalPanel(
         "input.new_project_mode != 'existing_results'",
         div(class = "new-project-path-control",
-            textInput("new_results_root", "Results root", value = DEFAULT_RESULTS_ROOT, placeholder = "Where CodeSpringApp should write project results"),
+            textInput("new_results_root", "Results root", value = "", placeholder = paste("Optional; defaults to", DEFAULT_RESULTS_ROOT)),
             actionButton("browse_new_results_root", "Browse server", class = "btn-default")
         ),
         checkboxInput("new_clear_existing_results", "Clear existing results if this project folder already exists", value = FALSE)
@@ -12697,6 +12702,7 @@ server <- function(input, output, session) {
     updateRadioButtons(session, "new_fastq_location_mode", selected = "one")
     updateTextInput(session, "new_fastq_dir", value = example$fastq_dir)
     updateTextInput(session, "new_design_matrix_path", value = example$design_dir)
+    updateTextInput(session, "new_results_root", value = DEFAULT_RESULTS_ROOT)
     updateSelectInput(session, "new_species", selected = example$species %||% "mouse")
     updateRadioButtons(session, "new_paired_end", selected = example$paired_end %||% "paired")
     output$create_project_status <- renderText(paste("Loaded the bundled", analysis_label(key), "example paths. Choose a project name and click Create project."))

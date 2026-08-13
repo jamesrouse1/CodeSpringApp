@@ -163,6 +163,25 @@ assert(any(grepl("codespringIgvLoadPromise", runtime_text, fixed = TRUE)), "IGV 
 assert(grepl("comparison_default_locus", server_source, fixed = TRUE) && grepl("locus_override = top_peak", server_source, fixed = TRUE), "each differential comparison defaults IGV to its most significant ranked peak")
 assert(app_env$path_is_within(app_env$APP_HOME, app_env$CURRENT_HOME), "private app state is derived from the effective Unix user's home")
 assert(identical(app_env$DEFAULT_RESULTS_ROOT, normalizePath(file.path(app_env$CURRENT_HOME, "csl_results"), winslash = "/", mustWork = FALSE)), "default results root is derived from the effective Unix user's home")
+blank_new_project <- app_env$new_project_from_inputs(list(
+  new_project_analysis = "RNA-seq",
+  new_project_name = "blank_setup_test",
+  new_project_mode = "new",
+  new_results_root = "",
+  new_design_matrix_path = "",
+  new_fastq_location_mode = "one",
+  new_fastq_dir = "",
+  new_paired_end = "paired"
+))
+assert(identical(blank_new_project$results_root, app_env$DEFAULT_RESULTS_ROOT), "a blank results field safely falls back to the current user's results root")
+assert(!app_env$is_bundled_example_design(blank_new_project$design_matrix_path), "a normal new project does not inherit a bundled example design matrix")
+assert(!nzchar(blank_new_project$fastq_dir), "a normal new project does not inherit bundled example FASTQs")
+assert(
+  grepl('default_fastq_dir <- ""', app_text, fixed = TRUE) &&
+    grepl('default_design_dir <- ""', app_text, fixed = TRUE) &&
+    grepl('updateTextInput(session, "new_results_root", value = DEFAULT_RESULTS_ROOT)', app_text, fixed = TRUE),
+  "bundled example paths are loaded only by the explicit example-data action"
+)
 assert(identical(unname(app_env$analysis_choices()), c("RNA-seq", "scRNA-seq", "ATAC-seq", "CUT&RUN", "ChIP-seq")), "all analysis selectors use one canonical order and spelling")
 for (key in c("rna", "atac", "cutrun", "chip")) {
   tabs <- app_env$results_explorer_tabs(key)
