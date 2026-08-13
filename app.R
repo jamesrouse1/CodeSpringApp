@@ -13731,7 +13731,7 @@ server <- function(input, output, session) {
     if (identical(scrna_ui_engine(), "seurat")) {
       list(
         normalization = c("Automatic (SCTransform v2)" = "auto", "SCTransform v2" = "sct", "LogNormalize" = "lognormalize"),
-        integration = c("Automatic (RPCA when a technical batch is selected)" = "auto", "No integration" = "none", "RPCA (conservative)" = "rpca", "CCA (stronger correction)" = "cca", "Harmony" = "harmony"),
+        integration = c("Automatic (Harmony when a technical batch is selected)" = "auto", "No integration" = "none", "Harmony" = "harmony", "RPCA (anchor-based; smaller datasets)" = "rpca", "CCA (anchor-based; smaller datasets)" = "cca"),
         doublets = c("Automatic (scDblFinder)" = "auto", "No doublet detection" = "none", "scDblFinder" = "scdblfinder")
       )
     } else {
@@ -14209,7 +14209,7 @@ server <- function(input, output, session) {
     batch_values <- batch_values[nzchar(batch_values)]
     input_kinds <- ifelse(grepl("\\.h5ad$", manifest$input_path, ignore.case = TRUE), "AnnData", ifelse(grepl("\\.rds$", manifest$input_path, ignore.case = TRUE), "Seurat", "10x matrix"))
     integration_note <- if (length(batch_values) >= 2L) {
-      if (identical(engine, "scanpy")) paste0("Use automatic integration (Harmony) for the ", length(batch_values), " values in technical field ‘", batch_column, "’. Choose scVI only when its dedicated runtime is available.") else paste0("Use automatic integration (conservative RPCA) for the ", length(batch_values), " values in technical field ‘", batch_column, "’.")
+      if (identical(engine, "scanpy")) paste0("Use automatic integration (Harmony) for the ", length(batch_values), " values in technical field ‘", batch_column, "’. Choose scVI only when its dedicated runtime is available.") else paste0("Use automatic integration (Harmony) for the ", length(batch_values), " values in technical field ‘", batch_column, "’. Anchor-based RPCA/CCA remain available for smaller datasets.")
     } else {
       "No multi-level technical batch is selected, so keep integration at Automatic/None; do not use biological condition as a batch field."
     }

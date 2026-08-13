@@ -182,6 +182,11 @@ assert(
     grepl('updateTextInput(session, "new_results_root", value = DEFAULT_RESULTS_ROOT)', app_text, fixed = TRUE),
   "bundled example paths are loaded only by the explicit example-data action"
 )
+assert(
+  grepl("Automatic (Harmony when a technical batch is selected)", app_text, fixed = TRUE) &&
+    grepl("RPCA (anchor-based; smaller datasets)", app_text, fixed = TRUE),
+  "Seurat automatic integration uses scalable Harmony while retaining explicit anchor methods for smaller datasets"
+)
 assert(identical(unname(app_env$analysis_choices()), c("RNA-seq", "scRNA-seq", "ATAC-seq", "CUT&RUN", "ChIP-seq")), "all analysis selectors use one canonical order and spelling")
 for (key in c("rna", "atac", "cutrun", "chip")) {
   tabs <- app_env$results_explorer_tabs(key)
