@@ -201,6 +201,7 @@ utils::write.table(
 embedding_views <- app_env$scrna_embedding_view_choices(embedding_project)
 unintegrated_embedding <- app_env$scrna_embedding_table(embedding_project, columns = c("cluster", "condition", "sample_id"), max_points = Inf, view = "unintegrated")
 assert(identical(unname(embedding_views), c("integrated", "unintegrated")), "interactive UMAP offers integrated and unintegrated coordinates when both tables exist")
+assert(grepl("After integration / final clustering UMAP", app_text, fixed = TRUE), "run section labels the final post-integration UMAP")
 assert(identical(unintegrated_embedding$UMAP_1, c(-1, -2)) && identical(as.character(unintegrated_embedding$cluster), c("0", "1")), "unintegrated UMAP retains its coordinates and joins final annotations by exact cell ID")
 unlink(file.path(embedding_test_root, "scrna", "tables", "umap_coordinates.tsv"))
 assert(identical(app_env$scrna_selected_embedding_view(embedding_project, ""), "unintegrated"), "interactive UMAP displays the unintegrated coordinates while integration is still running")

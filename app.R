@@ -15430,8 +15430,8 @@ server <- function(input, output, session) {
     clusters <- files[grepl("_clusters_pre_annotation\\.png$", unname(files), ignore.case = TRUE)]
     selected <- selected_choice(input$scrna_umap_output, files, unname(if (length(clusters)) clusters else files)[[1]])
     tagList(
-      tags$h4("UMAP preview"),
-      tags$p(class = "muted small-note", "This is the UMAP generated with the parameters selected above, before any cell-type labels are applied."),
+      tags$h4("After integration / final clustering UMAP"),
+      tags$p(class = "muted small-note", "This appears as soon as UMAP & clustering completes. It uses the integrated coordinates when Harmony, RPCA, CCA, or scVI was selected; with integration disabled it uses PCA directly. Cell-type labels have not yet been applied."),
       selectInput("scrna_umap_output", "UMAP figure", choices = files, selected = selected, selectize = FALSE),
       image_or_file_ui(selected, "760px")
     )
