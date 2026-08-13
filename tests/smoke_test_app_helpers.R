@@ -17,7 +17,8 @@ recursive_fastqs <- c(
   file.path(recursive_fastq_root, "batch_2026", "Sample_ECO-18", "fastq", "ECO-18_L007_001.R1.fastq.gz"),
   file.path(recursive_fastq_root, "batch_2026", "Sample_ECO-18", "fastq", "ECO-18_L007_001.R2.fastq.gz"),
   file.path(recursive_fastq_root, "batch_2026", "Sample_ECO-18", "fastq", "ECO-18_L008_001.R1.fastq.gz"),
-  file.path(recursive_fastq_root, "batch_2026", "Sample_ECO-18", "fastq", "ECO-18_L008_001.R2.fastq.gz")
+  file.path(recursive_fastq_root, "batch_2026", "Sample_ECO-18", "fastq", "ECO-18_L008_001.R2.fastq.gz"),
+  file.path(recursive_fastq_root, "batch_2025", "ECO-02", "ECO-02_batch2025_singletons.fastq.gz")
 )
 file.create(recursive_fastqs)
 recursive_scan <- app_env$scan_fastq_dirs(
@@ -30,6 +31,7 @@ assert(NROW(recursive_scan) == 2L && all(grepl("^paired", recursive_scan$status)
 assert(all(startsWith(as.character(recursive_scan$filename), "/")), "recursive FASTQ discovery preserves absolute source paths")
 assert(all(nzchar(as.character(recursive_scan$sample))), "recursive FASTQ discovery automatically infers sample identifiers")
 assert(any(grepl(";", recursive_scan$filename, fixed = TRUE)), "recursive FASTQ discovery pools multiple lanes for one inferred sample")
+assert(!any(grepl("singleton|orphan|unpaired", recursive_scan$filename, ignore.case = TRUE)), "automatic FASTQ discovery excludes singleton and orphan recovery files")
 unlink(recursive_fastq_root, recursive = TRUE, force = TRUE)
 runtime_files <- c(
   file.path(repo_root, "app.R"),

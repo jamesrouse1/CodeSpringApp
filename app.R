@@ -1130,6 +1130,15 @@ fastq_files <- function(folder) {
   if (!dir.exists(folder)) return(character(0))
   files <- list.files(folder, recursive = TRUE, full.names = TRUE, all.files = FALSE)
   files <- files[grepl(fastq_suffix_regex, tolower(files))]
+  # BAM-to-FASTQ recovery commonly emits an empty singleton/orphan file beside
+  # the real R1/R2 pair. These are diagnostic leftovers, not independent
+  # sequencing samples, and must never be included by automatic discovery.
+  recovery_leftover <- grepl(
+    "(^|[._-])(singletons?|orphans?|unpaired)([._-]|$)",
+    tolower(basename(files)),
+    perl = TRUE
+  )
+  files <- files[!recovery_leftover]
   unique(normalizePath(files, winslash = "/", mustWork = FALSE))
 }
 
