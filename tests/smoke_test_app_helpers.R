@@ -1633,6 +1633,12 @@ assert(
     grepl("reference-label-preview", app_text, fixed = TRUE),
   "reference annotation retains the selected method/upload and shows readable label previews"
 )
+assert(
+  grepl('"reference_ortholog_file"', app_text, fixed = TRUE) &&
+    grepl("Reference and query species are detected", app_text, fixed = TRUE) &&
+    grepl("bundled MGI ortholog table", app_text, fixed = TRUE),
+  "reference annotation submits the bundled ortholog table and explains automatic mouse-human conversion"
+)
 idle_reference_html <- as.character(app_env$scrna_reference_label_selector_content(
   list(status = "idle", project_id = "scrna/test", choices = data.frame()),
   "scrna/test"
