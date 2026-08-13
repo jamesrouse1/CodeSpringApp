@@ -1128,8 +1128,9 @@ fastq_suffix_regex <- "\\.(fastq\\.gz|fq\\.gz|fastq|fq)$"
 
 fastq_files <- function(folder) {
   if (!dir.exists(folder)) return(character(0))
-  files <- list.files(folder, full.names = FALSE)
-  files[grepl(fastq_suffix_regex, tolower(files))]
+  files <- list.files(folder, recursive = TRUE, full.names = TRUE, all.files = FALSE)
+  files <- files[grepl(fastq_suffix_regex, tolower(files))]
+  unique(normalizePath(files, winslash = "/", mustWork = FALSE))
 }
 
 mate_name <- function(x, mate = 2) {
@@ -1151,7 +1152,31 @@ infer_sample <- function(x) {
   stem <- sub(fastq_suffix_regex, "", basename(x), ignore.case = TRUE)
   stem <- sub("([._-]R)[12]([._-]?[0-9]*)$", "", stem, ignore.case = TRUE)
   stem <- sub("([._-])[12]$", "", stem)
+  # Strip common demultiplexing details while retaining an explicit batch tag
+  # such as _batch2025. This turns NYGC delivery names into stable biological
+  # sample IDs and lets separate lanes pool into one design row.
+  stem <- sub("_[ACGTN]+-[ACGTN]+_[A-Za-z0-9]+_L[0-9]{3}_[0-9]{3}$", "", stem, ignore.case = TRUE)
+  stem <- sub("_S[0-9]+_L[0-9]{3}_[0-9]{3}$", "", stem, ignore.case = TRUE)
+  stem <- sub("_L[0-9]{3}_[0-9]{3}$", "", stem, ignore.case = TRUE)
   clean_name(stem)
+}
+
+pool_scanned_fastq_lanes <- function(df) {
+  if (!NROW(df) || !all(c("sample", "filename", "status") %in% names(df))) return(df)
+  eligible <- nzchar(trimws(as.character(df$sample))) & as.character(df$status) %in% c("paired", "single")
+  if (!any(eligible) || !anyDuplicated(as.character(df$sample[eligible]))) return(df)
+  keys <- unique(as.character(df$sample[eligible]))
+  pooled <- lapply(keys, function(sample) {
+    rows <- df[eligible & as.character(df$sample) == sample, , drop = FALSE]
+    first <- rows[1, , drop = FALSE]
+    first$filename <- paste(unique(as.character(rows$filename)), collapse = ";")
+    first$status <- if (NROW(rows) > 1L) paste0(as.character(first$status), " (", NROW(rows), " lanes)") else as.character(first$status)
+    first
+  })
+  unmatched <- df[!eligible, , drop = FALSE]
+  out <- do.call(rbind, c(pooled, if (NROW(unmatched)) list(unmatched) else list()))
+  rownames(out) <- NULL
+  out
 }
 
 scan_fastqs <- function(folder, paired = TRUE, metadata_cols = "treatment", infer_samples = FALSE) {
@@ -1182,19 +1207,10 @@ scan_fastq_dirs <- function(folders, paired = TRUE, metadata_cols = "treatment",
   folders <- parse_fastq_dirs(folders)
   folders <- folders[dir.exists(folders)]
   if (!length(folders)) return(scan_fastqs("", paired, metadata_cols, infer_samples))
-  multiple <- length(folders) > 1L
-  scanned <- lapply(folders, function(folder) {
-    df <- scan_fastqs(folder, paired, metadata_cols, infer_samples)
-    if (multiple && NROW(df)) {
-      df$filename <- vapply(as.character(df$filename), function(value) {
-        parts <- trimws(unlist(strsplit(value, ",", fixed = TRUE)))
-        paste(file.path(folder, basename(parts)), collapse = ",")
-      }, character(1))
-    }
-    df
-  })
+  scanned <- lapply(folders, scan_fastqs, paired = paired, metadata_cols = metadata_cols, infer_samples = infer_samples)
   out <- do.call(rbind, scanned)
   rownames(out) <- NULL
+  if (isTRUE(infer_samples)) out <- pool_scanned_fastq_lanes(out)
   out
 }
 
@@ -12571,18 +12587,18 @@ server <- function(input, output, session) {
         selected = "one"
       ),
       conditionalPanel("input.new_fastq_location_mode == 'one'", div(class = "new-project-path-control",
-          textInput("new_fastq_dir", "Raw FASTQ folder", value = default_fastq_dir, placeholder = "Choose with Browse or paste a server path"),
+          textInput("new_fastq_dir", "Raw FASTQ parent folder", value = default_fastq_dir, placeholder = "Choose with Browse or paste a server path"),
           actionButton("browse_new_fastq_dir", "Browse server", class = "btn-default"),
-          tags$p(class = "muted", "This folder must contain the FASTQ files named in design_matrix.txt. If this path is wrong, jobs are not submitted and a pre-submit error is written in the Logs tab.")
+          tags$p(class = "muted", "The app searches this folder and all readable subfolders for FASTQ files. Source files remain in place and are never copied or modified.")
       )),
       conditionalPanel("input.new_fastq_location_mode == 'multiple'", div(class = "new-project-path-control",
-          textInput("new_fastq_dir_add", "Add one raw FASTQ folder", value = "", placeholder = "Paste one server path, then click Add folder"),
+          textInput("new_fastq_dir_add", "Add one raw FASTQ parent folder", value = "", placeholder = "Paste one server path, then click Add folder"),
           div(class = "path-browser-actions",
               actionButton("browse_new_fastq_dirs", "Browse server", class = "btn-default"),
               actionButton("add_new_fastq_dir", "Add folder", class = "btn-primary")
           ),
           uiOutput("new_fastq_folder_list_ui"),
-          tags$p(class = "muted", "Add each sequencing-run folder separately. The saved folders are scanned as one input pool. Source FASTQs are read-only inputs; Cutadapt, Bowtie2, and all later steps write only beneath the project results folder.")
+          tags$p(class = "muted", "Add each batch or delivery parent folder once. Every readable subfolder is searched recursively and all detected FASTQs are treated as one input pool. Absolute source paths are saved; files are not copied or modified.")
       )),
       div(class = "new-project-path-control",
           textInput("new_design_matrix_path", "Design matrix folder", value = default_design_dir, placeholder = "Optional; folder containing or receiving design_matrix.txt"),
@@ -12903,7 +12919,7 @@ server <- function(input, output, session) {
     }
     div(
       class = "button-row",
-      actionButton("scan_fastqs", "Scan FASTQ folder", class = "btn-primary"),
+      actionButton("scan_fastqs", "Find FASTQs & detect samples", class = "btn-primary"),
       actionButton("add_metadata_col", "Update metadata columns", class = "btn-default"),
       actionButton("add_design_rows", "Add 5 blank rows", class = "btn-default")
     )
@@ -13138,7 +13154,7 @@ server <- function(input, output, session) {
   observeEvent(input$scan_fastqs, {
     p <- current_project()
     is_cutrun <- is_cutrun_project(p); is_atac <- is_atac_project(p); is_chip <- is_chip_project(p)
-    scanned <- scan_fastq_dirs(project_fastq_dirs(p), p$paired_end, metadata_cols_from_input(), infer_samples = is_cutrun || is_atac || is_chip)
+    scanned <- scan_fastq_dirs(project_fastq_dirs(p), p$paired_end, metadata_cols_from_input(), infer_samples = TRUE)
     if (is_cutrun) scanned <- infer_cutrun_metadata(scanned)
     if (is_atac) scanned <- infer_atac_metadata(scanned)
     if (is_chip) scanned <- infer_chip_metadata(scanned)

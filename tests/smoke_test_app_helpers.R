@@ -7,6 +7,30 @@ app_env <- new.env(parent = globalenv())
 sys.source(file.path(repo_root, "app.R"), envir = app_env)
 
 assert <- function(value, message) if (!isTRUE(value)) stop("ASSERTION FAILED: ", message, call. = FALSE)
+
+recursive_fastq_root <- tempfile("recursive_fastq_pool_")
+dir.create(file.path(recursive_fastq_root, "batch_2025", "ECO-02"), recursive = TRUE)
+dir.create(file.path(recursive_fastq_root, "batch_2026", "Sample_ECO-18", "fastq"), recursive = TRUE)
+recursive_fastqs <- c(
+  file.path(recursive_fastq_root, "batch_2025", "ECO-02", "ECO-02_batch2025_R1.fastq.gz"),
+  file.path(recursive_fastq_root, "batch_2025", "ECO-02", "ECO-02_batch2025_R2.fastq.gz"),
+  file.path(recursive_fastq_root, "batch_2026", "Sample_ECO-18", "fastq", "ECO-18_L007_001.R1.fastq.gz"),
+  file.path(recursive_fastq_root, "batch_2026", "Sample_ECO-18", "fastq", "ECO-18_L007_001.R2.fastq.gz"),
+  file.path(recursive_fastq_root, "batch_2026", "Sample_ECO-18", "fastq", "ECO-18_L008_001.R1.fastq.gz"),
+  file.path(recursive_fastq_root, "batch_2026", "Sample_ECO-18", "fastq", "ECO-18_L008_001.R2.fastq.gz")
+)
+file.create(recursive_fastqs)
+recursive_scan <- app_env$scan_fastq_dirs(
+  c(file.path(recursive_fastq_root, "batch_2025"), file.path(recursive_fastq_root, "batch_2026")),
+  paired = TRUE,
+  metadata_cols = "treatment",
+  infer_samples = TRUE
+)
+assert(NROW(recursive_scan) == 2L && all(grepl("^paired", recursive_scan$status)), "FASTQ discovery pairs reads recursively across multiple parent folders")
+assert(all(startsWith(as.character(recursive_scan$filename), "/")), "recursive FASTQ discovery preserves absolute source paths")
+assert(all(nzchar(as.character(recursive_scan$sample))), "recursive FASTQ discovery automatically infers sample identifiers")
+assert(any(grepl(";", recursive_scan$filename, fixed = TRUE)), "recursive FASTQ discovery pools multiple lanes for one inferred sample")
+unlink(recursive_fastq_root, recursive = TRUE, force = TRUE)
 runtime_files <- c(
   file.path(repo_root, "app.R"),
   file.path(repo_root, "run_codespringweb.sh"),
