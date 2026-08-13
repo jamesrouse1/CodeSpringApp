@@ -9320,6 +9320,7 @@ write_scrna_manual_gene_sets <- function(project, entries, set_column, directory
 }
 
 submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto", normalization = "auto", integration = "auto", batch_column = "batch", cluster_resolution = 0.6, min_features = 200, min_counts = 0, max_features = 0, max_percent_mt = 20, min_cells_per_gene = 3, n_pcs = 30, n_neighbors = 15, umap_min_dist = 0.5, umap_spread = 1, umap_metric = "euclidean", umap_init_pos = "spectral", doublet_method = "auto", doublet_rate = 0, remove_doublets = TRUE, seed = 1234, scvi_max_epochs = 400, harmony_theta = 2, harmony_lambda = 1, harmony_max_iter = 20, marker_file = "", celltype_file = "", marker_upload = NULL, celltype_upload = NULL, marker_source = "server", celltype_source = "server", marker_manual = list(), marker_species = "same", marker_ortholog_file = "", marker_ortholog_upload = NULL, marker_ortholog_source = "server", annotation_name = "cell_type", signature_file = "", signature_upload = NULL, signature_source = "server", signature_manual = list(), signature_species = "same", signature_ortholog_file = "", signature_ortholog_upload = NULL, signature_ortholog_source = "server", de_group_column = "condition", de_reference = "", de_comparison = "", de_annotation_column = "", de_annotation_values = "all", de_method = "both", de_covariates = character(0), pathway_library = "MSigDB_Hallmark_2020", pathway_species = "auto", pathway_ortholog_file = "", pathway_ortholog_upload = NULL, pathway_ortholog_source = "server", pathway_gmt_file = "", pathway_gmt_upload = NULL, pathway_source = "server") {
+  if (missing(batch_column)) batch_column <- "sample_id"
   stage <- tolower(trimws(as.character(stage %||% "inspect")))
   step_label <- tryCatch(scrna_stage_step(stage), error = function(e) "")
   if (!is_scrna_project(project)) return(record_preflight_failure(project, step_label %||% "scRNA processing", "This is not an scRNA-seq project.", "scrna"))
@@ -10580,16 +10581,23 @@ scrna_embedding_columns <- function(project, view = "integrated") {
   strsplit(header[[1]], "\t", fixed = TRUE)[[1]]
 }
 
-scrna_embedding_color_choices <- function(project) {
-  columns <- scrna_embedding_columns(project)
+scrna_selected_embedding_view <- function(project, requested = "") {
+  choices <- scrna_embedding_view_choices(project)
+  if (!length(choices)) return("")
+  fallback <- if ("integrated" %in% unname(choices)) "integrated" else unname(choices)[[1]]
+  selected_choice(requested, choices, fallback)
+}
+
+scrna_embedding_color_choices <- function(project, view = "integrated") {
+  columns <- unique(c(scrna_embedding_columns(project, view), scrna_embedding_columns(project, "integrated")))
   excluded <- c("cell", "UMAP_1", "UMAP_2", "input_path", "source_barcode")
   candidates <- setdiff(columns, excluded)
   preferred <- intersect(c("cell_type", "cluster", "sample_id", "condition", "batch", "annotation_source"), candidates)
   unique(c(preferred, sort(setdiff(candidates, preferred))))
 }
 
-scrna_embedding_color_column <- function(project, requested = "") {
-  choices <- scrna_embedding_color_choices(project)
+scrna_embedding_color_column <- function(project, requested = "", view = "integrated") {
+  choices <- scrna_embedding_color_choices(project, view)
   if (!length(choices)) return("")
   selected_choice(requested, choices, choices[[1]])
 }
@@ -11939,6 +11947,7 @@ server <- function(input, output, session) {
   progress_refresh_busy <- reactiveVal(FALSE)
   scrna_qc_defaults_applied <- reactiveVal(character(0))
   scrna_umap_defaults_applied <- reactiveVal(character(0))
+  scrna_batch_default_project <- reactiveVal("")
   scrna_dashboard_expression_cache <- reactiveVal(list())
   # Named manual marker/signature collections are stored per project for the
   # browser session. A separate immutable TSV snapshot is written on submit.
@@ -13991,7 +14000,7 @@ server <- function(input, output, session) {
           uiOutput("scrna_batch_column_ui"),
           selectInput("scrna_integration", "Integration method", choices = choices$integration[unname(choices$integration) != "none"], selected = selected_choice(input$scrna_integration, unname(choices$integration[unname(choices$integration) != "none"]), "auto"), selectize = FALSE)
         ),
-        tags$p(class = "muted small-note", "Integration is only for a genuine technical batch (for example, library or sequencing run). Keep the checkbox selected when inputs do not need technical batch correction.")
+        tags$p(class = "muted small-note", "Automatic integration treats each input sample as one group by default. Use a broader technical-batch field only when multiple input samples came from the same library or run; never group by biological condition.")
       )
     }
     umap_controls <- if (identical(scrna_ui_engine(), "scanpy")) {
@@ -14222,13 +14231,16 @@ server <- function(input, output, session) {
     if (!is_scrna_project(p)) return(NULL)
     manifest <- scrna_manifest(p)
     metadata <- if (NROW(manifest)) setdiff(names(manifest), c("sample_id", "input_path")) else character(0)
-    choices <- c("No technical batch column (automatic integration will be skipped)" = "")
+    choices <- c("Each input sample (recommended default)" = "sample_id", "No integration grouping" = "")
     if (length(metadata)) choices <- c(choices, stats::setNames(metadata, metadata))
-    previous <- if (is.null(input$scrna_batch_column)) if ("batch" %in% metadata) "batch" else "" else as.character(input$scrna_batch_column)
-    if (!previous %in% unname(choices)) previous <- ""
+    project_key <- as.character(p$id %||% p$name %||% "scrna")
+    new_project_view <- !identical(isolate(scrna_batch_default_project()), project_key)
+    previous <- if (new_project_view || is.null(input$scrna_batch_column)) "sample_id" else as.character(input$scrna_batch_column)
+    if (!previous %in% unname(choices)) previous <- "sample_id"
+    if (new_project_view) scrna_batch_default_project(project_key)
     tagList(
-      selectInput("scrna_batch_column", "Technical batch metadata column", choices = choices, selected = previous, selectize = FALSE),
-      tags$p(class = "muted small-note", "Use a technical batch field such as library, lane, or sequencing run—not a biological condition. Automatic integration stays off when no technical batch column is selected.")
+      selectInput("scrna_batch_column", "Integration grouping", choices = choices, selected = previous, selectize = FALSE),
+      tags$p(class = "muted small-note", "By default, each input sample is one integration group. Change this only when several inputs belong to the same technical batch; never use a biological condition as the integration field.")
     )
   })
 
@@ -14238,7 +14250,7 @@ server <- function(input, output, session) {
     manifest <- scrna_manifest(p)
     if (!NROW(manifest)) return(tags$p(class = "muted small-note", "Save a readable single-cell manifest to receive input-aware recommendations."))
     engine <- scrna_ui_engine()
-    batch_column <- trimws(as.character(input$scrna_batch_column %||% ""))
+    batch_column <- trimws(as.character(input$scrna_batch_column %||% "sample_id"))
     batch_values <- if (nzchar(batch_column) && batch_column %in% names(manifest)) unique(trimws(as.character(manifest[[batch_column]]))) else character(0)
     batch_values <- batch_values[nzchar(batch_values)]
     input_kinds <- ifelse(grepl("\\.h5ad$", manifest$input_path, ignore.case = TRUE), "AnnData", ifelse(grepl("\\.rds$", manifest$input_path, ignore.case = TRUE), "Seurat", "10x matrix"))
@@ -14656,7 +14668,7 @@ server <- function(input, output, session) {
         engine = p$scrna_engine %||% scrna_ui_engine(),
         normalization = input$scrna_normalization %||% "auto",
         integration = integration_choice,
-        batch_column = if (is.null(input$scrna_batch_column)) "batch" else input$scrna_batch_column,
+        batch_column = if (is.null(input$scrna_batch_column)) "sample_id" else input$scrna_batch_column,
         cluster_resolution = input$scrna_cluster_resolution %||% 0.6,
         min_features = input$scrna_min_features %||% 200,
         min_counts = input$scrna_min_counts %||% 0,
@@ -15601,15 +15613,19 @@ server <- function(input, output, session) {
     content = function(file) ggplot2::ggsave(file, scrna_violin_plot_object(), width = 10, height = 6.5, dpi = 220)
   )
   output$scrna_embedding_controls_ui <- renderUI({
+    progress_refresh()
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
-    columns <- scrna_embedding_columns(p)
+    embedding_views <- scrna_embedding_view_choices(p)
+    if (!length(embedding_views)) {
+      return(div(class = "empty-box", "Interactive UMAP coordinates are not available yet. The unintegrated viewer appears as soon as Normalize & PCA finishes."))
+    }
+    selected_view <- scrna_selected_embedding_view(p, isolate(input$scrna_embedding_view) %||% "")
+    columns <- scrna_embedding_columns(p, selected_view)
     if (!all(c("UMAP_1", "UMAP_2") %in% columns)) {
       return(div(class = "empty-box", "This completed run predates the interactive embedding table. Re-run the scRNA workflow with the current CodeSpringLab version to add it; the static UMAP figures remain available below."))
     }
-    choices <- scrna_embedding_color_choices(p)
+    choices <- scrna_embedding_color_choices(p, selected_view)
     if (!length(choices)) return(div(class = "empty-box", "The embedding table has coordinates but no cell-level annotation columns to color."))
-    embedding_views <- scrna_embedding_view_choices(p)
-    selected_view <- selected_choice(isolate(input$scrna_embedding_view), embedding_views, if ("integrated" %in% unname(embedding_views)) "integrated" else unname(embedding_views)[[1]])
     tagList(
       if (length(embedding_views) > 1L) selectInput("scrna_embedding_view", "UMAP coordinates", choices = embedding_views, selected = selected_view, selectize = FALSE) else NULL,
       fluidRow(
@@ -15684,10 +15700,12 @@ server <- function(input, output, session) {
             table_output("scrna_selected_cells"))
   })
   if (PLOTLY_AVAILABLE) output$scrna_embedding_plot <- plotly::renderPlotly({
+    progress_refresh()
     p <- current_project()
-    embedding_view <- input$scrna_embedding_view %||% "integrated"
+    embedding_view <- scrna_selected_embedding_view(p, input$scrna_embedding_view %||% "")
+    validate(need(nzchar(embedding_view), "Interactive UMAP coordinates are not available yet."))
     color_mode <- input$scrna_embedding_color_mode %||% "metadata"
-    color_column <- if (identical(color_mode, "metadata")) scrna_embedding_color_column(p, input$scrna_embedding_color %||% "") else ""
+    color_column <- if (identical(color_mode, "metadata")) scrna_embedding_color_column(p, input$scrna_embedding_color %||% "", embedding_view) else ""
     if (identical(color_mode, "metadata")) validate(need(nzchar(color_column), "The embedding table has no cell-level annotation columns to color."))
     point_size <- suppressWarnings(as.numeric(input$scrna_embedding_point_size %||% 4))
     opacity <- suppressWarnings(as.numeric(input$scrna_embedding_opacity %||% 0.72))
@@ -15753,7 +15771,8 @@ server <- function(input, output, session) {
     cells <- cells[nzchar(cells)]
     if (!length(cells)) return(data.frame())
     cells <- utils::head(cells, 2000L)
-    x <- scrna_embedding_table(p, columns = c("sample_id", "condition", "batch", "cluster", "cell_type", "annotation_source"), cells = cells, view = input$scrna_embedding_view %||% "integrated")
+    embedding_view <- scrna_selected_embedding_view(p, input$scrna_embedding_view %||% "")
+    x <- scrna_embedding_table(p, columns = c("sample_id", "condition", "batch", "cluster", "cell_type", "annotation_source"), cells = cells, view = embedding_view)
     preferred <- intersect(c("cell", "sample_id", "condition", "batch", "cluster", "cell_type", "annotation_source", "UMAP_1", "UMAP_2"), names(x))
     x[, preferred, drop = FALSE]
   }, page_length = 50, scroll_y = "360px")

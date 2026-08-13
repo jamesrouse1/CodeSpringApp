@@ -202,7 +202,15 @@ embedding_views <- app_env$scrna_embedding_view_choices(embedding_project)
 unintegrated_embedding <- app_env$scrna_embedding_table(embedding_project, columns = c("cluster", "condition", "sample_id"), max_points = Inf, view = "unintegrated")
 assert(identical(unname(embedding_views), c("integrated", "unintegrated")), "interactive UMAP offers integrated and unintegrated coordinates when both tables exist")
 assert(identical(unintegrated_embedding$UMAP_1, c(-1, -2)) && identical(as.character(unintegrated_embedding$cluster), c("0", "1")), "unintegrated UMAP retains its coordinates and joins final annotations by exact cell ID")
+unlink(file.path(embedding_test_root, "scrna", "tables", "umap_coordinates.tsv"))
+assert(identical(app_env$scrna_selected_embedding_view(embedding_project, ""), "unintegrated"), "interactive UMAP displays the unintegrated coordinates while integration is still running")
+assert("sample_id" %in% app_env$scrna_embedding_color_choices(embedding_project, "unintegrated"), "the running integration UMAP can be colored by sample")
 unlink(embedding_test_root, recursive = TRUE, force = TRUE)
+assert(
+  grepl('"Each input sample (recommended default)" = "sample_id"', app_text, fixed = TRUE) &&
+    grepl('batch_column = if (is.null(input$scrna_batch_column)) "sample_id"', app_text, fixed = TRUE),
+  "multi-sample integration defaults to one integration group per input sample"
+)
 assert(identical(unname(app_env$analysis_choices()), c("RNA-seq", "scRNA-seq", "ATAC-seq", "CUT&RUN", "ChIP-seq")), "all analysis selectors use one canonical order and spelling")
 for (key in c("rna", "atac", "cutrun", "chip")) {
   tabs <- app_env$results_explorer_tabs(key)
