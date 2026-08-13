@@ -1612,6 +1612,12 @@ assert(
   "the app submits FASTQ samples through the maintained CellRanger/9.0.1 cluster module"
 )
 assert(
+  grepl("Reference inspection is running", app_text, fixed = TRUE) &&
+    grepl("Inspecting reference labels", app_text, fixed = TRUE) &&
+    grepl("scrna_reference_inspect_button_ui", app_text, fixed = TRUE),
+  "reference-label inspection has a persistent running state and disabled progress button"
+)
+assert(
   is.infinite(app_env$scrna_cellranger_max_parallel()) &&
     grepl("dependency_condition = \"afterany\"", app_text, fixed = TRUE) &&
     grepl("BAM generation is disabled", app_text, fixed = TRUE) &&

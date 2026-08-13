@@ -11993,7 +11993,7 @@ server <- function(input, output, session) {
   # browser session. A separate immutable TSV snapshot is written on submit.
   scrna_manual_annotation_sets <- reactiveVal(list())
   scrna_manual_signature_sets <- reactiveVal(list())
-  scrna_reference_inspection <- reactiveVal(list(status = "idle", reference_file = "", output_path = "", job_id = "", choices = data.frame(), message = ""))
+  scrna_reference_inspection <- reactiveVal(list(status = "idle", project_id = "", reference_file = "", output_path = "", job_id = "", choices = data.frame(), message = ""))
   cutrun_normalization_choice <- reactiveVal("spikein")
   genome_browser_mode_state <- reactiveVal("")
   path_browser <- reactiveValues(target = "", mode = "dir", path = CURRENT_HOME, selected_file = "", message = "")
@@ -12478,12 +12478,13 @@ server <- function(input, output, session) {
       submit_scrna_reference_inspection(p, reference_file)
     }, error = function(e) e)
     if (inherits(result, "error")) {
-      scrna_reference_inspection(list(status = "error", reference_file = "", output_path = "", job_id = "", choices = data.frame(), message = conditionMessage(result)))
+      scrna_reference_inspection(list(status = "error", project_id = p$id %||% p$name, reference_file = "", output_path = "", job_id = "", choices = data.frame(), message = conditionMessage(result)))
       showNotification(conditionMessage(result), type = "error", duration = 8)
       return()
     }
-    scrna_reference_inspection(c(result, list(status = "submitted", choices = data.frame())))
+    scrna_reference_inspection(c(result, list(status = "submitted", project_id = p$id %||% p$name, choices = data.frame())))
     showNotification("Reference inspection submitted. Label choices will appear here when it finishes.", type = "message", duration = 6)
+    finish_submit_refresh()
   }, ignoreInit = TRUE)
 
   observe({
@@ -12491,16 +12492,53 @@ server <- function(input, output, session) {
     if (!identical(state$status %||% "", "submitted")) return()
     invalidateLater(2500, session)
     choices <- read_scrna_reference_label_choices(state$output_path %||% "")
-    if (!NROW(choices)) return()
-    state$status <- "ready"
-    state$choices <- choices
-    state$message <- paste0("Loaded ", NROW(choices), " valid label source", if (NROW(choices) == 1L) "" else "s", " from ", basename(state$reference_file), ".")
-    scrna_reference_inspection(state)
+    if (NROW(choices)) {
+      state$status <- "ready"
+      state$choices <- choices
+      state$message <- paste0("Loaded ", NROW(choices), " valid label source", if (NROW(choices) == 1L) "" else "s", " from ", basename(state$reference_file), ".")
+      scrna_reference_inspection(state)
+      return()
+    }
+    jobs <- job_history_state()
+    if (!NROW(jobs) || !nzchar(state$job_id %||% "") || !all(c("job_id", "slurm_state") %in% names(jobs))) return()
+    hit <- jobs[as.character(jobs$job_id) == as.character(state$job_id), , drop = FALSE]
+    if (!NROW(hit)) return()
+    scheduler_state <- toupper(trimws(as.character(tail(hit$slurm_state, 1))))
+    if (grepl("^(FAILED|CANCELLED|TIMEOUT|OUT_OF_MEMORY|NODE_FAIL|BOOT_FAIL|PREEMPTED)", scheduler_state)) {
+      state$status <- "error"
+      state$message <- paste0("Reference inspection did not finish successfully (", scheduler_state, "). Review the job error log and try again.")
+      scrna_reference_inspection(state)
+    } else if (identical(scheduler_state, "COMPLETED")) {
+      state$status <- "error"
+      state$message <- "Reference inspection completed but did not produce any valid label fields. Review the job log and confirm that the file contains a Seurat object with active identities or a metadata column containing at least two labels."
+      scrna_reference_inspection(state)
+    }
+  })
+
+  output$scrna_reference_inspect_button_ui <- renderUI({
+    p <- current_project(); if (!is_scrna_project(p)) return(NULL)
+    state <- scrna_reference_inspection()
+    same_project <- identical(as.character(state$project_id %||% ""), as.character(p$id %||% p$name))
+    status <- if (same_project) state$status %||% "idle" else "idle"
+    if (identical(status, "submitted")) {
+      return(actionButton(
+        "inspect_scrna_reference_labels", tagList(icon("spinner", class = "fa-spin"), " Inspecting reference labels…"),
+        class = "btn-warning", disabled = "disabled"
+      ))
+    }
+    actionButton(
+      "inspect_scrna_reference_labels",
+      if (identical(status, "ready")) "Re-inspect reference labels" else if (identical(status, "error")) "Retry reference inspection" else "Inspect reference labels",
+      class = "btn-default"
+    )
   })
 
   output$scrna_reference_label_selector_ui <- renderUI({
+    p <- current_project(); if (!is_scrna_project(p)) return(NULL)
     state <- scrna_reference_inspection()
-    choices <- state$choices
+    same_project <- identical(as.character(state$project_id %||% ""), as.character(p$id %||% p$name))
+    status <- if (same_project) state$status %||% "idle" else "idle"
+    choices <- if (same_project) state$choices else data.frame()
     if (!is.data.frame(choices) || !NROW(choices)) {
       values <- c("Active identities" = "")
     } else {
@@ -12510,7 +12548,7 @@ server <- function(input, output, session) {
     selected <- isolate(input$scrna_reference_label_column) %||% ""
     if (!selected %in% unname(values)) selected <- ""
     status_text <- switch(
-      state$status %||% "idle",
+      status,
       submitted = paste0("Reading the reference", if (nzchar(state$job_id %||% "")) paste0(" (job ", state$job_id, ")") else "", "…"),
       ready = state$message %||% "Reference label choices are ready.",
       error = state$message %||% "Reference inspection failed.",
@@ -12518,7 +12556,14 @@ server <- function(input, output, session) {
     )
     tagList(
       selectInput("scrna_reference_label_column", "Reference labels to transfer", choices = values, selected = selected, selectize = FALSE),
-      tags$p(class = "muted small-note", status_text)
+      if (identical(status, "submitted")) div(
+        class = "summary-job-status active",
+        div(class = "summary-job-heading", tags$strong("Reference inspection is running"), tags$span(if (nzchar(state$job_id %||% "")) paste("SLURM job", state$job_id) else "Submitted")),
+        div(class = "summary-job-track", div(class = "summary-job-bar active", style = "width:100%")),
+        tags$p(class = "muted small-note", status_text, " This panel refreshes automatically.")
+      ) else if (identical(status, "ready")) div(class = "summary-job-status complete", tags$strong("Reference labels ready"), tags$p(class = "muted small-note", status_text))
+      else if (identical(status, "error")) div(class = "summary-job-status failed", tags$strong("Reference inspection needs attention"), tags$p(class = "muted small-note", status_text))
+      else tags$p(class = "muted small-note", status_text)
     )
   })
   observeEvent(input$browse_scrna_signature_file, {
@@ -14237,7 +14282,7 @@ server <- function(input, output, session) {
         radioButtons("scrna_reference_source", "Seurat reference source", choices = c("Browse or paste a server path" = "server", "Upload from laptop" = "upload"), selected = isolate(input$scrna_reference_source) %||% "server", inline = TRUE),
         conditionalPanel("input.scrna_reference_source == 'server'", div(class = "new-project-path-control", textInput("scrna_reference_file", "Seurat reference object", value = isolate(input$scrna_reference_file) %||% "", placeholder = "Absolute server path to a .rda or .rds reference"), actionButton("browse_scrna_reference_file", "Browse server", class = "btn-default"))),
         conditionalPanel("input.scrna_reference_source == 'upload'", fileInput("scrna_reference_upload", "Seurat reference from laptop", accept = c(".rda", ".rds"))),
-        actionButton("inspect_scrna_reference_labels", "Inspect reference labels", class = "btn-default"),
+        uiOutput("scrna_reference_inspect_button_ui"),
         uiOutput("scrna_reference_label_selector_ui"),
         tags$p(class = "muted small-note", "The output includes the transferred label, maximum prediction score, label counts, and a transfer audit table.")
       ),
