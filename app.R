@@ -9124,14 +9124,10 @@ scrna_cellranger_stage_parent <- function(project) {
 
 scrna_cellranger_max_parallel <- function(sample_count = Inf) {
   configured <- trimws(Sys.getenv("CSL_CELLRANGER_MAX_PARALLEL", unset = ""))
-  # Cell Ranger is both CPU/memory intensive and exceptionally I/O heavy.
-  # Letting every selected sample start at once can overwhelm shared project
-  # storage, causing ALIGN_AND_COUNT chunks to become orphaned and retried.
-  # Queue every sample automatically, but run only two at a time by default.
-  if (!nzchar(configured)) return(as.integer(min(2L, sample_count)))
+  if (!nzchar(configured)) return(sample_count)
   value <- suppressWarnings(as.integer(configured))
-  if (is.na(value) || value < 1L) return(as.integer(min(2L, sample_count)))
-  as.integer(min(value, sample_count))
+  if (is.na(value) || value < 1L) return(sample_count)
+  min(value, sample_count)
 }
 
 scrna_path_input_bytes <- function(path) {
@@ -14160,7 +14156,7 @@ server <- function(input, output, session) {
         actionButton("browse_scrna_cellranger_reference", "Browse server", class = "btn-default")
       ),
       numericInput("scrna_cellranger_expected_cells", "Expected recovered cells per sample (0 = automatic)", value = input$scrna_cellranger_expected_cells %||% 0, min = 0, step = 500),
-      tags$p(class = "muted small-note", "Cell Ranger 9.0.1 detects 10x chemistry automatically. R1/R2 lanes are combined per sample. All selected samples are queued automatically, with two running at a time by default to protect shared storage. Resources scale with FASTQ size, BAM generation is disabled, and only the filtered matrix plus small summaries are retained. Incomplete samples resume from stable staging."),
+      tags$p(class = "muted small-note", "Cell Ranger 9.0.1 detects 10x chemistry automatically. R1/R2 lanes are combined per sample. Jobs run concurrently, use 16 cores, skip BAM generation, retain only the filtered matrix plus small summaries, and resume failed staging."),
       if (!length(candidates)) tags$p(class = "muted small-note", "No standard Cell Ranger reference was detected automatically. Browse to a matching human or mouse refdata-gex transcriptome folder.") else NULL
     )
   })

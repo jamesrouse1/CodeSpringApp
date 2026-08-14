@@ -1707,12 +1707,11 @@ assert(
   "annotation method and source persistence is driven by explicit user intent rather than dynamic-control recreation"
 )
 assert(
-  identical(app_env$scrna_cellranger_max_parallel(), 2L) &&
-    identical(app_env$scrna_cellranger_max_parallel(1L), 1L) &&
+  is.infinite(app_env$scrna_cellranger_max_parallel()) &&
     grepl("dependency_condition = \"afterany\"", app_text, fixed = TRUE) &&
     grepl("BAM generation is disabled", app_text, fixed = TRUE) &&
     any(grepl("--create-bam=false", runtime_text, fixed = TRUE)),
-  "Cell Ranger defaults to two concurrent resumable low-disk jobs with BAM output disabled"
+  "Cell Ranger defaults to concurrent resumable low-disk jobs with BAM output disabled"
 )
 matrix_dir <- app_env$scrna_cellranger_matrix_dir(fastq_project, "donor03")
 dir.create(matrix_dir, recursive = TRUE)
