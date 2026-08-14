@@ -9207,7 +9207,7 @@ scrna_stage_resource_options <- function(stage, input_bytes = 0, engine = "auto"
 scrna_cellranger_resource_options <- function(fastq_paths) {
   paths <- unique(as.character(fastq_paths %||% character(0)))
   bytes <- sum(vapply(paths[file.exists(paths)], file_size_for, numeric(1)), na.rm = TRUE)
-  profile <- if (bytes < 80 * 1024^3) c(cpus = 16L, memory_gb = 80L, time = "2-00:00:00") else if (bytes < 200 * 1024^3) c(cpus = 20L, memory_gb = 112L, time = "2-00:00:00") else c(cpus = 24L, memory_gb = 128L, time = "3-00:00:00")
+  profile <- if (bytes < 80 * 1024^3) c(cpus = 20L, memory_gb = 96L, time = "2-00:00:00") else if (bytes < 200 * 1024^3) c(cpus = 28L, memory_gb = 144L, time = "3-00:00:00") else c(cpus = 32L, memory_gb = 192L, time = "4-00:00:00")
   c(paste0("--cpus-per-task=", profile[["cpus"]]), paste0("--mem=", profile[["memory_gb"]], "G"), paste0("--time=", profile[["time"]]))
 }
 
