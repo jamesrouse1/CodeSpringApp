@@ -9130,25 +9130,81 @@ scrna_cellranger_max_parallel <- function(sample_count = Inf) {
   min(value, sample_count)
 }
 
-scrna_stage_resource_options <- function(stage, large_reference_transfer = FALSE) {
-  stage <- tolower(trimws(as.character(stage %||% "inspect")))
-  profile <- switch(stage,
-    inspect = c(cpus = 12L, memory_gb = 96L, time = "1-00:00:00"),
-    qc = c(cpus = 16L, memory_gb = 128L, time = "2-00:00:00"),
-    preprocess = c(cpus = 24L, memory_gb = 192L, time = "3-00:00:00"),
-    cluster = c(cpus = 24L, memory_gb = 192L, time = "3-00:00:00"),
-    annotate = c(cpus = 24L, memory_gb = 192L, time = "3-00:00:00"),
-    score = c(cpus = 16L, memory_gb = 128L, time = "2-00:00:00"),
-    differential = c(cpus = 16L, memory_gb = 128L, time = "3-00:00:00"),
-    pathway = c(cpus = 12L, memory_gb = 96L, time = "1-00:00:00"),
-    c(cpus = 16L, memory_gb = 128L, time = "2-00:00:00")
+scrna_path_input_bytes <- function(path) {
+  path <- trimws(as.character(path %||% ""))
+  if (!nzchar(path) || !file.exists(path)) return(0)
+  if (!dir.exists(path)) return(file_size_for(path))
+  matrix_files <- list.files(
+    path,
+    pattern = "^(matrix[.]mtx|features[.]tsv|genes[.]tsv|barcodes[.]tsv)([.]gz)?$",
+    full.names = TRUE,
+    recursive = FALSE
   )
-  if (isTRUE(large_reference_transfer) && identical(stage, "annotate")) profile[["memory_gb"]] <- "256"
+  sum(vapply(matrix_files, file_size_for, numeric(1)), na.rm = TRUE)
+}
+
+scrna_stage_input_bytes <- function(stage, engine, manifest, out_dir, reference_file = "") {
+  stage <- tolower(trimws(as.character(stage %||% "inspect")))
+  engine <- tolower(trimws(as.character(engine %||% "seurat")))
+  suffix <- if (identical(engine, "scanpy")) "scanpy.h5ad" else "seurat.rds"
+  checkpoint <- function(name) file.path(out_dir, "checkpoints", paste0(name, "_", suffix))
+  processed <- file.path(out_dir, "objects", if (identical(engine, "scanpy")) "processed_scanpy.h5ad" else "processed_seurat.rds")
+  paths <- switch(stage,
+    inspect = unique(as.character(manifest$input_path %||% character(0))),
+    qc = checkpoint("01_input"),
+    preprocess = checkpoint("02_qc"),
+    cluster = checkpoint("03_preprocessed"),
+    annotate = c(processed, checkpoint("04_clustered"), reference_file),
+    score = processed,
+    differential = processed,
+    pathway = file.path(out_dir, "tables", "pseudobulk_differential_expression.tsv"),
+    unique(as.character(manifest$input_path %||% character(0)))
+  )
+  paths <- unique(paths[nzchar(paths) & file.exists(paths)])
+  if (identical(stage, "annotate")) {
+    query_paths <- setdiff(paths, reference_file)
+    query_bytes <- if (length(query_paths)) max(vapply(query_paths, scrna_path_input_bytes, numeric(1)), na.rm = TRUE) else 0
+    return(query_bytes + scrna_path_input_bytes(reference_file))
+  }
+  sum(vapply(paths, scrna_path_input_bytes, numeric(1)), na.rm = TRUE)
+}
+
+scrna_resource_tier <- function(input_bytes) {
+  input_bytes <- suppressWarnings(as.numeric(input_bytes %||% 0))
+  if (!is.finite(input_bytes) || input_bytes < 0) input_bytes <- 0
+  if (input_bytes < 2 * 1024^3) "small" else if (input_bytes < 8 * 1024^3) "medium" else if (input_bytes < 20 * 1024^3) "large" else "xlarge"
+}
+
+scrna_stage_resource_options <- function(stage, input_bytes = 0) {
+  stage <- tolower(trimws(as.character(stage %||% "inspect")))
+  tier <- scrna_resource_tier(input_bytes)
+  heavy <- stage %in% c("preprocess", "cluster", "annotate")
+  light <- stage %in% c("inspect", "pathway")
+  profile <- if (heavy) switch(tier,
+    small = c(cpus = 12L, memory_gb = 96L), medium = c(cpus = 16L, memory_gb = 128L),
+    large = c(cpus = 24L, memory_gb = 192L), xlarge = c(cpus = 32L, memory_gb = 256L)
+  ) else if (light) switch(tier,
+    small = c(cpus = 4L, memory_gb = 32L), medium = c(cpus = 8L, memory_gb = 64L),
+    large = c(cpus = 12L, memory_gb = 96L), xlarge = c(cpus = 16L, memory_gb = 128L)
+  ) else switch(tier,
+    small = c(cpus = 8L, memory_gb = 64L), medium = c(cpus = 12L, memory_gb = 96L),
+    large = c(cpus = 16L, memory_gb = 128L), xlarge = c(cpus = 24L, memory_gb = 192L)
+  )
+  run_time <- if (stage %in% c("preprocess", "cluster", "annotate", "differential")) {
+    if (tier %in% c("large", "xlarge")) "3-00:00:00" else "2-00:00:00"
+  } else if (identical(tier, "xlarge")) "2-00:00:00" else "1-00:00:00"
   c(
     paste0("--cpus-per-task=", profile[["cpus"]]),
     paste0("--mem=", profile[["memory_gb"]], "G"),
-    paste0("--time=", profile[["time"]])
+    paste0("--time=", run_time)
   )
+}
+
+scrna_cellranger_resource_options <- function(fastq_paths) {
+  paths <- unique(as.character(fastq_paths %||% character(0)))
+  bytes <- sum(vapply(paths[file.exists(paths)], file_size_for, numeric(1)), na.rm = TRUE)
+  profile <- if (bytes < 80 * 1024^3) c(cpus = 12L, memory_gb = 64L, time = "2-00:00:00") else if (bytes < 200 * 1024^3) c(cpus = 16L, memory_gb = 96L, time = "2-00:00:00") else c(cpus = 24L, memory_gb = 128L, time = "3-00:00:00")
+  c(paste0("--cpus-per-task=", profile[["cpus"]]), paste0("--mem=", profile[["memory_gb"]], "G"), paste0("--time=", profile[["time"]]))
 }
 
 submit_scrna_cellranger_jobs <- function(project, transcriptome, expected_cells = 0, samples = NULL) {
@@ -9181,6 +9237,7 @@ submit_scrna_cellranger_jobs <- function(project, transcriptome, expected_cells 
     if (active) return(paste(sample, "already has an active Cell Ranger job; skipped."))
     pairs <- scrna_fastq_pairs(row$input_path[[1]])
     if (!NROW(pairs) || any(!file.exists(pairs$r2))) return(paste0("ERROR: ", sample, " does not have matched R1/R2 gzipped FASTQs in ", row$input_path[[1]]))
+    resource_options <- scrna_cellranger_resource_options(c(pairs$r1, pairs$r2))
     fastq_sample <- if ("fastq_sample" %in% names(row)) trimws(as.character(row$fastq_sample[[1]])) else ""
     detected_prefixes <- scrna_fastq_sample_names(row$input_path[[1]])
     if (length(detected_prefixes) > 1L && !nzchar(fastq_sample)) return(paste0("ERROR: ", sample, " points to a folder containing multiple FASTQ sample prefixes. Enter one of these in fastq_sample: ", paste(detected_prefixes, collapse = ", ")))
@@ -9189,7 +9246,7 @@ submit_scrna_cellranger_jobs <- function(project, transcriptome, expected_cells 
       project, "Alignment & counting", qsub,
       c(sample, row$input_path[[1]], fastq_sample, transcriptome, file.path(project$data_dir, "cellranger"), expected_cells, stage_parent, runner),
       "cellranger_count", paste0("CellRanger/9.0.1; expected_cells=", expected_cells, "; BAM disabled; max_parallel=", max_parallel), sample = sample,
-      target = target, reference = transcriptome, dependency_ids = dependency_ids, dependency_condition = "afterany"
+      target = target, reference = transcriptome, dependency_ids = dependency_ids, dependency_condition = "afterany", sbatch_options = resource_options
     )
   }
   # Keep a small fixed number of Cell Ranger jobs active. Each lane is a SLURM
@@ -9434,7 +9491,8 @@ submit_scrna_reference_inspection <- function(project, reference_file) {
   message <- submit_sbatch(
     project, "Inspect reference labels", qsub, c(reference_file, output_path, runner),
     "scrna_reference_labels", paste("Seurat reference", basename(reference_file)),
-    target = output_path, reference = reference_file
+    target = output_path, reference = reference_file,
+    sbatch_options = scrna_stage_resource_options("inspect", file_size_for(reference_file))
   )
   list(message = message, output_path = output_path, reference_file = reference_file, job_id = parse_sbatch_job_id(message))
 }
@@ -9635,21 +9693,8 @@ submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto
   prior_marker <- if (nzchar(prior)) file.path(out_dir, paste0("_STAGE_", toupper(prior), "_COMPLETE")) else ""
   if (nzchar(prior_marker) && !file.exists(prior_marker)) return(record_preflight_failure(project, step_label, paste0("Complete ", scrna_stage_step(prior), " before submitting this stage."), "scrna"))
   scanpy_container_path <- if (identical(resolved_engine, "scanpy")) scanpy_container_check()$path else ""
-  large_reference_transfer <- FALSE
-  if (identical(stage, "annotate") && identical(resolved_engine, "seurat") && nzchar(reference_file)) {
-    object_candidates <- c(
-      file.path(out_dir, "objects", "processed_seurat.rds"),
-      file.path(out_dir, "checkpoints", "04_clustered_seurat.rds")
-    )
-    object_candidates <- object_candidates[file.exists(object_candidates)]
-    query_file <- if (length(object_candidates)) object_candidates[[1]] else ""
-    input_bytes <- sum(file.info(c(query_file, reference_file)[nzchar(c(query_file, reference_file))])$size, na.rm = TRUE)
-    # Compressed Seurat objects expand substantially during anchor projection.
-    # Large query/reference pairs receive an additional memory tier above the
-    # already expanded annotation-stage allocation.
-    large_reference_transfer <- is.finite(input_bytes) && input_bytes > 8 * 1024^3
-  }
-  sbatch_options <- scrna_stage_resource_options(stage, large_reference_transfer)
+  input_bytes <- scrna_stage_input_bytes(stage, resolved_engine, manifest, out_dir, reference_file)
+  sbatch_options <- scrna_stage_resource_options(stage, input_bytes)
   submit_sbatch(project, step_label, qsub, c(runner, resolved_engine, manifest_path, out_dir, params_path, stage, scanpy_container_path), "scrna_pipeline", paste(stage, resolved_engine, normalization, integration), target = file.path(out_dir, paste0("_STAGE_", toupper(stage), "_COMPLETE")), reference = resolved_engine, sbatch_options = sbatch_options)
 }
 

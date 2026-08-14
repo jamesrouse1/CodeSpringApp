@@ -1662,12 +1662,14 @@ assert(
 )
 assert(
   grepl('scrna_stage_resource_options <- function', app_text, fixed = TRUE) &&
-    identical(app_env$scrna_stage_resource_options("inspect"), c("--cpus-per-task=12", "--mem=96G", "--time=1-00:00:00")) &&
-    identical(app_env$scrna_stage_resource_options("cluster"), c("--cpus-per-task=24", "--mem=192G", "--time=3-00:00:00")) &&
-    identical(app_env$scrna_stage_resource_options("annotate", TRUE), c("--cpus-per-task=24", "--mem=256G", "--time=3-00:00:00")) &&
-    grepl('input_bytes > 8 * 1024^3', app_text, fixed = TRUE) &&
+    identical(app_env$scrna_stage_resource_options("inspect", 0), c("--cpus-per-task=4", "--mem=32G", "--time=1-00:00:00")) &&
+    identical(app_env$scrna_stage_resource_options("cluster", 3 * 1024^3), c("--cpus-per-task=16", "--mem=128G", "--time=2-00:00:00")) &&
+    identical(app_env$scrna_stage_resource_options("annotate", 10 * 1024^3), c("--cpus-per-task=24", "--mem=192G", "--time=3-00:00:00")) &&
+    identical(app_env$scrna_stage_resource_options("annotate", 30 * 1024^3), c("--cpus-per-task=32", "--mem=256G", "--time=3-00:00:00")) &&
+    grepl('scrna_stage_input_bytes(stage, resolved_engine, manifest, out_dir, reference_file)', app_text, fixed = TRUE) &&
+    grepl('scrna_cellranger_resource_options(c(pairs$r1, pairs$r2))', app_text, fixed = TRUE) &&
     grepl('sbatch_options <- scrna_stage_resource_options', app_text, fixed = TRUE),
-  "single-cell stages receive expanded stage-aware SLURM resources and large reference transfers receive the highest memory tier"
+  "single-cell stages scale SLURM resources from the relevant input/checkpoint size and reserve the highest tier for genuinely large objects"
 )
 idle_reference_html <- as.character(app_env$scrna_reference_label_selector_content(
   list(status = "idle", project_id = "scrna/test", choices = data.frame()),
