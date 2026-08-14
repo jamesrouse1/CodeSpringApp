@@ -9175,20 +9175,24 @@ scrna_resource_tier <- function(input_bytes) {
   if (input_bytes < 2 * 1024^3) "small" else if (input_bytes < 8 * 1024^3) "medium" else if (input_bytes < 20 * 1024^3) "large" else "xlarge"
 }
 
-scrna_stage_resource_options <- function(stage, input_bytes = 0) {
+scrna_stage_resource_options <- function(stage, input_bytes = 0, engine = "auto") {
   stage <- tolower(trimws(as.character(stage %||% "inspect")))
+  engine <- tolower(trimws(as.character(engine %||% "auto")))
   tier <- scrna_resource_tier(input_bytes)
   heavy <- stage %in% c("preprocess", "cluster", "annotate")
   light <- stage %in% c("inspect", "pathway")
-  profile <- if (heavy) switch(tier,
-    small = c(cpus = 12L, memory_gb = 96L), medium = c(cpus = 16L, memory_gb = 128L),
+  profile <- if (heavy && identical(engine, "scanpy")) switch(tier,
+    small = c(cpus = 16L, memory_gb = 128L), medium = c(cpus = 20L, memory_gb = 160L),
     large = c(cpus = 24L, memory_gb = 192L), xlarge = c(cpus = 32L, memory_gb = 256L)
+  ) else if (heavy) switch(tier,
+    small = c(cpus = 12L, memory_gb = 128L), medium = c(cpus = 16L, memory_gb = 160L),
+    large = c(cpus = 20L, memory_gb = 192L), xlarge = c(cpus = 24L, memory_gb = 256L)
   ) else if (light) switch(tier,
-    small = c(cpus = 4L, memory_gb = 32L), medium = c(cpus = 8L, memory_gb = 64L),
+    small = c(cpus = 6L, memory_gb = 48L), medium = c(cpus = 8L, memory_gb = 64L),
     large = c(cpus = 12L, memory_gb = 96L), xlarge = c(cpus = 16L, memory_gb = 128L)
   ) else switch(tier,
-    small = c(cpus = 8L, memory_gb = 64L), medium = c(cpus = 12L, memory_gb = 96L),
-    large = c(cpus = 16L, memory_gb = 128L), xlarge = c(cpus = 24L, memory_gb = 192L)
+    small = c(cpus = 10L, memory_gb = 80L), medium = c(cpus = 14L, memory_gb = 112L),
+    large = c(cpus = 18L, memory_gb = 144L), xlarge = c(cpus = 24L, memory_gb = 192L)
   )
   run_time <- if (stage %in% c("preprocess", "cluster", "annotate", "differential")) {
     if (tier %in% c("large", "xlarge")) "3-00:00:00" else "2-00:00:00"
@@ -9203,7 +9207,7 @@ scrna_stage_resource_options <- function(stage, input_bytes = 0) {
 scrna_cellranger_resource_options <- function(fastq_paths) {
   paths <- unique(as.character(fastq_paths %||% character(0)))
   bytes <- sum(vapply(paths[file.exists(paths)], file_size_for, numeric(1)), na.rm = TRUE)
-  profile <- if (bytes < 80 * 1024^3) c(cpus = 12L, memory_gb = 64L, time = "2-00:00:00") else if (bytes < 200 * 1024^3) c(cpus = 16L, memory_gb = 96L, time = "2-00:00:00") else c(cpus = 24L, memory_gb = 128L, time = "3-00:00:00")
+  profile <- if (bytes < 80 * 1024^3) c(cpus = 16L, memory_gb = 80L, time = "2-00:00:00") else if (bytes < 200 * 1024^3) c(cpus = 20L, memory_gb = 112L, time = "2-00:00:00") else c(cpus = 24L, memory_gb = 128L, time = "3-00:00:00")
   c(paste0("--cpus-per-task=", profile[["cpus"]]), paste0("--mem=", profile[["memory_gb"]], "G"), paste0("--time=", profile[["time"]]))
 }
 
@@ -9492,7 +9496,7 @@ submit_scrna_reference_inspection <- function(project, reference_file) {
     project, "Inspect reference labels", qsub, c(reference_file, output_path, runner),
     "scrna_reference_labels", paste("Seurat reference", basename(reference_file)),
     target = output_path, reference = reference_file,
-    sbatch_options = scrna_stage_resource_options("inspect", file_size_for(reference_file))
+    sbatch_options = scrna_stage_resource_options("inspect", file_size_for(reference_file), "seurat")
   )
   list(message = message, output_path = output_path, reference_file = reference_file, job_id = parse_sbatch_job_id(message))
 }
@@ -9694,7 +9698,7 @@ submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto
   if (nzchar(prior_marker) && !file.exists(prior_marker)) return(record_preflight_failure(project, step_label, paste0("Complete ", scrna_stage_step(prior), " before submitting this stage."), "scrna"))
   scanpy_container_path <- if (identical(resolved_engine, "scanpy")) scanpy_container_check()$path else ""
   input_bytes <- scrna_stage_input_bytes(stage, resolved_engine, manifest, out_dir, reference_file)
-  sbatch_options <- scrna_stage_resource_options(stage, input_bytes)
+  sbatch_options <- scrna_stage_resource_options(stage, input_bytes, resolved_engine)
   submit_sbatch(project, step_label, qsub, c(runner, resolved_engine, manifest_path, out_dir, params_path, stage, scanpy_container_path), "scrna_pipeline", paste(stage, resolved_engine, normalization, integration), target = file.path(out_dir, paste0("_STAGE_", toupper(stage), "_COMPLETE")), reference = resolved_engine, sbatch_options = sbatch_options)
 }
 
