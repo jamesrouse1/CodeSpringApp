@@ -1661,10 +1661,13 @@ assert(
   "background status refreshes preserve an open reference-upload annotation panel"
 )
 assert(
-  grepl('sbatch_options = character(0)', app_text, fixed = TRUE) &&
+  grepl('scrna_stage_resource_options <- function', app_text, fixed = TRUE) &&
+    identical(app_env$scrna_stage_resource_options("inspect"), c("--cpus-per-task=12", "--mem=96G", "--time=1-00:00:00")) &&
+    identical(app_env$scrna_stage_resource_options("cluster"), c("--cpus-per-task=24", "--mem=192G", "--time=3-00:00:00")) &&
+    identical(app_env$scrna_stage_resource_options("annotate", TRUE), c("--cpus-per-task=24", "--mem=256G", "--time=3-00:00:00")) &&
     grepl('input_bytes > 8 * 1024^3', app_text, fixed = TRUE) &&
-    grepl('sbatch_options <- "--mem=128G"', app_text, fixed = TRUE),
-  "large Seurat reference-transfer jobs automatically request the memory allowance validated by the Alex/Baccin workflow"
+    grepl('sbatch_options <- scrna_stage_resource_options', app_text, fixed = TRUE),
+  "single-cell stages receive expanded stage-aware SLURM resources and large reference transfers receive the highest memory tier"
 )
 idle_reference_html <- as.character(app_env$scrna_reference_label_selector_content(
   list(status = "idle", project_id = "scrna/test", choices = data.frame()),

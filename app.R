@@ -9130,6 +9130,27 @@ scrna_cellranger_max_parallel <- function(sample_count = Inf) {
   min(value, sample_count)
 }
 
+scrna_stage_resource_options <- function(stage, large_reference_transfer = FALSE) {
+  stage <- tolower(trimws(as.character(stage %||% "inspect")))
+  profile <- switch(stage,
+    inspect = c(cpus = 12L, memory_gb = 96L, time = "1-00:00:00"),
+    qc = c(cpus = 16L, memory_gb = 128L, time = "2-00:00:00"),
+    preprocess = c(cpus = 24L, memory_gb = 192L, time = "3-00:00:00"),
+    cluster = c(cpus = 24L, memory_gb = 192L, time = "3-00:00:00"),
+    annotate = c(cpus = 24L, memory_gb = 192L, time = "3-00:00:00"),
+    score = c(cpus = 16L, memory_gb = 128L, time = "2-00:00:00"),
+    differential = c(cpus = 16L, memory_gb = 128L, time = "3-00:00:00"),
+    pathway = c(cpus = 12L, memory_gb = 96L, time = "1-00:00:00"),
+    c(cpus = 16L, memory_gb = 128L, time = "2-00:00:00")
+  )
+  if (isTRUE(large_reference_transfer) && identical(stage, "annotate")) profile[["memory_gb"]] <- "256"
+  c(
+    paste0("--cpus-per-task=", profile[["cpus"]]),
+    paste0("--mem=", profile[["memory_gb"]], "G"),
+    paste0("--time=", profile[["time"]])
+  )
+}
+
 submit_scrna_cellranger_jobs <- function(project, transcriptome, expected_cells = 0, samples = NULL) {
   fastq <- tryCatch(scrna_fastq_manifest(project), error = function(e) e)
   if (inherits(fastq, "error")) return(record_preflight_failure(project, "Alignment & counting", conditionMessage(fastq), "cellranger"))
@@ -9614,7 +9635,7 @@ submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto
   prior_marker <- if (nzchar(prior)) file.path(out_dir, paste0("_STAGE_", toupper(prior), "_COMPLETE")) else ""
   if (nzchar(prior_marker) && !file.exists(prior_marker)) return(record_preflight_failure(project, step_label, paste0("Complete ", scrna_stage_step(prior), " before submitting this stage."), "scrna"))
   scanpy_container_path <- if (identical(resolved_engine, "scanpy")) scanpy_container_check()$path else ""
-  sbatch_options <- character(0)
+  large_reference_transfer <- FALSE
   if (identical(stage, "annotate") && identical(resolved_engine, "seurat") && nzchar(reference_file)) {
     object_candidates <- c(
       file.path(out_dir, "objects", "processed_seurat.rds"),
@@ -9624,10 +9645,11 @@ submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto
     query_file <- if (length(object_candidates)) object_candidates[[1]] else ""
     input_bytes <- sum(file.info(c(query_file, reference_file)[nzchar(c(query_file, reference_file))])$size, na.rm = TRUE)
     # Compressed Seurat objects expand substantially during anchor projection.
-    # Match the proven Alex/Baccin workflow's ~120 GB allowance when the saved
-    # query plus reference exceeds 8 GiB, while retaining 64 GB for small jobs.
-    if (is.finite(input_bytes) && input_bytes > 8 * 1024^3) sbatch_options <- "--mem=128G"
+    # Large query/reference pairs receive an additional memory tier above the
+    # already expanded annotation-stage allocation.
+    large_reference_transfer <- is.finite(input_bytes) && input_bytes > 8 * 1024^3
   }
+  sbatch_options <- scrna_stage_resource_options(stage, large_reference_transfer)
   submit_sbatch(project, step_label, qsub, c(runner, resolved_engine, manifest_path, out_dir, params_path, stage, scanpy_container_path), "scrna_pipeline", paste(stage, resolved_engine, normalization, integration), target = file.path(out_dir, paste0("_STAGE_", toupper(stage), "_COMPLETE")), reference = resolved_engine, sbatch_options = sbatch_options)
 }
 
