@@ -10835,6 +10835,11 @@ scrna_auxiliary_metadata_paths <- function(project) {
   if (!dir.exists(tables_dir)) return(character(0))
   paths <- c(
     file.path(tables_dir, "cell_metadata.tsv"),
+    # Signature scoring writes this compact per-cell table before it refreshes
+    # the larger metadata and UMAP tables. Including it here lets the Results
+    # Explorer expose scores immediately and remains a safe fallback for an
+    # older completed run whose embedding table was not rewritten.
+    file.path(tables_dir, "signature_scores_per_cell.tsv"),
     list.files(tables_dir, pattern = "^reference_transfer_per_cell__.*\\.tsv$", full.names = TRUE)
   )
   paths <- unique(paths[file.exists(paths) & vapply(paths, file_size_for, numeric(1)) > 0])
@@ -13341,6 +13346,24 @@ server <- function(input, output, session) {
     if (!length(idx) || is.na(idx)) return(new_project_from_inputs(new_project_input_values()))
     p[[idx]]
   })
+
+  # The Results Explorer deliberately does not re-render on every scheduler
+  # poll, which avoids the tab flicker seen with large objects. Watch the
+  # small signature output instead, so its controls refresh exactly when a
+  # completed signature-scoring job writes new cell metadata.
+  scrna_signature_scores_stamp <- reactivePoll(
+    intervalMillis = PROGRESS_REFRESH_MS,
+    session = session,
+    checkFunc = function() {
+      p <- isolate(current_project())
+      if (!is_scrna_project(p)) return("")
+      path <- file.path(scrna_output_dir(p), "tables", "signature_scores_per_cell.tsv")
+      if (!file.exists(path)) return("")
+      info <- file.info(path)
+      paste(info$size[[1]], as.numeric(info$mtime[[1]]), sep = "@")
+    },
+    valueFunc = function() TRUE
+  )
 
   existing_project_selected <- reactive({
     selected <- input$project_id
@@ -16337,6 +16360,7 @@ server <- function(input, output, session) {
     values
   }
   output$scrna_violin_controls_ui <- renderUI({
+    scrna_signature_scores_stamp()
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
     columns <- scrna_embedding_columns(p)
     signatures <- grep("^signature__", columns, value = TRUE)
@@ -16435,6 +16459,7 @@ server <- function(input, output, session) {
     content = function(file) ggplot2::ggsave(file, scrna_violin_plot_object(), width = 10, height = 6.5, dpi = 220)
   )
   output$scrna_embedding_controls_ui <- renderUI({
+    scrna_signature_scores_stamp()
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
     embedding_views <- scrna_embedding_view_choices(p)
     if (!length(embedding_views)) {
