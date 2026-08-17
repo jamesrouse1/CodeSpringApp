@@ -359,6 +359,7 @@ ATAC_EXAMPLE_DESIGN_DIR <- normalizePath(file.path(SCRIPTS_DIR, "test", "manifes
 CHIP_EXAMPLE_FASTQ_DIR <- normalizePath(file.path(SCRIPTS_DIR, "test", "fastq_chip"), winslash = "/", mustWork = FALSE)
 CHIP_EXAMPLE_DESIGN_DIR <- normalizePath(file.path(SCRIPTS_DIR, "test", "manifest_chip"), winslash = "/", mustWork = FALSE)
 SCRNA_PBMC3K_EXAMPLE_DIR <- "/grid/bsr/data/data/bsr_readable_data/references/scrna_example/pbmc3k/filtered_gene_bc_matrices/hg19"
+SCRNA_PBMC3K_MARKERS_FILE <- "/grid/bsr/data/data/bsr_readable_data/references/scrna_example/pbmc3k/pbmc3k_cell_type_markers.tsv"
 PROGRESS_REFRESH_MS <- 20000
 JOB_HISTORY_CACHE_SECONDS <- 12
 MAX_SLURM_JOB_IDS_PER_REFRESH <- 100L
@@ -8921,6 +8922,14 @@ scrna_manifest <- function(project) {
   tryCatch(utils::read.delim(path, check.names = FALSE, stringsAsFactors = FALSE), error = function(e) data.frame())
 }
 
+scrna_is_pbmc3k_example <- function(project) {
+  manifest <- scrna_manifest(project)
+  if (!NROW(manifest) || !"input_path" %in% names(manifest)) return(FALSE)
+  example_dir <- normalizePath(SCRNA_PBMC3K_EXAMPLE_DIR, winslash = "/", mustWork = FALSE)
+  paths <- normalizePath(path.expand(trimws(as.character(manifest$input_path))), winslash = "/", mustWork = FALSE)
+  any(paths == example_dir)
+}
+
 scrna_source_is_processed_object <- function(project) {
   manifest <- scrna_manifest(project)
   NROW(manifest) == 1L && grepl("\\.(rds|h5ad)$", trimws(as.character(manifest$input_path[[1]])), ignore.case = TRUE)
@@ -9411,7 +9420,8 @@ write_scrna_manual_gene_sets <- function(project, entries, set_column, directory
   rows <- do.call(rbind, lapply(seq_along(entries), function(index) {
     genes <- unique(trimws(as.character(entries[[index]] %||% character(0))))
     genes <- genes[nzchar(genes)]
-    if (length(genes) < 2L) stop("Each named gene set needs at least two unique genes.")
+    minimum_genes <- if (identical(set_column, "cell_type")) 1L else 2L
+    if (length(genes) < minimum_genes) stop("Each named gene set needs at least ", minimum_genes, " unique genes.")
     data.frame(set_name = rep(names(entries)[[index]], length(genes)), gene = genes, stringsAsFactors = FALSE)
   }))
   names(rows)[names(rows) == "set_name"] <- set_column
@@ -13278,8 +13288,8 @@ server <- function(input, output, session) {
     scrna_annotation_ui_settings(states)
     invisible(value)
   }
-  add_scrna_manual_entry <- function(store, name, gene_text, label) {
-    entry <- scrna_manual_gene_entry(name, gene_text, label, minimum_genes = 2L)
+  add_scrna_manual_entry <- function(store, name, gene_text, label, minimum_genes = 2L) {
+    entry <- scrna_manual_gene_entry(name, gene_text, label, minimum_genes = minimum_genes)
     entries <- isolate(scrna_manual_entries(store))
     duplicate <- which(tolower(names(entries)) == tolower(entry$name))
     if (length(duplicate)) entries <- entries[-duplicate]
@@ -14465,6 +14475,16 @@ server <- function(input, output, session) {
     scrna_umap_defaults_applied(stamp)
   }, ignoreInit = FALSE)
 
+  # Keep the later UMAP card as a convenient place to revise its emphasis.
+  # The preprocessing control remains authoritative because it is what creates
+  # the initial pre-integration sample UMAP.
+  observeEvent(input$scrna_cluster_umap_focus, {
+    choice <- input$scrna_cluster_umap_focus %||% ""
+    if (choice %in% c("local", "global")) {
+      updateRadioButtons(session, "scrna_umap_focus", selected = choice)
+    }
+  }, ignoreInit = TRUE)
+
   output$scrna_qc_settings_ui <- renderUI({
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
     choices <- scrna_ui_choices()
@@ -14527,7 +14547,9 @@ server <- function(input, output, session) {
     }
     tagList(
       integration_controls,
-      tags$p(class = "muted small-note", "Neighbours, minimum distance, and PCA dimensions were selected during Normalize & PCA and were used for the pre-integration sample UMAP. Those same values will be used here for clustering after optional integration."),
+      tags$h4("UMAP parameters"),
+      radioButtons("scrna_cluster_umap_focus", "Emphasize", choices = c("Local structure (nearby subpopulations)" = "local", "Global structure (broader population relationships)" = "global"), selected = input$scrna_umap_focus %||% "local", inline = TRUE),
+      tags$p(class = "muted small-note", "Neighbours, minimum distance, and PCA dimensions were selected during Normalize & PCA and used for the pre-integration sample UMAP. Changing emphasis here updates those values for this final UMAP and clustering run."),
       numericInput("scrna_cluster_resolution", "Clustering resolution", value = input$scrna_cluster_resolution %||% 0.6, min = 0.05, max = 5, step = 0.05),
       tags$details(tags$summary("Advanced clustering and Harmony settings"),
         numericInput("scrna_seed", "Random seed", value = input$scrna_seed %||% 1234, min = 1, step = 1),
@@ -14566,7 +14588,7 @@ server <- function(input, output, session) {
   })
 
   observeEvent(input$scrna_manual_annotation_add, {
-    result <- tryCatch(add_scrna_manual_entry(scrna_manual_annotation_sets, input$scrna_manual_annotation_cell_type, input$scrna_manual_annotation_genes, "Cell type"), error = function(e) e)
+    result <- tryCatch(add_scrna_manual_entry(scrna_manual_annotation_sets, input$scrna_manual_annotation_cell_type, input$scrna_manual_annotation_genes, "Cell type", minimum_genes = 1L), error = function(e) e)
     if (inherits(result, "error")) return(showNotification(conditionMessage(result), type = "error", duration = 7))
     updateTextInput(session, "scrna_manual_annotation_cell_type", value = "")
     updateTextAreaInput(session, "scrna_manual_annotation_genes", value = "")
@@ -14621,6 +14643,10 @@ server <- function(input, output, session) {
     annotation_methods <- c("Marker-list scoring" = "markers", "Direct per-cell mapping" = "mapping")
     if (identical(engine, "seurat")) annotation_methods <- c(annotation_methods, "Seurat reference label transfer" = "reference")
     ui_state <- isolate(scrna_annotation_ui_state(p))
+    pbmc_example <- scrna_is_pbmc3k_example(p)
+    default_marker_source <- if (pbmc_example) "server" else "manual"
+    saved_marker_path <- isolate(input$scrna_marker_file) %||% ""
+    default_marker_path <- if (nzchar(trimws(saved_marker_path))) saved_marker_path else if (pbmc_example) SCRNA_PBMC3K_MARKERS_FILE else ""
     inspection_state <- isolate(scrna_reference_inspection())
     retained_reference <- identical(as.character(inspection_state$project_id %||% ""), as.character(p$id %||% p$name)) &&
       nzchar(inspection_state$reference_file %||% "") && file.exists(inspection_state$reference_file %||% "")
@@ -14651,7 +14677,7 @@ server <- function(input, output, session) {
       tags$p(class = "muted small-note", "Use a new name for each marker system (for example cell_type_broad and cell_type_fine). Existing annotation and signature metadata are retained in the processed object."),
       radioButtons("scrna_annotation_method", "Annotation method", choices = annotation_methods, selected = selected_method, inline = TRUE),
       conditionalPanel("input.scrna_annotation_method == 'markers'",
-      radioButtons("scrna_marker_source", "How do you want to provide marker genes?", choices = c("Enter cell types here" = "manual", "Browse or paste a server path" = "server", "Upload from laptop" = "upload"), selected = ui_state$marker_source %||% "manual", inline = TRUE),
+      radioButtons("scrna_marker_source", "How do you want to provide marker genes?", choices = c("Enter cell types here" = "manual", "Browse or paste a server path" = "server", "Upload from laptop" = "upload"), selected = ui_state$marker_source %||% default_marker_source, inline = TRUE),
       conditionalPanel("input.scrna_marker_source == 'manual'", div(class = "read-source-note",
         tags$strong("Add one cell type at a time"),
         tags$p("Give the cell type a clear name, enter one marker gene per line, and add it to the collection. Re-entering the same cell-type name replaces that entry."),
@@ -14660,7 +14686,7 @@ server <- function(input, output, session) {
         actionButton("scrna_manual_annotation_add", "Add or update cell type", class = "btn-default"),
         br(), br(), tags$h4("Cell types queued for annotation"), uiOutput("scrna_manual_annotation_entries_ui")
       )),
-      conditionalPanel("input.scrna_marker_source == 'server'", div(class = "new-project-path-control", textInput("scrna_marker_file", "Marker list", value = isolate(input$scrna_marker_file) %||% "", placeholder = "Absolute server .tsv with cell_type and gene columns"), actionButton("browse_scrna_marker_file", "Browse server", class = "btn-default"))),
+      conditionalPanel("input.scrna_marker_source == 'server'", div(class = "new-project-path-control", textInput("scrna_marker_file", "Marker list", value = default_marker_path, placeholder = "Absolute server .tsv with cell_type and gene columns"), actionButton("browse_scrna_marker_file", "Browse server", class = "btn-default"))),
       conditionalPanel("input.scrna_marker_source == 'upload'", fileInput("scrna_marker_upload", "Marker list from laptop", accept = c(".tsv", ".txt"))),
       selectInput("scrna_marker_species", "Species used by these marker genes", choices = c("Same as the expression dataset — no conversion" = "same", "Mouse" = "mouse", "Human" = "human"), selected = isolate(input$scrna_marker_species) %||% "same", selectize = FALSE),
         conditionalPanel("input.scrna_marker_species != 'same'",
@@ -14669,7 +14695,7 @@ server <- function(input, output, session) {
           conditionalPanel("input.scrna_marker_ortholog_source == 'server'", div(class = "new-project-path-control", textInput("scrna_marker_ortholog_file", "Optional ortholog table path", value = isolate(input$scrna_marker_ortholog_file) %||% "", placeholder = "Blank uses bundled mouse_human_orthologs_MGI.tsv"), actionButton("browse_scrna_marker_ortholog_file", "Browse server", class = "btn-default"))),
           conditionalPanel("input.scrna_marker_ortholog_source == 'upload'", fileInput("scrna_marker_ortholog_upload", "Ortholog table from laptop", accept = c(".tsv", ".txt", ".csv")))
         ),
-      tags$p(class = "muted small-note", "Each cluster is assigned to the cell type with the highest mean normalized marker score. At least two unique genes are required per cell type."),
+      tags$p(class = "muted small-note", "Each cluster is assigned to the cell type with the highest mean normalized marker score. One or more unique marker genes may be supplied per cell type; multi-gene labels are generally more robust."),
       ),
       conditionalPanel("input.scrna_annotation_method == 'reference'",
         div(class = "read-source-note",
