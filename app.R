@@ -11297,7 +11297,7 @@ scrna_results_explorer_ui <- function() {
       tabPanel("Interactive UMAP", br(), h3("Interactive UMAP"), tags$p(class = "muted", "Color every cell by metadata or normalized marker expression. Hover for cell identity and metadata; use lasso or box selection to inspect cells."), uiOutput("scrna_embedding_controls_ui"), uiOutput("scrna_embedding_widget_ui"), uiOutput("scrna_selected_cells_ui"), br(), uiOutput("scrna_processed_object_download_ui")),
       tabPanel("Violins", br(), h3("Expression Violins"), tags$p(class = "muted", "Compare normalized gene expression or stored signature scores across clusters, cell types, or other categorical metadata."), uiOutput("scrna_violin_controls_ui"), plotOutput("scrna_expression_violin", height = "680px"), downloadButton("download_scrna_expression_violin", "Download current violin", class = "btn-default")),
       tabPanel("Marker panels", br(), h3("Marker-list panels"), tags$p(class = "muted", "Dot plots show the fraction of cells expressing each supplied marker and its normalized average expression. Heatmaps show row-scaled mean normalized expression. Large marker lists are automatically divided into readable panels."), uiOutput("scrna_marker_panel_ui")),
-      tabPanel("Cluster markers", br(), h3("Top cluster-marker heatmaps"), tags$p(class = "muted", "Created only when ‘Also calculate marker genes for every cluster’ was selected during annotation. Each panel shows the top 10 ranked genes for up to four source clusters, preserving readable gene labels."), uiOutput("scrna_cluster_marker_heatmap_ui")),
+      tabPanel("Cluster markers", br(), h3("Top cluster-marker heatmap"), tags$p(class = "muted", "Created only when ‘Also calculate marker genes for every cluster’ was selected during annotation. One heatmap shows up to 10 positive markers for every cluster, ordered by cluster and effect size."), uiOutput("scrna_cluster_marker_heatmap_ui")),
       tabPanel("QC", br(), h3("Quality Control"), uiOutput("scrna_qc_plot_ui"), br(), h4("QC summary by sample"), table_output("scrna_qc_summary"), br(), h4("Doublet calls by capture"), table_output("scrna_doublet_summary"), br(), tags$details(tags$summary("Individual doublet calls"), table_output("scrna_doublet_calls")))
     ))
   ))
@@ -14028,7 +14028,7 @@ server <- function(input, output, session) {
     p <- current_project()
     if (!is_scrna_project(p) || !scrna_is_pbmc3k_example(p)) return()
     figures <- file.path(scrna_output_dir(p), "figures")
-    heatmaps <- if (dir.exists(figures)) list.files(figures, pattern = "^08_cluster_marker_heatmap_panel_[0-9]+\\.png$", full.names = TRUE) else character(0)
+    heatmaps <- if (dir.exists(figures)) list.files(figures, pattern = "^08_cluster_marker_heatmap\\.png$", full.names = TRUE) else character(0)
     if (!length(heatmaps)) return()
     key <- paste(p$id %||% p$name, paste(file.info(heatmaps)$mtime, collapse = "|"), sep = "::")
     if (identical(isolate(scrna_pbmc_marker_results_shown()), key)) return()
@@ -16240,13 +16240,9 @@ server <- function(input, output, session) {
   output$scrna_cluster_marker_heatmap_ui <- renderUI({
     progress_refresh()
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
-    files <- scrna_result_file_choices(p, "^08_cluster_marker_heatmap_panel_[0-9]+\\.png$")
+    files <- scrna_result_file_choices(p, "^08_cluster_marker_heatmap\\.png$")
     if (!length(files)) return(div(class = "empty-box", "Select ‘Also calculate marker genes for every cluster’ and rerun annotation to generate these heatmaps."))
-    selected <- selected_choice(input$scrna_cluster_marker_heatmap, files, unname(files)[[1]])
-    tagList(
-      selectInput("scrna_cluster_marker_heatmap", "Cluster-marker heatmap", choices = files, selected = selected, selectize = FALSE),
-      image_or_file_ui(selected, "900px")
-    )
+    image_or_file_ui(unname(files)[[1]], "900px")
   })
   output$scrna_processed_object_download_ui <- renderUI({
     progress_refresh()
