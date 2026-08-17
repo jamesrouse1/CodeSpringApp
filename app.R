@@ -9002,8 +9002,6 @@ scrna_fastq_input_rows <- function(path, single_sample_name = "") {
     input_type = "fastq_folder",
     fastq_sample = prefixes,
     condition = "",
-    donor = "",
-    technical_batch = "",
     stringsAsFactors = FALSE,
     check.names = FALSE
   )
@@ -9038,8 +9036,6 @@ scrna_matrix_input_rows <- function(path, single_sample_name = "", discover_chil
     input_type = "filtered_10x_matrix",
     fastq_sample = "",
     condition = "",
-    donor = "",
-    technical_batch = "",
     stringsAsFactors = FALSE,
     check.names = FALSE
   )
@@ -9282,21 +9278,23 @@ validate_scrna_manifest <- function(manifest, check_paths = TRUE) {
   if (!NROW(manifest)) stop("The single-cell manifest has no sample rows.")
   manifest$sample_id <- trimws(as.character(manifest$sample_id))
   manifest$input_path <- trimws(as.character(manifest$input_path))
-  if (!"capture_id" %in% names(manifest)) manifest$capture_id <- manifest$sample_id
-  manifest$capture_id <- trimws(as.character(manifest$capture_id))
-  manifest$capture_id[!nzchar(manifest$capture_id)] <- manifest$sample_id[!nzchar(manifest$capture_id)]
+  # capture_id is only needed when users intentionally combine libraries for
+  # doublet calling. Keep the saved design bare by deriving it from sample_id
+  # when that optional column is absent.
+  capture_id <- if ("capture_id" %in% names(manifest)) trimws(as.character(manifest$capture_id)) else manifest$sample_id
+  capture_id[!nzchar(capture_id)] <- manifest$sample_id[!nzchar(capture_id)]
   if (!"input_type" %in% names(manifest)) manifest$input_type <- ""
   manifest$input_type <- tolower(trimws(as.character(manifest$input_type)))
   if (any(!nzchar(manifest$sample_id))) stop("Every single-cell manifest row needs a sample_id.")
   if (any(!nzchar(manifest$input_path))) stop("Every single-cell manifest row needs an input_path.")
   if (anyDuplicated(manifest$sample_id)) stop("Each sample_id in the single-cell manifest must be unique.")
-  if (any(!nzchar(manifest$capture_id))) stop("Every single-cell manifest row needs a capture_id or sample_id.")
+  if (any(!nzchar(capture_id))) stop("Every single-cell manifest row needs a capture_id or sample_id.")
   if ("expected_doublet_rate" %in% names(manifest)) {
     raw_rate <- trimws(as.character(manifest$expected_doublet_rate))
     supplied <- nzchar(raw_rate) & !is.na(raw_rate)
     parsed <- suppressWarnings(as.numeric(raw_rate))
     if (any(supplied & (!is.finite(parsed) | parsed <= 0 | parsed >= 1))) stop("expected_doublet_rate must be blank for automatic estimation or a number greater than 0 and less than 1.")
-    rates_by_capture <- split(parsed[supplied], manifest$capture_id[supplied])
+    rates_by_capture <- split(parsed[supplied], capture_id[supplied])
     inconsistent <- names(Filter(function(x) length(unique(x)) > 1L, rates_by_capture))
     if (length(inconsistent)) stop("expected_doublet_rate must be constant within capture_id: ", inconsistent[[1]])
   }
@@ -9348,7 +9346,7 @@ scrna_manifest_from_setup <- function(manifest_path = "", sample_id = "", input_
     sample_id <- sub("\\.(rds|h5ad)$", "", sample_id, ignore.case = TRUE)
     sample_id <- clean_name(sample_id, "sample_1")
   }
-  validate_scrna_manifest(data.frame(sample_id = sample_id, input_path = input_path, stringsAsFactors = FALSE, check.names = FALSE))
+  validate_scrna_manifest(data.frame(sample_id = sample_id, input_path = input_path, condition = "", stringsAsFactors = FALSE, check.names = FALSE))
 }
 
 scrna_engine_for_manifest <- function(project, requested = "auto") {
@@ -12292,7 +12290,7 @@ server <- function(input, output, session) {
   scrna_example_mode <- reactiveVal(FALSE)
   new_scrna_inputs <- reactiveVal(data.frame(
     sample_id = character(0), input_path = character(0), input_type = character(0), fastq_sample = character(0), condition = character(0),
-    donor = character(0), technical_batch = character(0), stringsAsFactors = FALSE,
+    stringsAsFactors = FALSE,
     check.names = FALSE
   ))
   new_scrna_input_message <- reactiveVal("")
@@ -13427,7 +13425,7 @@ server <- function(input, output, session) {
         )
       } else NULL
       return(tagList(
-        tags$p(class = "muted", "Each row represents one single-cell sample. Edit the sample name, matrix/FASTQ input path, input type, FASTQ prefix, condition, donor, and technical batch directly in this design table, then save before submitting the workflow."),
+        tags$p(class = "muted", "Each row represents one single-cell sample. The starting design contains only the input details and a condition column. Add donor, batch, or any other metadata column only when it is needed for your study."),
         single_input_note
       ))
     }
@@ -13454,9 +13452,9 @@ server <- function(input, output, session) {
     p <- current_project()
     if (is_scrna_project(p) && !scrna_uses_input_manifest(p)) return(NULL)
     is_single_scrna_input <- is_scrna_project(p) && NROW(scrna_manifest(p)) <= 1L
-    label <- if (is_single_scrna_input) "Optional sample metadata columns" else "Metadata columns"
-    placeholder <- if (is_single_scrna_input) "Only if known: donor, technical_batch" else "condition, donor, technical_batch"
-    fallback <- if (is_single_scrna_input) "" else "treatment"
+    label <- "Add metadata columns"
+    placeholder <- "e.g. donor, technical_batch"
+    fallback <- ""
     textInput("metadata_cols", label, value = isolate(input$metadata_cols) %||% fallback, placeholder = placeholder)
   })
 
@@ -13787,7 +13785,7 @@ server <- function(input, output, session) {
         return(div(class = "empty-box", "This project has one input. No manifest editing is needed."))
       }
       return(tagList(
-        div(class = "read-source-note", tags$strong("Single-cell sample manifest"), tags$p("This project-local copy preserves input paths plus optional condition, donor, and batch columns. Every value is displayed in an editable box, matching the RNA-seq design editor.")),
+        div(class = "read-source-note", tags$strong("Single-cell sample design"), tags$p("The starting design is intentionally minimal: input details and condition. Add only the metadata columns required for your experiment. Every value is editable in place.")),
         uiOutput("scrna_manifest_editor_ui"),
         tags$p(class = "muted small-note", "The original source manifest is never modified. Inputs must remain readable absolute server paths; completed results retain the saved manifest used for that run.")
       ))
