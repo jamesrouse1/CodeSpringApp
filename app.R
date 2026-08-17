@@ -10821,6 +10821,7 @@ scrna_dashboard_gene_list_path <- function(project) {
   scanpy_object <- file.path(scrna_output_dir(project), "objects", "processed_scanpy.h5ad")
   if (!file.exists(scanpy_object)) scanpy_object <- file.path(scrna_output_dir(project), "checkpoints", "04_clustered_scanpy.h5ad")
   seurat_object <- file.path(scrna_output_dir(project), "objects", "processed_seurat.rds")
+  if (!file.exists(seurat_object)) seurat_object <- file.path(scrna_output_dir(project), "checkpoints", "04_clustered_seurat.rds")
   engine <- if (file.exists(scanpy_object)) "scanpy" else if (file.exists(seurat_object)) "seurat" else ""
   object_path <- if (identical(engine, "scanpy")) scanpy_object else seurat_object
   if (!nzchar(engine) || !file.exists(object_path)) return("")
@@ -16029,6 +16030,7 @@ server <- function(input, output, session) {
     scanpy_object <- file.path(root, "objects", "processed_scanpy.h5ad")
     if (!file.exists(scanpy_object)) scanpy_object <- file.path(root, "checkpoints", "04_clustered_scanpy.h5ad")
     seurat_object <- file.path(root, "objects", "processed_seurat.rds")
+    if (!file.exists(seurat_object)) seurat_object <- file.path(root, "checkpoints", "04_clustered_seurat.rds")
     engine <- if (file.exists(scanpy_object)) "scanpy" else if (file.exists(seurat_object)) "seurat" else ""
     checkpoint <- if (identical(engine, "scanpy")) scanpy_object else seurat_object
     if (!nzchar(engine) || !file.exists(checkpoint)) {
