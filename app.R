@@ -10836,6 +10836,14 @@ scrna_embedding_color_choices <- function(project, view = "integrated") {
   unique(c(preferred, sort(setdiff(relevant, preferred))))
 }
 
+# Keep sparse embeddings readable while avoiding overplotting in large runs.
+# The slider remains available as a user-controlled minimum above this value.
+scrna_embedding_auto_point_size <- function(n_cells) {
+  n_cells <- suppressWarnings(as.numeric(n_cells))
+  if (!is.finite(n_cells) || n_cells < 1) return(2.25)
+  max(1.6, min(6, 2.8 * sqrt(50000 / n_cells)))
+}
+
 scrna_embedding_color_column <- function(project, requested = "", view = "integrated") {
   choices <- scrna_embedding_color_choices(project, view)
   if (!length(choices)) return("")
@@ -16320,7 +16328,7 @@ server <- function(input, output, session) {
           checkboxInput("scrna_embedding_legend", "Show legend", value = if (is.null(isolate(input$scrna_embedding_legend))) TRUE else isTRUE(isolate(input$scrna_embedding_legend))),
           div(class = "button-row", actionButton("scrna_embedding_select_all", "Select all cells", class = "btn-default btn-sm"), actionButton("scrna_embedding_clear_selection", "Unselect all cells", class = "btn-default btn-sm")),
           downloadButton("download_scrna_embedding_pdf", "Download publication PDF", class = "btn-default btn-sm"),
-          tags$details(tags$summary("Display"), selectInput("scrna_embedding_display_cells", "Cells rendered", choices = c("Representative 75,000 (faster)" = "75000", "Representative 125,000" = "125000", "All cells" = "all"), selected = selected_choice(isolate(input$scrna_embedding_display_cells), c("75000", "125000", "all"), "75000"), selectize = FALSE), sliderInput("scrna_embedding_point_size", "Point size", min = 1, max = 8, value = isolate(input$scrna_embedding_point_size) %||% 2, step = 0.5), sliderInput("scrna_embedding_opacity", "Opacity", min = 0.1, max = 1, value = isolate(input$scrna_embedding_opacity) %||% 0.72, step = 0.05)))
+          tags$details(tags$summary("Display"), selectInput("scrna_embedding_display_cells", "Cells rendered", choices = c("Representative 75,000 (faster)" = "75000", "Representative 125,000" = "125000", "All cells" = "all"), selected = selected_choice(isolate(input$scrna_embedding_display_cells), c("75000", "125000", "all"), "75000"), selectize = FALSE), sliderInput("scrna_embedding_point_size", "Point size (auto-adjusted)", min = 1, max = 8, value = isolate(input$scrna_embedding_point_size) %||% 2, step = 0.5), sliderInput("scrna_embedding_opacity", "Opacity", min = 0.1, max = 1, value = isolate(input$scrna_embedding_opacity) %||% 0.72, step = 0.05)))
       ),
       uiOutput("scrna_embedding_display_note")
     )
@@ -16446,6 +16454,7 @@ server <- function(input, output, session) {
     if (!is.finite(max_points) || max_points < 1L) max_points <- 75000L
     x <- scrna_embedding_table(p, columns = c(color_column, "sample_id", "condition", "batch", "cluster", "cell_type", "annotation_source"), max_points = max_points, view = embedding_view)
     validate(need(NROW(x), "No valid UMAP coordinates are available for this selection."))
+    point_size <- max(point_size, scrna_embedding_auto_point_size(NROW(x)))
     marker_gene <- ""
     if (identical(color_mode, "marker")) {
       marker_gene <- trimws(input$scrna_embedding_gene %||% "")
@@ -16491,9 +16500,11 @@ server <- function(input, output, session) {
       xaxis = list(title = "UMAP 1", zeroline = FALSE),
       yaxis = list(title = "UMAP 2", zeroline = FALSE, scaleanchor = "x", scaleratio = 1),
       showlegend = isTRUE(input$scrna_embedding_legend),
-      legend = list(itemsizing = "constant", font = list(size = 13)),
+      legend = list(x = 1.02, xanchor = "left", y = 1, yanchor = "top", itemsizing = "constant", font = list(size = 13)),
       hovermode = "closest",
-      margin = list(l = 55, r = 30, t = 25, b = 50)
+      # Reserve a fixed legend column: categorical label lengths can then
+      # never change the dimensions of the UMAP panel itself.
+      margin = list(l = 65, r = 230, t = 30, b = 65)
     )
   })
   scrna_embedding_publication_plot <- reactive({
@@ -16510,6 +16521,7 @@ server <- function(input, output, session) {
     validate(need(NROW(x), "No valid UMAP coordinates are available."))
     point_size <- suppressWarnings(as.numeric(input$scrna_embedding_point_size %||% 2))
     if (!is.finite(point_size)) point_size <- 2
+    point_size <- max(point_size, scrna_embedding_auto_point_size(NROW(x)))
     point_size <- max(0.15, min(2.5, point_size * 0.42))
     opacity <- suppressWarnings(as.numeric(input$scrna_embedding_opacity %||% 0.72))
     if (!is.finite(opacity)) opacity <- 0.72
