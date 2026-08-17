@@ -358,6 +358,7 @@ ATAC_EXAMPLE_FASTQ_DIR <- normalizePath(file.path(SCRIPTS_DIR, "test", "fastq_at
 ATAC_EXAMPLE_DESIGN_DIR <- normalizePath(file.path(SCRIPTS_DIR, "test", "manifest_atac"), winslash = "/", mustWork = FALSE)
 CHIP_EXAMPLE_FASTQ_DIR <- normalizePath(file.path(SCRIPTS_DIR, "test", "fastq_chip"), winslash = "/", mustWork = FALSE)
 CHIP_EXAMPLE_DESIGN_DIR <- normalizePath(file.path(SCRIPTS_DIR, "test", "manifest_chip"), winslash = "/", mustWork = FALSE)
+SCRNA_PBMC3K_EXAMPLE_DIR <- "/grid/bsr/data/data/bsr_readable_data/references/scrna_example/pbmc3k/filtered_gene_bc_matrices/hg19"
 PROGRESS_REFRESH_MS <- 20000
 JOB_HISTORY_CACHE_SECONDS <- 12
 MAX_SLURM_JOB_IDS_PER_REFRESH <- 100L
@@ -680,6 +681,7 @@ example_dataset_paths <- function(key) {
     cutrun = list(name = "example_cutrun", fastq_dir = CUTRUN_EXAMPLE_FASTQ_DIR, design_dir = CUTRUN_EXAMPLE_DESIGN_DIR),
     atac = list(name = "example_atac", fastq_dir = ATAC_EXAMPLE_FASTQ_DIR, design_dir = ATAC_EXAMPLE_DESIGN_DIR),
     chip = list(name = "example_chip", fastq_dir = CHIP_EXAMPLE_FASTQ_DIR, design_dir = CHIP_EXAMPLE_DESIGN_DIR, species = "human", paired_end = "single"),
+    scrna = list(name = "example_pbmc3k", matrix_dir = SCRNA_PBMC3K_EXAMPLE_DIR, sample_name = "pbmc3k", species = "human", folder_type = "filtered_10x_matrix"),
     NULL
   )
 }
@@ -11331,6 +11333,14 @@ body { background:#eef3f8; color:#17202f; }
   .cutrun-results-host iframe { min-height:560px; }
 }
 .btn-primary { background:#1f5eff; border-color:#1f5eff; }
+/* Keep every radio option aligned. Bootstrap's negative radio margin can
+   otherwise make later options appear indented in dynamic Shiny controls. */
+.tool-body .shiny-input-radiogroup .radio,
+#new_project_ui .shiny-input-radiogroup .radio { margin-left:0; padding-left:0; }
+.tool-body .shiny-input-radiogroup .radio label,
+#new_project_ui .shiny-input-radiogroup .radio label { display:inline-flex; align-items:flex-start; gap:7px; padding-left:0; }
+.tool-body .shiny-input-radiogroup .radio input[type='radio'],
+#new_project_ui .shiny-input-radiogroup .radio input[type='radio'] { position:static; margin:3px 0 0; flex:0 0 auto; }
 .status-toolbar { display:flex; gap:12px; align-items:flex-end; flex-wrap:wrap; margin-bottom:16px; }
 .status-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(250px, 1fr)); gap:12px; margin-bottom:18px; }
 .status-card, .run-card, .tool-panel { background:white; border:1px solid #d8dde8; border-radius:8px; padding:14px; box-shadow:0 1px 2px rgba(15,23,36,0.04); }
@@ -12963,7 +12973,7 @@ server <- function(input, output, session) {
       if (!is.null(example)) div(
         class = "read-source-note",
         tags$strong(paste("Bundled", analysis_label(new_analysis_key), "example")),
-        tags$p("Use the small example FASTQs and design matrix included with CodeSpringLab. Results are written only to your own results folder."),
+        tags$p(if (identical(new_analysis_key, "scrna")) "Use the shared PBMC 3k filtered 10x matrix. Choose your own output location when creating the project." else "Use the small example FASTQs and design matrix included with CodeSpringLab. Results are written only to your own results folder."),
         actionButton("use_example_dataset", "Use Example Dataset", class = "btn-default")
       ) else NULL,
       textInput("new_project_name", "Project name", value = "", placeholder = "e.g. my_project"),
@@ -13145,14 +13155,25 @@ server <- function(input, output, session) {
     example <- example_dataset_paths(key)
     if (is.null(example)) return()
     current_name <- trimws(input$new_project_name %||% "")
-    if (!nzchar(current_name) || grepl("^example_(dataset|rnaseq|cutrun|atac|chip)$", current_name)) {
+    if (!nzchar(current_name) || grepl("^example_(dataset|rnaseq|cutrun|atac|chip|pbmc3k)$", current_name)) {
       updateTextInput(session, "new_project_name", value = example$name)
     }
     new_fastq_folders(character(0))
-    updateRadioButtons(session, "new_fastq_location_mode", selected = "one")
-    updateTextInput(session, "new_fastq_dir", value = example$fastq_dir)
-    updateTextInput(session, "new_design_matrix_path", value = example$design_dir)
-    updateTextInput(session, "new_results_root", value = DEFAULT_RESULTS_ROOT)
+    if (identical(key, "scrna")) {
+      updateRadioButtons(session, "new_scrna_start_mode", selected = "new")
+      updateRadioButtons(session, "new_scrna_sample_count", selected = "single")
+      updateRadioButtons(session, "new_scrna_folder_type", selected = "filtered_10x_matrix")
+      updateCheckboxInput(session, "new_scrna_use_manifest", value = FALSE)
+      updateTextInput(session, "new_scrna_matrix_path", value = example$matrix_dir)
+      updateTextInput(session, "new_scrna_sample_name", value = example$sample_name)
+      # Never silently choose where a user's analysis will be written.
+      updateTextInput(session, "new_results_root", value = "")
+    } else {
+      updateRadioButtons(session, "new_fastq_location_mode", selected = "one")
+      updateTextInput(session, "new_fastq_dir", value = example$fastq_dir)
+      updateTextInput(session, "new_design_matrix_path", value = example$design_dir)
+      updateTextInput(session, "new_results_root", value = DEFAULT_RESULTS_ROOT)
+    }
     updateSelectInput(session, "new_species", selected = example$species %||% "mouse")
     updateRadioButtons(session, "new_paired_end", selected = example$paired_end %||% "paired")
     output$create_project_status <- renderText(paste("Loaded the bundled", analysis_label(key), "example paths. Choose a project name and click Create project."))
