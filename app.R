@@ -16176,10 +16176,12 @@ server <- function(input, output, session) {
     content = function(file) ggplot2::ggsave(file, scrna_violin_plot_object(), width = 10, height = 6.5, dpi = 220)
   )
   output$scrna_embedding_controls_ui <- renderUI({
-    progress_refresh()
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
     embedding_views <- scrna_embedding_view_choices(p)
     if (!length(embedding_views)) {
+      # Poll only while UMAP outputs are absent. Once the viewer is ready,
+      # avoid rebuilding its controls at each scheduler-status refresh.
+      progress_refresh()
       return(div(class = "empty-box", "Interactive UMAP coordinates are not available yet. The unintegrated viewer appears as soon as Normalize & PCA finishes."))
     }
     selected_view <- scrna_selected_embedding_view(p, isolate(input$scrna_embedding_view) %||% "")
@@ -16193,11 +16195,19 @@ server <- function(input, output, session) {
       if (length(embedding_views) > 1L) selectInput("scrna_embedding_view", "UMAP coordinates", choices = embedding_views, selected = selected_view, selectize = FALSE) else NULL,
       fluidRow(
         column(5, radioButtons("scrna_embedding_color_mode", "Color UMAP by", choices = c("Cell metadata" = "metadata", "Marker expression" = "marker"), selected = isolate(input$scrna_embedding_color_mode) %||% "metadata", inline = TRUE)),
-        column(5, conditionalPanel("input.scrna_embedding_color_mode == 'metadata'", selectInput("scrna_embedding_color", "Metadata field", choices = choices, selected = selected_choice(isolate(input$scrna_embedding_color), choices, choices[[1]]), selectize = FALSE)), conditionalPanel("input.scrna_embedding_color_mode == 'marker'", scrna_gene_select_input(p, "scrna_embedding_gene", "Marker gene", isolate(input$scrna_embedding_gene)))),
+        column(5, conditionalPanel("input.scrna_embedding_color_mode == 'metadata'", selectInput("scrna_embedding_color", "Metadata field", choices = choices, selected = selected_choice(isolate(input$scrna_embedding_color), choices, choices[[1]]), selectize = FALSE)), conditionalPanel("input.scrna_embedding_color_mode == 'marker'", uiOutput("scrna_embedding_marker_gene_ui"))),
         column(2, checkboxInput("scrna_embedding_legend", "Show legend", value = if (is.null(isolate(input$scrna_embedding_legend))) TRUE else isTRUE(isolate(input$scrna_embedding_legend))), actionButton("scrna_embedding_clear_selection", "Clear selected cells", class = "btn-default btn-sm"), tags$details(tags$summary("Display"), sliderInput("scrna_embedding_point_size", "Point size", min = 1, max = 8, value = isolate(input$scrna_embedding_point_size) %||% 2, step = 0.5), sliderInput("scrna_embedding_opacity", "Opacity", min = 0.1, max = 1, value = isolate(input$scrna_embedding_opacity) %||% 0.72, step = 0.05)))
       ),
       tags$p(class = "muted small-note", "Showing all cells in the saved UMAP.")
     )
+  })
+  output$scrna_embedding_marker_gene_ui <- renderUI({
+    # Reading a legacy processed object to recreate its gene list can take
+    # noticeable time. Do it only when marker coloring is explicitly chosen,
+    # never while the default metadata UMAP is loading.
+    if (!identical(input$scrna_embedding_color_mode %||% "metadata", "marker")) return(NULL)
+    p <- current_project(); if (!is_scrna_project(p)) return(NULL)
+    scrna_gene_select_input(p, "scrna_embedding_gene", "Marker gene", isolate(input$scrna_embedding_gene))
   })
   output$scrna_embedding_widget_ui <- renderUI({
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
@@ -16271,7 +16281,6 @@ server <- function(input, output, session) {
             table_output("scrna_selected_cells"))
   })
   if (PLOTLY_AVAILABLE) output$scrna_embedding_plot <- plotly::renderPlotly({
-    progress_refresh()
     p <- current_project()
     embedding_view <- scrna_selected_embedding_view(p, input$scrna_embedding_view %||% "")
     validate(need(nzchar(embedding_view), "Interactive UMAP coordinates are not available yet."))
