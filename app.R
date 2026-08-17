@@ -364,6 +364,7 @@ SCRNA_PBMC3K_LEGACY_MARKERS_FILE <- "/grid/bsr/data/data/bsr_readable_data/refer
 # created readable-data file, this path is present for every app installation
 # and is also mounted into the Scanpy container by the runner.
 SCRNA_PBMC3K_MARKERS_FILE <- file.path(SCRIPTS_DIR, "singleCellRNAseq", "pbmc3k_cell_type_markers.tsv")
+SCRNA_PBMC3K_SIGNATURES_FILE <- file.path(SCRIPTS_DIR, "singleCellRNAseq", "pbmc3k_signatures.tsv")
 PROGRESS_REFRESH_MS <- 20000
 JOB_HISTORY_CACHE_SECONDS <- 12
 MAX_SLURM_JOB_IDS_PER_REFRESH <- 100L
@@ -9609,6 +9610,9 @@ submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto
   reference_file <- trimws(as.character(reference_file %||% ""))
   reference_label_column <- trimws(as.character(reference_label_column %||% ""))
   signature_file <- trimws(as.character(signature_file %||% ""))
+  if (identical(stage, "score") && scrna_is_pbmc3k_example(project) && identical(signature_source, "server") && !nzchar(signature_file)) {
+    signature_file <- SCRNA_PBMC3K_SIGNATURES_FILE
+  }
   marker_species <- tolower(trimws(as.character(marker_species %||% "same")))
   signature_species <- tolower(trimws(as.character(signature_species %||% "same")))
   if (!marker_species %in% c("same", "mouse", "human")) marker_species <- "same"
@@ -14812,9 +14816,13 @@ server <- function(input, output, session) {
 
   output$scrna_signature_settings_ui <- renderUI({
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
+    pbmc_example <- scrna_is_pbmc3k_example(p)
+    saved_signature_path <- isolate(input$scrna_signature_file) %||% ""
+    default_signature_source <- if (pbmc_example && is.null(isolate(input$scrna_signature_source))) "server" else isolate(input$scrna_signature_source) %||% "manual"
+    default_signature_path <- if (pbmc_example && !nzchar(trimws(saved_signature_path))) SCRNA_PBMC3K_SIGNATURES_FILE else saved_signature_path
     tagList(
-      tags$p(class = "muted small-note", "Add every signature you want to calculate, review the collection, and then click Run signature scoring once. All signatures are scored in the same submitted job using normalized expression, never scaled PCA values."),
-      radioButtons("scrna_signature_source", "How do you want to provide signatures?", choices = c("Enter signatures here" = "manual", "Browse or paste a server path" = "server", "Upload from laptop" = "upload"), selected = isolate(input$scrna_signature_source) %||% "manual", inline = TRUE),
+      tags$p(class = "muted small-note", if (pbmc_example) "The PBMC 3K example starts with a bundled set of canonical cell-population signatures. You can replace it or add your own signatures." else "Add every signature you want to calculate, review the collection, and then click Run signature scoring once. All signatures are scored in the same submitted job using normalized expression, never scaled PCA values."),
+      radioButtons("scrna_signature_source", "How do you want to provide signatures?", choices = c("Enter signatures here" = "manual", "Browse or paste a server path" = "server", "Upload from laptop" = "upload"), selected = default_signature_source, inline = TRUE),
       conditionalPanel("input.scrna_signature_source == 'manual'", div(class = "read-source-note",
         tags$strong("Add one signature at a time"),
         textInput("scrna_manual_signature_name", "Signature name", value = "", placeholder = "For example: Interferon_response"),
@@ -14822,7 +14830,7 @@ server <- function(input, output, session) {
         actionButton("scrna_manual_signature_add", "Add or update signature", class = "btn-default"),
         br(), br(), tags$h4("Signatures queued for scoring"), uiOutput("scrna_manual_signature_entries_ui")
       )),
-      conditionalPanel("input.scrna_signature_source == 'server'", div(class = "new-project-path-control", textInput("scrna_signature_file", "Signature list", value = isolate(input$scrna_signature_file) %||% "", placeholder = "Absolute server .tsv with signature and gene columns"), actionButton("browse_scrna_signature_file", "Browse server", class = "btn-default"))),
+      conditionalPanel("input.scrna_signature_source == 'server'", div(class = "new-project-path-control", textInput("scrna_signature_file", "Signature list", value = default_signature_path, placeholder = "Absolute server .tsv with signature and gene columns"), actionButton("browse_scrna_signature_file", "Browse server", class = "btn-default"))),
       conditionalPanel("input.scrna_signature_source == 'upload'", fileInput("scrna_signature_upload", "Signature list from laptop", accept = c(".tsv", ".txt"))),
       selectInput("scrna_signature_species", "Species used by these signature genes", choices = c("Same as the expression dataset — no conversion" = "same", "Mouse" = "mouse", "Human" = "human"), selected = isolate(input$scrna_signature_species) %||% "same", selectize = FALSE),
       conditionalPanel("input.scrna_signature_species != 'same'",
