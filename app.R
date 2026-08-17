@@ -10756,6 +10756,25 @@ scrna_embedding_path <- function(project, view = "integrated") {
   file.path(scrna_output_dir(project), "tables", file)
 }
 
+scrna_table_columns <- function(path) {
+  if (!file.exists(path) || file_size_for(path) <= 0) return(character(0))
+  header <- tryCatch(readLines(path, warn = FALSE, n = 1L), error = function(e) character(0))
+  if (!length(header)) return(character(0))
+  strsplit(header[[1]], "\t", fixed = TRUE)[[1]]
+}
+
+scrna_auxiliary_metadata_paths <- function(project) {
+  tables_dir <- file.path(scrna_output_dir(project), "tables")
+  if (!dir.exists(tables_dir)) return(character(0))
+  paths <- c(
+    file.path(tables_dir, "cell_metadata.tsv"),
+    list.files(tables_dir, pattern = "^reference_transfer_per_cell__.*\\.tsv$", full.names = TRUE)
+  )
+  paths <- unique(paths[file.exists(paths) & vapply(paths, file_size_for, numeric(1)) > 0])
+  if (length(paths) > 1L) paths <- paths[order(file.info(paths)$mtime)]
+  paths
+}
+
 scrna_embedding_view_choices <- function(project) {
   paths <- c(
     integrated = scrna_embedding_path(project, "integrated"),
@@ -10767,11 +10786,7 @@ scrna_embedding_view_choices <- function(project) {
 }
 
 scrna_embedding_columns <- function(project, view = "integrated") {
-  path <- scrna_embedding_path(project, view)
-  if (!file.exists(path) || file_size_for(path) <= 0) return(character(0))
-  header <- tryCatch(readLines(path, warn = FALSE, n = 1L), error = function(e) character(0))
-  if (!length(header)) return(character(0))
-  strsplit(header[[1]], "\t", fixed = TRUE)[[1]]
+  scrna_table_columns(scrna_embedding_path(project, view))
 }
 
 scrna_selected_embedding_view <- function(project, requested = "") {
@@ -10782,7 +10797,8 @@ scrna_selected_embedding_view <- function(project, requested = "") {
 }
 
 scrna_embedding_color_choices <- function(project, view = "integrated") {
-  columns <- unique(c(scrna_embedding_columns(project, view), scrna_embedding_columns(project, "integrated")))
+  auxiliary_columns <- unlist(lapply(scrna_auxiliary_metadata_paths(project), scrna_table_columns), use.names = FALSE)
+  columns <- unique(c(scrna_embedding_columns(project, view), scrna_embedding_columns(project, "integrated"), auxiliary_columns))
   excluded <- c("cell", "UMAP_1", "UMAP_2", "input_path", "source_barcode")
   candidates <- setdiff(columns, excluded)
   preferred <- intersect(c("cell_type", "cluster", "sample_id", "condition", "batch", "annotation_source"), candidates)
@@ -10810,7 +10826,9 @@ scrna_embedding_table <- function(project, columns = character(0), max_points = 
   if (!file.exists(path) || !all(required %in% headers)) return(data.frame())
   requested_columns <- as.character(columns %||% character(0))
   final_headers <- if (identical(view, "unintegrated")) scrna_embedding_columns(project, "integrated") else character(0)
-  available <- unique(c(headers, final_headers))
+  auxiliary_paths <- scrna_auxiliary_metadata_paths(project)
+  auxiliary_headers <- unique(unlist(lapply(auxiliary_paths, scrna_table_columns), use.names = FALSE))
+  available <- unique(c(headers, final_headers, auxiliary_headers))
   keep <- unique(c(required, intersect(requested_columns, available)))
   path_keep <- intersect(keep, headers)
   info <- file.info(path)
@@ -10824,22 +10842,27 @@ scrna_embedding_table <- function(project, columns = character(0), max_points = 
   final_path <- scrna_embedding_path(project, "integrated")
   final_info <- if (identical(view, "unintegrated") && file.exists(final_path)) file.info(final_path) else NULL
   final_signature <- if (!is.null(final_info)) paste(final_info$size[[1]], as.numeric(final_info$mtime[[1]]), sep = "@") else ""
-  signature <- paste(normalizePath(path, winslash = "/", mustWork = TRUE), info$size[[1]], as.numeric(info$mtime[[1]]), view, final_signature, display_scope, paste(keep, collapse = "\r"), sep = "|")
+  auxiliary_signature <- paste(vapply(auxiliary_paths, function(aux_path) {
+    aux_info <- file.info(aux_path)
+    paste(normalizePath(aux_path, winslash = "/", mustWork = TRUE), aux_info$size[[1]], as.numeric(aux_info$mtime[[1]]), sep = "@")
+  }, character(1)), collapse = ";")
+  signature <- paste(normalizePath(path, winslash = "/", mustWork = TRUE), info$size[[1]], as.numeric(info$mtime[[1]]), view, final_signature, auxiliary_signature, display_scope, paste(keep, collapse = "\r"), sep = "|")
   if (use_cache && exists(signature, envir = SCRNA_EMBEDDING_CACHE, inherits = FALSE)) return(get(signature, envir = SCRNA_EMBEDDING_CACHE, inherits = FALSE))
   classes <- stats::setNames(rep("NULL", length(headers)), headers)
   classes[path_keep] <- NA_character_
   x <- tryCatch(utils::read.delim(path, check.names = FALSE, stringsAsFactors = FALSE, colClasses = classes), error = function(e) data.frame())
   if (!NROW(x) || !all(required %in% names(x))) return(data.frame())
-  missing_metadata <- setdiff(keep, names(x))
-  if (length(missing_metadata) && identical(view, "unintegrated") && file.exists(final_path)) {
-    final_classes <- stats::setNames(rep("NULL", length(final_headers)), final_headers)
-    final_keep <- unique(c("cell", intersect(missing_metadata, final_headers)))
-    final_classes[final_keep] <- NA_character_
-    metadata <- tryCatch(utils::read.delim(final_path, check.names = FALSE, stringsAsFactors = FALSE, colClasses = final_classes), error = function(e) data.frame())
-    if (NROW(metadata) && "cell" %in% names(metadata)) {
-      index <- match(as.character(x$cell), as.character(metadata$cell))
-      for (column in setdiff(final_keep, "cell")) x[[column]] <- metadata[[column]][index]
-    }
+  metadata_paths <- c(if (identical(view, "unintegrated") && file.exists(final_path)) final_path else character(0), auxiliary_paths)
+  for (metadata_path in metadata_paths) {
+    metadata_headers <- scrna_table_columns(metadata_path)
+    metadata_keep <- unique(c("cell", setdiff(intersect(keep, metadata_headers), required)))
+    if (length(metadata_keep) <= 1L || !"cell" %in% metadata_headers) next
+    metadata_classes <- stats::setNames(rep("NULL", length(metadata_headers)), metadata_headers)
+    metadata_classes[metadata_keep] <- NA_character_
+    metadata <- tryCatch(utils::read.delim(metadata_path, check.names = FALSE, stringsAsFactors = FALSE, colClasses = metadata_classes), error = function(e) data.frame())
+    if (!NROW(metadata) || !"cell" %in% names(metadata)) next
+    index <- match(as.character(x$cell), as.character(metadata$cell))
+    for (column in setdiff(metadata_keep, "cell")) x[[column]] <- metadata[[column]][index]
   }
   x$UMAP_1 <- suppressWarnings(as.numeric(x$UMAP_1)); x$UMAP_2 <- suppressWarnings(as.numeric(x$UMAP_2))
   x <- x[is.finite(x$UMAP_1) & is.finite(x$UMAP_2), , drop = FALSE]
