@@ -368,6 +368,7 @@ GENOME_BROWSER_NAV_CACHE <- new.env(parent = emptyenv())
 GENOME_BROWSER_FILTERED_BED_CACHE <- new.env(parent = emptyenv())
 CUTRUN_PEAK_SOURCE_CACHE <- new.env(parent = emptyenv())
 SCRNA_EMBEDDING_CACHE <- new.env(parent = emptyenv())
+SCRNA_GENE_LIST_BUILD_CACHE <- new.env(parent = emptyenv())
 CUTRUN_DEFAULT_SPIKEIN_INDEX <- "/grid/bsr/data/data/utama/genome/ecoli_k12/bowtie2_index/ecoli_k12_mg1655"
 CUTRUN_DEFAULT_SPIKEIN_NAME <- "ecoli"
 CUTRUN_SPIKEIN_GENOME_CHOICES <- c("E. coli K-12 MG1655" = CUTRUN_DEFAULT_SPIKEIN_INDEX)
@@ -10811,10 +10812,46 @@ scrna_embedding_color_column <- function(project, requested = "", view = "integr
   selected_choice(requested, choices, choices[[1]])
 }
 
-scrna_dashboard_gene_choices <- function(project) {
+scrna_dashboard_gene_list_path <- function(project) {
   full_path <- file.path(scrna_output_dir(project), "tables", "dashboard_all_genes.tsv")
   fallback_path <- file.path(scrna_output_dir(project), "tables", "dashboard_gene_expression_genes.tsv")
-  path <- if (file.exists(full_path) && file_size_for(full_path) > 0) full_path else fallback_path
+  if (file.exists(full_path) && file_size_for(full_path) > 0) return(full_path)
+  if (file.exists(fallback_path) && file_size_for(fallback_path) > 0) return(fallback_path)
+
+  scanpy_object <- file.path(scrna_output_dir(project), "objects", "processed_scanpy.h5ad")
+  if (!file.exists(scanpy_object)) scanpy_object <- file.path(scrna_output_dir(project), "checkpoints", "04_clustered_scanpy.h5ad")
+  seurat_object <- file.path(scrna_output_dir(project), "objects", "processed_seurat.rds")
+  engine <- if (file.exists(scanpy_object)) "scanpy" else if (file.exists(seurat_object)) "seurat" else ""
+  object_path <- if (identical(engine, "scanpy")) scanpy_object else seurat_object
+  if (!nzchar(engine) || !file.exists(object_path)) return("")
+
+  object_info <- file.info(object_path)
+  build_key <- paste(normalizePath(object_path, winslash = "/", mustWork = TRUE), object_info$size, object_info$mtime, sep = "::")
+  if (exists(build_key, envir = SCRNA_GENE_LIST_BUILD_CACHE, inherits = FALSE)) return("")
+  dir.create(dirname(full_path), recursive = TRUE, showWarnings = FALSE)
+  result <- character(0)
+  if (identical(engine, "scanpy")) {
+    container <- scanpy_container_check()
+    helper <- file.path(SCRIPTS_DIR, "singleCellRNAseq", "list_h5ad_genes.py")
+    if (isTRUE(container$ready) && file.exists(helper)) {
+      result <- tryCatch(system2("singularity", c("exec", container$path, "python", helper, object_path, full_path), stdout = TRUE, stderr = TRUE), error = function(e) conditionMessage(e))
+    }
+  } else {
+    helper <- file.path(SCRIPTS_DIR, "singleCellRNAseq", "list_seurat_genes.R")
+    rscript <- Sys.which("Rscript")
+    if (nzchar(rscript) && file.exists(helper)) {
+      result <- tryCatch(system2(rscript, c(helper, object_path, full_path), stdout = TRUE, stderr = TRUE), error = function(e) conditionMessage(e))
+    }
+  }
+  if (!file.exists(full_path) || file_size_for(full_path) <= 0) {
+    assign(build_key, paste(tail(result, 5L), collapse = "\n"), envir = SCRNA_GENE_LIST_BUILD_CACHE)
+    return("")
+  }
+  full_path
+}
+
+scrna_dashboard_gene_choices <- function(project) {
+  path <- scrna_dashboard_gene_list_path(project)
   if (!file.exists(path) || file_size_for(path) <= 0) return(character(0))
   # This is deliberately read as a one-column list rather than a generic
   # table.  It keeps the selectize control dependable for legacy results and
@@ -10837,8 +10874,8 @@ scrna_gene_select_input <- function(project, input_id, label, selected = "") {
   selected <- trimws(as.character(selected %||% ""))
   if (!length(genes)) {
     return(tagList(
-      textInput(input_id, label, value = selected, placeholder = "Type an exact gene symbol, e.g. PLAUR"),
-      tags$p(class = "muted small-note", "The saved gene list is unavailable for this completed run. You can still enter an exact gene symbol.")
+      textInput(input_id, label, value = selected, placeholder = "Type an exact gene symbol"),
+      tags$p(class = "muted small-note", "The app is rebuilding the gene list from the existing processed object. You can also enter an exact gene symbol.")
     ))
   }
   selectizeInput(
@@ -12227,6 +12264,7 @@ server <- function(input, output, session) {
   scrna_umap_defaults_applied <- reactiveVal(character(0))
   scrna_batch_default_project <- reactiveVal("")
   scrna_dashboard_expression_cache <- reactiveVal(list())
+  scrna_dashboard_expression_error <- reactiveVal("")
   scrna_embedding_selection_reset <- reactiveVal(0L)
   # Named manual marker/signature collections are stored per project for the
   # browser session. A separate immutable TSV snapshot is written on submit.
@@ -15986,13 +16024,17 @@ server <- function(input, output, session) {
     contentType = "application/octet-stream"
   )
   scrna_dashboard_marker_values <- function(project, gene) {
+    scrna_dashboard_expression_error("")
     root <- scrna_output_dir(project)
     scanpy_object <- file.path(root, "objects", "processed_scanpy.h5ad")
     if (!file.exists(scanpy_object)) scanpy_object <- file.path(root, "checkpoints", "04_clustered_scanpy.h5ad")
     seurat_object <- file.path(root, "objects", "processed_seurat.rds")
     engine <- if (file.exists(scanpy_object)) "scanpy" else if (file.exists(seurat_object)) "seurat" else ""
     checkpoint <- if (identical(engine, "scanpy")) scanpy_object else seurat_object
-    if (!nzchar(engine) || !file.exists(checkpoint)) return(NULL)
+    if (!nzchar(engine) || !file.exists(checkpoint)) {
+      scrna_dashboard_expression_error("No processed Scanpy or Seurat object was found for this run.")
+      return(NULL)
+    }
     safe_gene <- gsub("[^A-Za-z0-9_.-]", "_", gene)
     cache_path <- file.path(root, "tables", "dashboard_marker_cache", paste0(safe_gene, ".tsv.gz"))
     object_info <- file.info(checkpoint)
@@ -16006,18 +16048,31 @@ server <- function(input, output, session) {
       if (identical(engine, "scanpy")) {
         container <- scanpy_container_check()
         helper <- file.path(SCRIPTS_DIR, "singleCellRNAseq", "extract_h5ad_marker_expression.py")
-        if (!isTRUE(container$ready) || !file.exists(helper)) return(NULL)
+        if (!isTRUE(container$ready) || !file.exists(helper)) {
+          scrna_dashboard_expression_error("The Scanpy marker-expression helper or its container is unavailable.")
+          return(NULL)
+        }
         result <- tryCatch(system2("singularity", c("exec", container$path, "python", helper, checkpoint, gene, cache_path), stdout = TRUE, stderr = TRUE), error = function(e) character(0))
       } else {
         helper <- file.path(SCRIPTS_DIR, "singleCellRNAseq", "extract_seurat_marker_expression.R")
         rscript <- Sys.which("Rscript")
-        if (!nzchar(rscript) || !file.exists(helper)) return(NULL)
+        if (!nzchar(rscript) || !file.exists(helper)) {
+          scrna_dashboard_expression_error("The Seurat marker-expression helper is unavailable.")
+          return(NULL)
+        }
         result <- tryCatch(system2(rscript, c(helper, checkpoint, gene, cache_path), stdout = TRUE, stderr = TRUE), error = function(e) character(0))
       }
-      if (!file.exists(cache_path) || !file_size_for(cache_path)) return(NULL)
+      if (!file.exists(cache_path) || !file_size_for(cache_path)) {
+        details <- trimws(paste(tail(result, 6L), collapse = " "))
+        scrna_dashboard_expression_error(if (nzchar(details)) details else "The expression helper did not create an output file.")
+        return(NULL)
+      }
     }
     values <- safe_read_table(cache_path, 1000000)
-    if (!all(c("cell", "expression") %in% names(values))) return(NULL)
+    if (!all(c("cell", "expression") %in% names(values))) {
+      scrna_dashboard_expression_error("The marker-expression cache does not contain cell and expression columns.")
+      return(NULL)
+    }
     values$cell <- as.character(values$cell); values$expression <- suppressWarnings(as.numeric(values$expression))
     scrna_dashboard_expression_cache(list(stamp = stamp, values = values))
     values
@@ -16077,7 +16132,7 @@ server <- function(input, output, session) {
       req(nzchar(gene))
       x <- scrna_embedding_table(p, columns = metadata_columns, max_points = Inf)
       expression <- scrna_dashboard_marker_values(p, gene)
-      req(!is.null(expression))
+      validate(need(!is.null(expression), paste("Gene expression could not be read.", scrna_dashboard_expression_error() %||% "")))
       index <- match(x$cell, expression$cell)
       req(!anyNA(index))
       value <- expression$expression[index]
@@ -16234,7 +16289,7 @@ server <- function(input, output, session) {
     if (identical(color_mode, "marker")) {
       marker_gene <- trimws(input$scrna_embedding_gene %||% "")
       expression_data <- scrna_dashboard_marker_values(p, marker_gene)
-      validate(need(!is.null(expression_data), "Marker expression could not be read from the normalized post-UMAP object. Re-run Normalize & PCA and UMAP with the current CodeSpringLab version."))
+      validate(need(!is.null(expression_data), paste("Marker expression could not be read.", scrna_dashboard_expression_error() %||% "")))
       cell_index <- match(x$cell, expression_data$cell)
       validate(need(!anyNA(cell_index), "The marker-expression values do not match this UMAP. Re-run Normalize & PCA and UMAP."))
       x$.marker_expression <- expression_data$expression[cell_index]
