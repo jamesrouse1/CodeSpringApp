@@ -16198,9 +16198,9 @@ server <- function(input, output, session) {
       fluidRow(
         column(5, radioButtons("scrna_embedding_color_mode", "Color UMAP by", choices = c("Cell metadata" = "metadata", "Marker expression" = "marker"), selected = isolate(input$scrna_embedding_color_mode) %||% "metadata", inline = TRUE)),
         column(5, conditionalPanel("input.scrna_embedding_color_mode == 'metadata'", selectInput("scrna_embedding_color", "Metadata field", choices = choices, selected = selected_choice(isolate(input$scrna_embedding_color), choices, choices[[1]]), selectize = FALSE)), conditionalPanel("input.scrna_embedding_color_mode == 'marker'", uiOutput("scrna_embedding_marker_gene_ui"))),
-        column(2, checkboxInput("scrna_embedding_legend", "Show legend", value = if (is.null(isolate(input$scrna_embedding_legend))) TRUE else isTRUE(isolate(input$scrna_embedding_legend))), actionButton("scrna_embedding_clear_selection", "Clear selected cells", class = "btn-default btn-sm"), tags$details(tags$summary("Display"), sliderInput("scrna_embedding_point_size", "Point size", min = 1, max = 8, value = isolate(input$scrna_embedding_point_size) %||% 2, step = 0.5), sliderInput("scrna_embedding_opacity", "Opacity", min = 0.1, max = 1, value = isolate(input$scrna_embedding_opacity) %||% 0.72, step = 0.05)))
+        column(2, checkboxInput("scrna_embedding_legend", "Show legend", value = if (is.null(isolate(input$scrna_embedding_legend))) TRUE else isTRUE(isolate(input$scrna_embedding_legend))), actionButton("scrna_embedding_clear_selection", "Clear selected cells", class = "btn-default btn-sm"), tags$details(tags$summary("Display"), selectInput("scrna_embedding_display_cells", "Cells rendered", choices = c("Representative 75,000 (faster)" = "75000", "Representative 125,000" = "125000", "All cells" = "all"), selected = selected_choice(isolate(input$scrna_embedding_display_cells), c("75000", "125000", "all"), "75000"), selectize = FALSE), sliderInput("scrna_embedding_point_size", "Point size", min = 1, max = 8, value = isolate(input$scrna_embedding_point_size) %||% 2, step = 0.5), sliderInput("scrna_embedding_opacity", "Opacity", min = 0.1, max = 1, value = isolate(input$scrna_embedding_opacity) %||% 0.72, step = 0.05)))
       ),
-      tags$p(class = "muted small-note", "Showing all cells in the saved UMAP.")
+      uiOutput("scrna_embedding_display_note")
     )
   })
   output$scrna_embedding_marker_gene_ui <- renderUI({
@@ -16215,6 +16215,11 @@ server <- function(input, output, session) {
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
     if (!PLOTLY_AVAILABLE) return(div(class = "empty-box", "Interactive UMAP support is not installed on this app server yet. The publication-ready UMAP figures are available below."))
     plotly::plotlyOutput("scrna_embedding_plot", height = "700px")
+  })
+  output$scrna_embedding_display_note <- renderUI({
+    choice <- input$scrna_embedding_display_cells %||% "75000"
+    if (identical(choice, "all")) return(tags$p(class = "muted small-note", "Rendering all saved UMAP cells. This is useful for exact rare-population inspection, but can be slower for large datasets."))
+    tags$p(class = "muted small-note", paste0("Rendering a deterministic representative subset of up to ", format(as.integer(choice), big.mark = ","), " cells for a responsive viewer. Choose All cells for an exact full-dataset lasso selection."))
   })
   output$scrna_composition_plot_ui <- renderUI({
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
@@ -16294,7 +16299,10 @@ server <- function(input, output, session) {
     if (!is.finite(point_size)) point_size <- 2
     if (!is.finite(opacity)) opacity <- 0.72
     point_size <- max(1, min(8, point_size)); opacity <- max(0.1, min(1, opacity))
-    x <- scrna_embedding_table(p, columns = c(color_column, "sample_id", "condition", "batch", "cluster", "cell_type", "annotation_source"), max_points = Inf, view = embedding_view)
+    display_choice <- input$scrna_embedding_display_cells %||% "75000"
+    max_points <- if (identical(display_choice, "all")) Inf else suppressWarnings(as.numeric(display_choice))
+    if (!is.finite(max_points) || max_points < 1L) max_points <- 75000L
+    x <- scrna_embedding_table(p, columns = c(color_column, "sample_id", "condition", "batch", "cluster", "cell_type", "annotation_source"), max_points = max_points, view = embedding_view)
     validate(need(NROW(x), "No valid UMAP coordinates are available for this selection."))
     marker_gene <- ""
     if (identical(color_mode, "marker")) {
