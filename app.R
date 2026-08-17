@@ -11301,7 +11301,7 @@ scrna_results_explorer_ui <- function() {
       id = "scrna_results_tabs",
       tabPanel("Interactive UMAP", br(), h3("Interactive UMAP"), tags$p(class = "muted", "Color every cell by metadata or normalized marker expression. Hover for cell identity and metadata; use lasso or box selection to inspect cells."), uiOutput("scrna_embedding_controls_ui"), uiOutput("scrna_embedding_widget_ui"), uiOutput("scrna_selected_cells_ui"), br(), uiOutput("scrna_processed_object_download_ui")),
       tabPanel("Violins", br(), h3("Expression Violins"), tags$p(class = "muted", "Compare normalized gene expression or stored signature scores across clusters, cell types, or other categorical metadata."), uiOutput("scrna_violin_controls_ui"), plotOutput("scrna_expression_violin", height = "680px"), downloadButton("download_scrna_expression_violin", "Download current violin", class = "btn-default")),
-      tabPanel("Marker panels", br(), h3("Marker-list panels"), tags$p(class = "muted", "Dot plots show the fraction of cells expressing each supplied marker and its normalized average expression. Heatmaps show row-scaled mean normalized expression. Large marker lists are automatically divided into readable panels."), uiOutput("scrna_marker_panel_ui")),
+      tabPanel("Marker panels", br(), h3("Marker-list panels"), tags$p(class = "muted", "Use these to assess annotation evidence. Dot size is the fraction of cells expressing a marker and color is relative mean normalized expression within that marker. Heatmaps show the same expression summary without the prevalence encoding. Markers remain grouped by their supplied cell-type program."), uiOutput("scrna_marker_panel_ui")),
       tabPanel("Cluster markers", br(), h3("Top cluster-marker heatmap"), tags$p(class = "muted", "Created only when ‘Also calculate marker genes for every cluster’ was selected during annotation. One heatmap shows up to 10 positive markers for every cluster, ordered by cluster and effect size."), uiOutput("scrna_cluster_marker_heatmap_ui")),
       tabPanel("QC", br(), h3("Quality Control"), uiOutput("scrna_qc_plot_ui"), br(), h4("QC summary by sample"), table_output("scrna_qc_summary"), br(), h4("Doublet calls by capture"), table_output("scrna_doublet_summary"), br(), tags$details(tags$summary("Individual doublet calls"), table_output("scrna_doublet_calls")))
     ))
@@ -16255,6 +16255,7 @@ server <- function(input, output, session) {
     files <- files[grepl(paste0("_by_", group_selected, "_panel_"), basename(unname(files)), fixed = TRUE)]
     selected <- selected_choice(input$scrna_marker_panel, files, unname(files)[[1]])
     tagList(
+      tags$p(class = "muted small-note", "Start with Cluster number to check whether the marker programs support the unsupervised groups. Then switch to Cell-type annotation to show the same evidence at the final label level."),
       radioButtons("scrna_marker_panel_group", "Group marker panels by", choices = available_groups, selected = group_selected, inline = TRUE),
       selectInput("scrna_marker_panel", "Marker-list panel", choices = files, selected = selected, selectize = FALSE),
       image_or_file_ui(selected, "900px")
