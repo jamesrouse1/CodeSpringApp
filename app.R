@@ -16012,7 +16012,21 @@ server <- function(input, output, session) {
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
     columns <- scrna_embedding_columns(p)
     signatures <- grep("^signature__", columns, value = TRUE)
-    group_choices <- intersect(scrna_discrete_metadata_fields(p), columns)
+    # Reference-transfer and post-hoc annotation labels may live in the
+    # auxiliary per-cell metadata table rather than the original UMAP TSV.
+    # scrna_embedding_table() joins those columns when requested, so expose
+    # them here as valid violin grouping fields too.
+    auxiliary_columns <- unique(unlist(lapply(scrna_auxiliary_metadata_paths(p), scrna_table_columns), use.names = FALSE))
+    metadata_columns <- unique(c(columns, auxiliary_columns))
+    active_annotation <- scrna_summary_value(p, "active_annotation", "")
+    annotation_columns <- grep("cell.?type|annotation|subtype", metadata_columns, value = TRUE, ignore.case = TRUE)
+    group_candidates <- unique(c(
+      active_annotation,
+      "cell_type",
+      annotation_columns,
+      scrna_discrete_metadata_fields(p)
+    ))
+    group_choices <- intersect(group_candidates, metadata_columns)
     group_choices <- setdiff(group_choices, grep("^annotation_source", group_choices, value = TRUE))
     if (!length(group_choices)) return(div(class = "empty-box", "Complete UMAP and annotation to compare expression distributions by cluster or cell type."))
     mode_choices <- c("Individual gene" = "gene")
