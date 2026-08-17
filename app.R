@@ -10813,9 +10813,47 @@ scrna_embedding_color_column <- function(project, requested = "", view = "integr
 
 scrna_dashboard_gene_choices <- function(project) {
   full_path <- file.path(scrna_output_dir(project), "tables", "dashboard_all_genes.tsv")
-  tab <- safe_read_table(if (file.exists(full_path)) full_path else file.path(scrna_output_dir(project), "tables", "dashboard_gene_expression_genes.tsv"), 50000)
-  genes <- unique(trimws(as.character(tab$gene %||% character(0))))
-  genes[nzchar(genes)]
+  fallback_path <- file.path(scrna_output_dir(project), "tables", "dashboard_gene_expression_genes.tsv")
+  path <- if (file.exists(full_path) && file_size_for(full_path) > 0) full_path else fallback_path
+  if (!file.exists(path) || file_size_for(path) <= 0) return(character(0))
+  # This is deliberately read as a one-column list rather than a generic
+  # table.  It keeps the selectize control dependable for legacy results and
+  # avoids silently losing choices when a gene symbol is not syntactically a
+  # valid R column name.
+  lines <- tryCatch(readLines(path, warn = FALSE, encoding = "UTF-8"), error = function(e) character(0))
+  if (length(lines) <= 1L) return(character(0))
+  header <- strsplit(lines[[1]], "\t", fixed = TRUE)[[1]]
+  gene_column <- match("gene", header)
+  if (is.na(gene_column)) gene_column <- 1L
+  values <- vapply(strsplit(lines[-1L], "\t", fixed = TRUE), function(fields) {
+    if (length(fields) < gene_column) "" else fields[[gene_column]]
+  }, character(1))
+  genes <- unique(trimws(values))
+  sort(genes[nzchar(genes)])
+}
+
+scrna_violin_gene_input <- function(project, selected = "") {
+  genes <- scrna_dashboard_gene_choices(project)
+  selected <- trimws(as.character(selected %||% ""))
+  if (!length(genes)) {
+    return(tagList(
+      textInput("scrna_violin_gene", "Gene", value = selected, placeholder = "Type an exact gene symbol, e.g. PLAUR"),
+      tags$p(class = "muted small-note", "The saved gene list is unavailable for this completed run. You can still enter an exact gene symbol.")
+    ))
+  }
+  selectizeInput(
+    "scrna_violin_gene",
+    "Gene",
+    choices = genes,
+    selected = selected_choice(selected, genes, genes[[1]]),
+    options = list(
+      create = TRUE,
+      persist = FALSE,
+      closeAfterSelect = TRUE,
+      maxOptions = 500,
+      placeholder = "Search or type an exact gene symbol"
+    )
+  )
 }
 
 scrna_embedding_table <- function(project, columns = character(0), max_points = 30000L, cells = character(0), view = "integrated") {
@@ -15980,13 +16018,12 @@ server <- function(input, output, session) {
     mode_choices <- c("Individual gene" = "gene")
     if (length(signatures)) mode_choices <- c(mode_choices, "Stored signature score" = "signature")
     mode <- selected_choice(isolate(input$scrna_violin_value_mode), mode_choices, "gene")
-    genes <- scrna_dashboard_gene_choices(p)
     signature_choices <- stats::setNames(signatures, gsub("^signature__", "", signatures))
     facet_choices <- c("No facets" = "", stats::setNames(intersect(c("sample_id", "condition", "batch"), columns), intersect(c("sample_id", "condition", "batch"), columns)))
     tagList(
       fluidRow(
         column(3, radioButtons("scrna_violin_value_mode", "Show", choices = mode_choices, selected = mode, inline = FALSE)),
-        column(3, conditionalPanel("input.scrna_violin_value_mode == 'gene'", selectInput("scrna_violin_gene", "Gene", choices = genes, selected = selected_choice(isolate(input$scrna_violin_gene), genes, if (length(genes)) genes[[1]] else ""), selectize = TRUE)), conditionalPanel("input.scrna_violin_value_mode == 'signature'", selectInput("scrna_violin_signature", "Signature", choices = signature_choices, selected = selected_choice(isolate(input$scrna_violin_signature), signature_choices, if (length(signature_choices)) unname(signature_choices)[[1]] else ""), selectize = FALSE))),
+        column(3, conditionalPanel("input.scrna_violin_value_mode == 'gene'", scrna_violin_gene_input(p, isolate(input$scrna_violin_gene))), conditionalPanel("input.scrna_violin_value_mode == 'signature'", selectInput("scrna_violin_signature", "Signature", choices = signature_choices, selected = selected_choice(isolate(input$scrna_violin_signature), signature_choices, if (length(signature_choices)) unname(signature_choices)[[1]] else ""), selectize = FALSE))),
         column(3, selectInput("scrna_violin_group", "Separate violins by", choices = group_choices, selected = selected_choice(isolate(input$scrna_violin_group), group_choices, if ("cluster" %in% group_choices) "cluster" else group_choices[[1]]), selectize = FALSE)),
         column(3, selectInput("scrna_violin_facet", "Optional facets", choices = facet_choices, selected = selected_choice(isolate(input$scrna_violin_facet), facet_choices, ""), selectize = FALSE))
       ),
