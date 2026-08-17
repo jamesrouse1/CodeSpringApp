@@ -359,7 +359,11 @@ ATAC_EXAMPLE_DESIGN_DIR <- normalizePath(file.path(SCRIPTS_DIR, "test", "manifes
 CHIP_EXAMPLE_FASTQ_DIR <- normalizePath(file.path(SCRIPTS_DIR, "test", "fastq_chip"), winslash = "/", mustWork = FALSE)
 CHIP_EXAMPLE_DESIGN_DIR <- normalizePath(file.path(SCRIPTS_DIR, "test", "manifest_chip"), winslash = "/", mustWork = FALSE)
 SCRNA_PBMC3K_EXAMPLE_DIR <- "/grid/bsr/data/data/bsr_readable_data/references/scrna_example/pbmc3k/filtered_gene_bc_matrices/hg19"
-SCRNA_PBMC3K_MARKERS_FILE <- "/grid/bsr/data/data/bsr_readable_data/references/scrna_example/pbmc3k/pbmc3k_cell_type_markers.tsv"
+SCRNA_PBMC3K_LEGACY_MARKERS_FILE <- "/grid/bsr/data/data/bsr_readable_data/references/scrna_example/pbmc3k/pbmc3k_cell_type_markers.tsv"
+# Keep the example markers with CodeSpringLab itself.  Unlike a separately
+# created readable-data file, this path is present for every app installation
+# and is also mounted into the Scanpy container by the runner.
+SCRNA_PBMC3K_MARKERS_FILE <- file.path(SCRIPTS_DIR, "singleCellRNAseq", "pbmc3k_cell_type_markers.tsv")
 PROGRESS_REFRESH_MS <- 20000
 JOB_HISTORY_CACHE_SECONDS <- 12
 MAX_SLURM_JOB_IDS_PER_REFRESH <- 100L
@@ -9584,6 +9588,12 @@ submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto
     return(record_preflight_failure(project, step_label, "A batch metadata column is required for explicitly requested integration. Choose a manifest column, or select Automatic/None integration.", "scrna"))
   }
   marker_file <- trimws(as.character(marker_file %||% ""))
+  # Migrate existing PBMC example projects away from the former optional
+  # readable-data marker path to the marker list bundled with CodeSpringLab.
+  if (identical(stage, "annotate") && scrna_is_pbmc3k_example(project) &&
+      (!nzchar(marker_file) || identical(marker_file, SCRNA_PBMC3K_LEGACY_MARKERS_FILE))) {
+    marker_file <- SCRNA_PBMC3K_MARKERS_FILE
+  }
   celltype_file <- trimws(as.character(celltype_file %||% ""))
   reference_file <- trimws(as.character(reference_file %||% ""))
   reference_label_column <- trimws(as.character(reference_label_column %||% ""))
@@ -11241,6 +11251,7 @@ scrna_results_explorer_ui <- function() {
       id = "scrna_results_tabs",
       tabPanel("Interactive UMAP", br(), h3("Interactive UMAP"), tags$p(class = "muted", "Color every cell by metadata or normalized marker expression. Hover for cell identity and metadata; use lasso or box selection to inspect cells."), uiOutput("scrna_embedding_controls_ui"), uiOutput("scrna_embedding_widget_ui"), uiOutput("scrna_selected_cells_ui"), br(), uiOutput("scrna_processed_object_download_ui")),
       tabPanel("Violins", br(), h3("Expression Violins"), tags$p(class = "muted", "Compare normalized gene expression or stored signature scores across clusters, cell types, or other categorical metadata."), uiOutput("scrna_violin_controls_ui"), plotOutput("scrna_expression_violin", height = "680px"), downloadButton("download_scrna_expression_violin", "Download current violin", class = "btn-default")),
+      tabPanel("Marker panels", br(), h3("Marker-list panels"), tags$p(class = "muted", "Dot plots show the fraction of cells expressing each supplied marker and its normalized average expression. Heatmaps show row-scaled mean normalized expression. Large marker lists are automatically divided into readable panels."), uiOutput("scrna_marker_panel_ui")),
       tabPanel("QC", br(), h3("Quality Control"), uiOutput("scrna_qc_plot_ui"), br(), h4("QC summary by sample"), table_output("scrna_qc_summary"), br(), h4("Doublet calls by capture"), table_output("scrna_doublet_summary"), br(), tags$details(tags$summary("Individual doublet calls"), table_output("scrna_doublet_calls")))
     ))
   ))
@@ -14675,7 +14686,9 @@ server <- function(input, output, session) {
     pbmc_example <- scrna_is_pbmc3k_example(p)
     default_marker_source <- if (pbmc_example) "server" else "manual"
     saved_marker_path <- isolate(input$scrna_marker_file) %||% ""
-    default_marker_path <- if (nzchar(trimws(saved_marker_path))) saved_marker_path else if (pbmc_example) SCRNA_PBMC3K_MARKERS_FILE else ""
+    default_marker_path <- if (pbmc_example && (!nzchar(trimws(saved_marker_path)) || identical(saved_marker_path, SCRNA_PBMC3K_LEGACY_MARKERS_FILE))) {
+      SCRNA_PBMC3K_MARKERS_FILE
+    } else if (nzchar(trimws(saved_marker_path))) saved_marker_path else ""
     inspection_state <- isolate(scrna_reference_inspection())
     retained_reference <- identical(as.character(inspection_state$project_id %||% ""), as.character(p$id %||% p$name)) &&
       nzchar(inspection_state$reference_file %||% "") && file.exists(inspection_state$reference_file %||% "")
@@ -16112,6 +16125,17 @@ server <- function(input, output, session) {
     if (!length(files)) return(div(class = "empty-box", "UMAP figures have not been created yet."))
     selected <- selected_choice(input$scrna_umap_plot, files, unname(files)[[1]])
     tagList(selectInput("scrna_umap_plot", "Embedding", choices = files, selected = selected, selectize = FALSE), image_or_file_ui(selected, "760px"))
+  })
+  output$scrna_marker_panel_ui <- renderUI({
+    progress_refresh()
+    p <- current_project(); if (!is_scrna_project(p)) return(NULL)
+    files <- scrna_result_file_choices(p, "^07_marker_annotation_(dotplot|heatmap)_panel_[0-9]+\\.png$")
+    if (!length(files)) return(div(class = "empty-box", "Marker-list dot plots and heatmaps are created when annotation is run with a marker list. Existing annotations made before this update can be regenerated by running marker-list annotation again."))
+    selected <- selected_choice(input$scrna_marker_panel, files, unname(files)[[1]])
+    tagList(
+      selectInput("scrna_marker_panel", "Marker-list panel", choices = files, selected = selected, selectize = FALSE),
+      image_or_file_ui(selected, "900px")
+    )
   })
   output$scrna_processed_object_download_ui <- renderUI({
     progress_refresh()
