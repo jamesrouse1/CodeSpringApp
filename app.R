@@ -12225,12 +12225,10 @@ ui <- fluidPage(
             });
           });
           Shiny.addCustomMessageHandler('codespring-clear-plotly-selection', function(message) {
-            var id = message && message.id ? String(message.id) : '';
             var source = message && message.source ? String(message.source) : '';
-            var plot = id ? document.getElementById(id) : null;
-            if (plot && window.Plotly) {
-              try { Plotly.restyle(plot, {selectedpoints: null}); } catch (error) {}
-            }
+            // Do not restyle a large WebGL trace just to clear a selection:
+            // that forces Plotly to redraw every point and makes the control
+            // feel unresponsive on large scRNA-seq embeddings.
             if (source) Shiny.setInputValue('plotly_selected-' + source, null, {priority: 'event'});
           });
         }
@@ -16538,11 +16536,9 @@ server <- function(input, output, session) {
   })
   observeEvent(input$scrna_embedding_select_all, {
     p <- current_project(); if (!is_scrna_project(p)) return()
-    embedding_view <- scrna_selected_embedding_view(p, input$scrna_embedding_view %||% "")
-    # Selection is intentionally based on the full embedding, rather than
-    # just the representative points currently rendered in the browser.
-    x <- scrna_embedding_table(p, max_points = Inf, view = embedding_view)
-    scrna_embedding_manual_selection(unique(as.character(x$cell)))
+    # A sentinel represents the full embedding without loading and storing
+    # every barcode in Shiny's reactive state.
+    scrna_embedding_manual_selection("__ALL_CELLS__")
   }, ignoreInit = TRUE)
   observeEvent(input$scrna_embedding_clear_selection, {
     scrna_embedding_manual_selection(character(0))
@@ -16562,6 +16558,10 @@ server <- function(input, output, session) {
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
     scrna_embedding_selection_reset()
     cells <- scrna_embedding_manual_selection()
+    all_cells <- identical(cells, "__ALL_CELLS__")
+    if (all_cells) {
+      return(tagList(br(), h4("All cells selected"), tags$p(class = "muted small-note", "The table shows a representative 2,000-cell preview. Unselect all cells clears this state immediately."), table_output("scrna_selected_cells")))
+    }
     if (!length(cells)) {
       selected <- plotly::event_data("plotly_selected", source = "scrna_embedding")
       cells <- if (!is.null(selected) && NROW(selected) && "key" %in% names(selected)) unique(as.character(selected$key)) else character(0)
@@ -16710,6 +16710,13 @@ server <- function(input, output, session) {
     p <- current_project(); if (!is_scrna_project(p)) return(data.frame())
     scrna_embedding_selection_reset()
     cells <- scrna_embedding_manual_selection()
+    all_cells <- identical(cells, "__ALL_CELLS__")
+    if (all_cells) {
+      embedding_view <- scrna_selected_embedding_view(p, input$scrna_embedding_view %||% "")
+      x <- scrna_embedding_table(p, columns = c("sample_id", "condition", "batch", "cluster", "cell_type", "annotation_source"), max_points = 2000L, view = embedding_view)
+      preferred <- intersect(c("cell", "sample_id", "condition", "batch", "cluster", "cell_type", "annotation_source", "UMAP_1", "UMAP_2"), names(x))
+      return(x[, preferred, drop = FALSE])
+    }
     if (!length(cells)) {
       selected <- plotly::event_data("plotly_selected", source = "scrna_embedding")
       cells <- if (!is.null(selected) && NROW(selected) && "key" %in% names(selected)) unique(as.character(selected$key)) else character(0)
