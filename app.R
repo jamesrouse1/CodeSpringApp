@@ -10832,18 +10832,18 @@ scrna_dashboard_gene_choices <- function(project) {
   sort(genes[nzchar(genes)])
 }
 
-scrna_violin_gene_input <- function(project, selected = "") {
+scrna_gene_select_input <- function(project, input_id, label, selected = "") {
   genes <- scrna_dashboard_gene_choices(project)
   selected <- trimws(as.character(selected %||% ""))
   if (!length(genes)) {
     return(tagList(
-      textInput("scrna_violin_gene", "Gene", value = selected, placeholder = "Type an exact gene symbol, e.g. PLAUR"),
+      textInput(input_id, label, value = selected, placeholder = "Type an exact gene symbol, e.g. PLAUR"),
       tags$p(class = "muted small-note", "The saved gene list is unavailable for this completed run. You can still enter an exact gene symbol.")
     ))
   }
   selectizeInput(
-    "scrna_violin_gene",
-    "Gene",
+    input_id,
+    label,
     choices = genes,
     selected = selected_choice(selected, genes, genes[[1]]),
     options = list(
@@ -10854,6 +10854,10 @@ scrna_violin_gene_input <- function(project, selected = "") {
       placeholder = "Search or type an exact gene symbol"
     )
   )
+}
+
+scrna_violin_gene_input <- function(project, selected = "") {
+  scrna_gene_select_input(project, "scrna_violin_gene", "Gene", selected)
 }
 
 scrna_embedding_table <- function(project, columns = character(0), max_points = 30000L, cells = character(0), view = "integrated") {
@@ -12074,6 +12078,15 @@ ui <- fluidPage(
               if (status) status.textContent = 'Could not navigate to ' + locus + ': ' + (error && error.message ? error.message : String(error));
             });
           });
+          Shiny.addCustomMessageHandler('codespring-clear-plotly-selection', function(message) {
+            var id = message && message.id ? String(message.id) : '';
+            var source = message && message.source ? String(message.source) : '';
+            var plot = id ? document.getElementById(id) : null;
+            if (plot && window.Plotly) {
+              try { Plotly.restyle(plot, {selectedpoints: null}); } catch (error) {}
+            }
+            if (source) Shiny.setInputValue('plotly_selected-' + source, null, {priority: 'event'});
+          });
         }
       });
     "))
@@ -12214,6 +12227,7 @@ server <- function(input, output, session) {
   scrna_umap_defaults_applied <- reactiveVal(character(0))
   scrna_batch_default_project <- reactiveVal("")
   scrna_dashboard_expression_cache <- reactiveVal(list())
+  scrna_embedding_selection_reset <- reactiveVal(0L)
   # Named manual marker/signature collections are stored per project for the
   # browser session. A separate immutable TSV snapshot is written on submit.
   scrna_manual_annotation_sets <- reactiveVal(list())
@@ -16124,8 +16138,8 @@ server <- function(input, output, session) {
       if (length(embedding_views) > 1L) selectInput("scrna_embedding_view", "UMAP coordinates", choices = embedding_views, selected = selected_view, selectize = FALSE) else NULL,
       fluidRow(
         column(5, radioButtons("scrna_embedding_color_mode", "Color UMAP by", choices = c("Cell metadata" = "metadata", "Marker expression" = "marker"), selected = isolate(input$scrna_embedding_color_mode) %||% "metadata", inline = TRUE)),
-        column(5, conditionalPanel("input.scrna_embedding_color_mode == 'metadata'", selectInput("scrna_embedding_color", "Metadata field", choices = choices, selected = selected_choice(isolate(input$scrna_embedding_color), choices, choices[[1]]), selectize = FALSE)), conditionalPanel("input.scrna_embedding_color_mode == 'marker'", selectInput("scrna_embedding_gene", "Marker gene", choices = scrna_dashboard_gene_choices(p), selected = selected_choice(isolate(input$scrna_embedding_gene), scrna_dashboard_gene_choices(p), ""), selectize = TRUE))),
-        column(2, checkboxInput("scrna_embedding_legend", "Show legend", value = if (is.null(isolate(input$scrna_embedding_legend))) TRUE else isTRUE(isolate(input$scrna_embedding_legend))), tags$details(tags$summary("Display"), sliderInput("scrna_embedding_point_size", "Point size", min = 1, max = 8, value = isolate(input$scrna_embedding_point_size) %||% 4, step = 0.5), sliderInput("scrna_embedding_opacity", "Opacity", min = 0.1, max = 1, value = isolate(input$scrna_embedding_opacity) %||% 0.72, step = 0.05)))
+        column(5, conditionalPanel("input.scrna_embedding_color_mode == 'metadata'", selectInput("scrna_embedding_color", "Metadata field", choices = choices, selected = selected_choice(isolate(input$scrna_embedding_color), choices, choices[[1]]), selectize = FALSE)), conditionalPanel("input.scrna_embedding_color_mode == 'marker'", scrna_gene_select_input(p, "scrna_embedding_gene", "Marker gene", isolate(input$scrna_embedding_gene)))),
+        column(2, checkboxInput("scrna_embedding_legend", "Show legend", value = if (is.null(isolate(input$scrna_embedding_legend))) TRUE else isTRUE(isolate(input$scrna_embedding_legend))), actionButton("scrna_embedding_clear_selection", "Clear selected cells", class = "btn-default btn-sm"), tags$details(tags$summary("Display"), sliderInput("scrna_embedding_point_size", "Point size", min = 1, max = 8, value = isolate(input$scrna_embedding_point_size) %||% 4, step = 0.5), sliderInput("scrna_embedding_opacity", "Opacity", min = 0.1, max = 1, value = isolate(input$scrna_embedding_opacity) %||% 0.72, step = 0.05)))
       ),
       tags$p(class = "muted small-note", "Showing all cells in the saved UMAP.")
     )
@@ -16183,8 +16197,16 @@ server <- function(input, output, session) {
       margin = list(l = 65, r = 35, t = 30, b = 110)
     )
   })
+  observeEvent(input$scrna_embedding_clear_selection, {
+    scrna_embedding_selection_reset(scrna_embedding_selection_reset() + 1L)
+    session$sendCustomMessage("codespring-clear-plotly-selection", list(
+      id = "scrna_embedding_plot",
+      source = "scrna_embedding"
+    ))
+  }, ignoreInit = TRUE)
   if (PLOTLY_AVAILABLE) output$scrna_selected_cells_ui <- renderUI({
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
+    scrna_embedding_selection_reset()
     selected <- plotly::event_data("plotly_selected", source = "scrna_embedding")
     if (is.null(selected) || !NROW(selected) || !"key" %in% names(selected)) {
       return(tags$p(class = "muted small-note", "Use the lasso or box-select tool in the UMAP toolbar to inspect selected cells."))
@@ -16260,6 +16282,7 @@ server <- function(input, output, session) {
   })
   if (PLOTLY_AVAILABLE) output$scrna_selected_cells <- render_csl_table({
     p <- current_project(); if (!is_scrna_project(p)) return(data.frame())
+    scrna_embedding_selection_reset()
     selected <- plotly::event_data("plotly_selected", source = "scrna_embedding")
     if (is.null(selected) || !NROW(selected) || !"key" %in% names(selected)) return(data.frame())
     cells <- unique(as.character(selected$key))
