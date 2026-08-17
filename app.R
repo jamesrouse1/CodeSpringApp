@@ -766,8 +766,9 @@ new_project_from_inputs <- function(input) {
     fastq_dirs = fastq_dirs,
     design_matrix_path = design_path,
     scrna_input_manifest = trimws(input$new_scrna_manifest_path %||% ""),
-    # The concrete engine is set once the single-cell input manifest is saved.
-    scrna_engine = "auto",
+    # Raw 10x input can use either supported engine.  New non-example projects
+    # retain automatic selection; the PBMC example explicitly asks the user.
+    scrna_engine = tolower(trimws(input$new_scrna_engine %||% "auto")),
     scrna_input_mode = if (identical(tolower(trimws(input$new_scrna_start_mode %||% "new")), "object")) "single" else "auto",
     external_results = existing_results,
     counts_only = counts_only,
@@ -12992,6 +12993,13 @@ server <- function(input, output, session) {
           },
           placeholder = "e.g. pbmc3k_example"
         ),
+        selectInput(
+          "new_scrna_engine", "Analysis engine",
+          choices = c("Choose an engine" = "", "Seurat" = "seurat", "Scanpy" = "scanpy"),
+          selected = isolate(input$new_scrna_engine %||% ""),
+          selectize = FALSE
+        ),
+        tags$p(class = "muted small-note", "Both engines accept this filtered 10x matrix. The selected engine is fixed for this project so its checkpoints and downstream results stay consistent."),
         scrna_results_location_control
       ) else tagList(
         h4("New Project"),
@@ -13542,6 +13550,10 @@ server <- function(input, output, session) {
       output$create_project_status <- renderText("ERROR: Choose a results output storage location for the PBMC 3k example.")
       return()
     }
+    if (isTRUE(scrna_example_mode()) && identical(analysis_key(input$analysis %||% ""), "scrna") && !(tolower(trimws(input$new_scrna_engine %||% "")) %in% c("seurat", "scanpy"))) {
+      output$create_project_status <- renderText("ERROR: Choose Seurat or Scanpy for the PBMC 3k example.")
+      return()
+    }
     p <- new_project_from_inputs(new_project_input_values())
     msg <- tryCatch({
       if (isTRUE(p$external_results)) {
@@ -13625,9 +13637,10 @@ server <- function(input, output, session) {
         p$scrna_input_manifest <- p$design_matrix_path
         p$scrna_input_mode <- if (identical(start_mode, "object") || NROW(manifest) == 1L) "single" else "multiple"
         # Lock the engine into the project configuration once its input type
-        # is known.  This prevents a later UI choice from mixing Seurat-only
-        # and Scanpy-only parameters in the same analysis.
-        p$scrna_engine <- scrna_engine_for_manifest(p, "auto")
+        # is known. This prevents a later UI choice from mixing Seurat-only
+        # and Scanpy-only parameters in the same analysis. Raw 10x PBMC
+        # example input supports either explicitly selected engine.
+        p$scrna_engine <- scrna_engine_for_manifest(p, p$scrna_engine %||% "auto")
         counts_message <- paste0("Single-cell sample design: ", p$scrna_input_manifest, "\nSamples: ", NROW(manifest))
       } else if (isTRUE(p$counts_only)) {
         counts_source_mode <- input$new_counts_source_mode %||% "upload"
