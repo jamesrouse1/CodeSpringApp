@@ -10813,8 +10813,27 @@ scrna_embedding_color_choices <- function(project, view = "integrated") {
   columns <- unique(c(scrna_embedding_columns(project, view), scrna_embedding_columns(project, "integrated"), auxiliary_columns))
   excluded <- c("cell", "UMAP_1", "UMAP_2", "input_path", "source_barcode")
   candidates <- setdiff(columns, excluded)
-  preferred <- intersect(c("cell_type", "cluster", "sample_id", "condition", "batch", "annotation_source"), candidates)
-  unique(c(preferred, sort(setdiff(candidates, preferred))))
+  if (!length(candidates)) return(character(0))
+  # Do not crowd the interactive selector with empty, unassigned, or
+  # constant fields. Read the metadata once so fields added by annotation or
+  # signature scoring are judged from their actual cell-level values.
+  # A representative set is sufficient to identify useful fields and keeps
+  # the selector responsive for very large objects.
+  values <- scrna_embedding_table(project, columns = candidates, max_points = 75000L, view = view)
+  relevant <- candidates[vapply(candidates, function(column) {
+    if (!column %in% names(values)) return(FALSE)
+    raw <- values[[column]]
+    if (is.numeric(raw) || is.integer(raw)) {
+      finite <- raw[is.finite(raw)]
+      return(length(finite) > 1L && length(unique(finite)) > 1L)
+    }
+    labels <- trimws(as.character(raw))
+    labels <- labels[!is.na(labels) & nzchar(labels)]
+    labels <- labels[!tolower(labels) %in% c("unassigned", "unknown", "none", "na", "nan")]
+    length(unique(labels)) > 1L
+  }, logical(1))]
+  preferred <- intersect(c("cell_type", "cluster", "sample_id", "condition", "batch", "annotation_source"), relevant)
+  unique(c(preferred, sort(setdiff(relevant, preferred))))
 }
 
 scrna_embedding_color_column <- function(project, requested = "", view = "integrated") {
@@ -12286,6 +12305,7 @@ server <- function(input, output, session) {
   scrna_dashboard_expression_cache <- reactiveVal(list())
   scrna_dashboard_expression_error <- reactiveVal("")
   scrna_embedding_selection_reset <- reactiveVal(0L)
+  scrna_embedding_manual_selection <- reactiveVal(character(0))
   # Named manual marker/signature collections are stored per project for the
   # browser session. A separate immutable TSV snapshot is written on submit.
   scrna_manual_annotation_sets <- reactiveVal(list())
@@ -13770,6 +13790,7 @@ server <- function(input, output, session) {
 
   observeEvent(current_project(), {
     p <- current_project()
+    scrna_embedding_manual_selection(character(0))
     updateActionButton(session, "save_design", label = if (is_scrna_project(p)) "Save sample design" else "Save design_matrix.txt")
     scrna_manifest_state(if (is_scrna_project(p)) scrna_manifest(p) else data.frame())
     metadata <- if (is_scrna_project(p) && NROW(scrna_manifest(p)) <= 1L) character(0) else default_metadata_cols(p)
@@ -16295,7 +16316,11 @@ server <- function(input, output, session) {
       fluidRow(
         column(5, radioButtons("scrna_embedding_color_mode", "Color UMAP by", choices = c("Cell metadata" = "metadata", "Marker expression" = "marker"), selected = isolate(input$scrna_embedding_color_mode) %||% "metadata", inline = TRUE)),
         column(5, conditionalPanel("input.scrna_embedding_color_mode == 'metadata'", selectInput("scrna_embedding_color", "Metadata field", choices = choices, selected = selected_choice(isolate(input$scrna_embedding_color), choices, choices[[1]]), selectize = FALSE)), conditionalPanel("input.scrna_embedding_color_mode == 'marker'", uiOutput("scrna_embedding_marker_gene_ui"))),
-        column(2, checkboxInput("scrna_embedding_legend", "Show legend", value = if (is.null(isolate(input$scrna_embedding_legend))) TRUE else isTRUE(isolate(input$scrna_embedding_legend))), actionButton("scrna_embedding_clear_selection", "Clear selected cells", class = "btn-default btn-sm"), tags$details(tags$summary("Display"), selectInput("scrna_embedding_display_cells", "Cells rendered", choices = c("Representative 75,000 (faster)" = "75000", "Representative 125,000" = "125000", "All cells" = "all"), selected = selected_choice(isolate(input$scrna_embedding_display_cells), c("75000", "125000", "all"), "75000"), selectize = FALSE), sliderInput("scrna_embedding_point_size", "Point size", min = 1, max = 8, value = isolate(input$scrna_embedding_point_size) %||% 2, step = 0.5), sliderInput("scrna_embedding_opacity", "Opacity", min = 0.1, max = 1, value = isolate(input$scrna_embedding_opacity) %||% 0.72, step = 0.05)))
+        column(2,
+          checkboxInput("scrna_embedding_legend", "Show legend", value = if (is.null(isolate(input$scrna_embedding_legend))) TRUE else isTRUE(isolate(input$scrna_embedding_legend))),
+          div(class = "button-row", actionButton("scrna_embedding_select_all", "Select all cells", class = "btn-default btn-sm"), actionButton("scrna_embedding_clear_selection", "Unselect all cells", class = "btn-default btn-sm")),
+          downloadButton("download_scrna_embedding_pdf", "Download publication PDF", class = "btn-default btn-sm"),
+          tags$details(tags$summary("Display"), selectInput("scrna_embedding_display_cells", "Cells rendered", choices = c("Representative 75,000 (faster)" = "75000", "Representative 125,000" = "125000", "All cells" = "all"), selected = selected_choice(isolate(input$scrna_embedding_display_cells), c("75000", "125000", "all"), "75000"), selectize = FALSE), sliderInput("scrna_embedding_point_size", "Point size", min = 1, max = 8, value = isolate(input$scrna_embedding_point_size) %||% 2, step = 0.5), sliderInput("scrna_embedding_opacity", "Opacity", min = 0.1, max = 1, value = isolate(input$scrna_embedding_opacity) %||% 0.72, step = 0.05)))
       ),
       uiOutput("scrna_embedding_display_note")
     )
@@ -16366,21 +16391,41 @@ server <- function(input, output, session) {
       margin = list(l = 65, r = 35, t = 30, b = 110)
     )
   })
+  observeEvent(input$scrna_embedding_select_all, {
+    p <- current_project(); if (!is_scrna_project(p)) return()
+    embedding_view <- scrna_selected_embedding_view(p, input$scrna_embedding_view %||% "")
+    # Selection is intentionally based on the full embedding, rather than
+    # just the representative points currently rendered in the browser.
+    x <- scrna_embedding_table(p, max_points = Inf, view = embedding_view)
+    scrna_embedding_manual_selection(unique(as.character(x$cell)))
+  }, ignoreInit = TRUE)
   observeEvent(input$scrna_embedding_clear_selection, {
+    scrna_embedding_manual_selection(character(0))
     scrna_embedding_selection_reset(scrna_embedding_selection_reset() + 1L)
     session$sendCustomMessage("codespring-clear-plotly-selection", list(
       id = "scrna_embedding_plot",
       source = "scrna_embedding"
     ))
   }, ignoreInit = TRUE)
+  if (PLOTLY_AVAILABLE) observeEvent(plotly::event_data("plotly_selected", source = "scrna_embedding"), {
+    selected <- plotly::event_data("plotly_selected", source = "scrna_embedding")
+    if (!is.null(selected) && NROW(selected) && "key" %in% names(selected)) {
+      scrna_embedding_manual_selection(unique(as.character(selected$key)))
+    }
+  }, ignoreInit = TRUE)
   if (PLOTLY_AVAILABLE) output$scrna_selected_cells_ui <- renderUI({
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
     scrna_embedding_selection_reset()
-    selected <- plotly::event_data("plotly_selected", source = "scrna_embedding")
-    if (is.null(selected) || !NROW(selected) || !"key" %in% names(selected)) {
+    cells <- scrna_embedding_manual_selection()
+    if (!length(cells)) {
+      selected <- plotly::event_data("plotly_selected", source = "scrna_embedding")
+      cells <- if (!is.null(selected) && NROW(selected) && "key" %in% names(selected)) unique(as.character(selected$key)) else character(0)
+    }
+    cells <- cells[nzchar(cells)]
+    if (!length(cells)) {
       return(tags$p(class = "muted small-note", "Use the lasso or box-select tool in the UMAP toolbar to inspect selected cells."))
     }
-    tagList(br(), h4(paste0("Selected cells (", NROW(selected), ")")),
+    tagList(br(), h4(paste0("Selected cells (", length(cells), ")")),
             tags$p(class = "muted small-note", "The table shows up to 2,000 exact selections. Download the full metadata table for complete export."),
             table_output("scrna_selected_cells"))
   })
@@ -16451,12 +16496,75 @@ server <- function(input, output, session) {
       margin = list(l = 55, r = 30, t = 25, b = 50)
     )
   })
+  scrna_embedding_publication_plot <- reactive({
+    p <- current_project()
+    embedding_view <- scrna_selected_embedding_view(p, input$scrna_embedding_view %||% "")
+    validate(need(nzchar(embedding_view), "Interactive UMAP coordinates are not available yet."))
+    color_mode <- input$scrna_embedding_color_mode %||% "metadata"
+    color_column <- if (identical(color_mode, "metadata")) scrna_embedding_color_column(p, input$scrna_embedding_color %||% "", embedding_view) else ""
+    if (identical(color_mode, "metadata")) validate(need(nzchar(color_column), "Choose a populated metadata field before downloading a UMAP."))
+    display_choice <- input$scrna_embedding_display_cells %||% "75000"
+    max_points <- if (identical(display_choice, "all")) Inf else suppressWarnings(as.numeric(display_choice))
+    if (!is.finite(max_points) || max_points < 1L) max_points <- 75000L
+    x <- scrna_embedding_table(p, columns = color_column, max_points = max_points, view = embedding_view)
+    validate(need(NROW(x), "No valid UMAP coordinates are available."))
+    point_size <- suppressWarnings(as.numeric(input$scrna_embedding_point_size %||% 2))
+    if (!is.finite(point_size)) point_size <- 2
+    point_size <- max(0.15, min(2.5, point_size * 0.42))
+    opacity <- suppressWarnings(as.numeric(input$scrna_embedding_opacity %||% 0.72))
+    if (!is.finite(opacity)) opacity <- 0.72
+    opacity <- max(0.1, min(1, opacity))
+    title <- if (identical(embedding_view, "unintegrated")) "UMAP before integration" else "UMAP"
+    base <- ggplot2::ggplot(x, ggplot2::aes(x = .data$UMAP_1, y = .data$UMAP_2)) +
+      ggplot2::coord_equal() +
+      ggplot2::labs(title = title, x = "UMAP 1", y = "UMAP 2") +
+      ggplot2::theme_classic(base_size = 13) +
+      ggplot2::theme(
+        plot.title = ggplot2::element_text(face = "bold", hjust = 0),
+        axis.title = ggplot2::element_text(face = "bold"),
+        legend.position = if (isTRUE(input$scrna_embedding_legend)) "right" else "none",
+        legend.title = ggplot2::element_text(face = "bold"),
+        legend.key.height = grid::unit(0.42, "cm")
+      )
+    if (identical(color_mode, "marker")) {
+      marker_gene <- trimws(input$scrna_embedding_gene %||% "")
+      expression <- scrna_dashboard_marker_values(p, marker_gene)
+      validate(need(!is.null(expression), paste("Marker expression could not be read.", scrna_dashboard_expression_error() %||% "")))
+      index <- match(x$cell, expression$cell)
+      validate(need(!anyNA(index)), "The marker-expression values do not match this UMAP. Re-run Normalize & PCA and UMAP.")
+      x$.color_value <- expression$expression[index]
+      return(base + ggplot2::geom_point(data = x, ggplot2::aes(color = .data$.color_value), size = point_size, alpha = opacity) +
+        ggplot2::scale_color_gradientn(colours = unname(scrna_expression_colorscale()), name = marker_gene))
+    }
+    value <- x[[color_column]]
+    force_discrete <- color_column %in% scrna_discrete_metadata_fields(p)
+    if (!force_discrete && (is.numeric(value) || is.integer(value))) {
+      x$.color_value <- value
+      return(base + ggplot2::geom_point(data = x, ggplot2::aes(color = .data$.color_value), size = point_size, alpha = opacity) +
+        ggplot2::scale_color_viridis_c(name = color_column, option = "C"))
+    }
+    labels <- as.character(value); labels[is.na(labels) | !nzchar(labels)] <- "Unassigned"
+    x$.color_value <- labels
+    levels <- sort(unique(labels)); palette <- scrna_discrete_palette(length(levels)); names(palette) <- levels
+    base + ggplot2::geom_point(data = x, ggplot2::aes(color = .data$.color_value), size = point_size, alpha = opacity) +
+      ggplot2::scale_color_manual(values = palette, name = color_column)
+  })
+  output$download_scrna_embedding_pdf <- downloadHandler(
+    filename = function() {
+      paste0("umap__", clean_name(input$scrna_embedding_color %||% input$scrna_embedding_gene %||% "view", "view"), ".pdf")
+    },
+    content = function(file) {
+      ggplot2::ggsave(file, scrna_embedding_publication_plot(), device = grDevices::pdf, width = 8.5, height = 7, units = "in", useDingbats = FALSE)
+    }
+  )
   if (PLOTLY_AVAILABLE) output$scrna_selected_cells <- render_csl_table({
     p <- current_project(); if (!is_scrna_project(p)) return(data.frame())
     scrna_embedding_selection_reset()
-    selected <- plotly::event_data("plotly_selected", source = "scrna_embedding")
-    if (is.null(selected) || !NROW(selected) || !"key" %in% names(selected)) return(data.frame())
-    cells <- unique(as.character(selected$key))
+    cells <- scrna_embedding_manual_selection()
+    if (!length(cells)) {
+      selected <- plotly::event_data("plotly_selected", source = "scrna_embedding")
+      cells <- if (!is.null(selected) && NROW(selected) && "key" %in% names(selected)) unique(as.character(selected$key)) else character(0)
+    }
     cells <- cells[nzchar(cells)]
     if (!length(cells)) return(data.frame())
     cells <- utils::head(cells, 2000L)
