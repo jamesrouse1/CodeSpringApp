@@ -16659,7 +16659,9 @@ server <- function(input, output, session) {
     point_size <- suppressWarnings(as.numeric(input$scrna_embedding_point_size %||% 2))
     if (!is.finite(point_size)) point_size <- 2
     point_size <- max(point_size, scrna_embedding_auto_point_size(NROW(x)))
-    point_size <- max(0.15, min(2.5, point_size * 0.42))
+    # PDF is physically larger than the browser canvas; use a more restrained
+    # point scale so sparse examples remain clean rather than oversized.
+    point_size <- max(0.12, min(1.5, point_size * 0.25))
     opacity <- suppressWarnings(as.numeric(input$scrna_embedding_opacity %||% 0.72))
     if (!is.finite(opacity)) opacity <- 0.72
     opacity <- max(0.1, min(1, opacity))
