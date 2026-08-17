@@ -12288,6 +12288,7 @@ server <- function(input, output, session) {
   path_browser <- reactiveValues(target = "", mode = "dir", path = CURRENT_HOME, selected_file = "", message = "")
   project_selection <- reactiveValues(rna = "", scrna = "", cutrun = "", atac = "", chip = "")
   new_fastq_folders <- reactiveVal(character(0))
+  scrna_example_mode <- reactiveVal(FALSE)
   new_scrna_inputs <- reactiveVal(data.frame(
     sample_id = character(0), input_path = character(0), input_type = character(0), fastq_sample = character(0), condition = character(0),
     donor = character(0), technical_batch = character(0), stringsAsFactors = FALSE,
@@ -12955,6 +12956,7 @@ server <- function(input, output, session) {
     if (!identical(input$project_id, "__new__")) return(NULL)
     new_analysis_key <- analysis_key(input$new_project_analysis %||% input$analysis %||% "RNA-seq")
     example <- example_dataset_paths(new_analysis_key)
+    scrna_example_selected <- identical(new_analysis_key, "scrna") && isTRUE(scrna_example_mode())
     # A normal new project must never inherit bundled example inputs. The
     # example paths are populated only by the explicit Use Example Dataset
     # action below.
@@ -12969,20 +12971,36 @@ server <- function(input, output, session) {
     ) else NULL
     tagList(
       tags$hr(),
-      h4("New Project"),
-      if (!is.null(example)) div(
+      if (!is.null(example) && !scrna_example_selected) div(
         class = "read-source-note",
         tags$strong(paste("Bundled", analysis_label(new_analysis_key), "example")),
         tags$p(if (identical(new_analysis_key, "scrna")) "Use the shared PBMC 3k filtered 10x matrix. Choose your own output location when creating the project." else "Use the small example FASTQs and design matrix included with CodeSpringLab. Results are written only to your own results folder."),
         actionButton("use_example_dataset", "Use Example Dataset", class = "btn-default")
       ) else NULL,
-      textInput("new_project_name", "Project name", value = "", placeholder = "e.g. my_project"),
-      selectInput("new_project_analysis", "Analysis type", choices = analysis_choices(), selected = input$analysis, selectize = FALSE),
-      tags$p(class = "muted small-note", analysis_description(new_analysis_key)),
-      uiOutput("new_species_ui"),
-      uiOutput("new_genome_version_ui"),
-      radioButtons("new_paired_end", "Reads", choices = c("Paired-end" = "paired", "Single-end" = "single"), selected = "paired"),
-      radioButtons(
+      if (scrna_example_selected) tagList(
+        h4("PBMC 3k example"),
+        tags$p(class = "muted", "One human filtered 10x matrix is already configured with a one-row sample design. Enter only the results output location, then create the project."),
+        # Keep the required project and one-sample settings present without
+        # asking the user to interact with any setup options.
+        tags$div(style = "display:none;",
+          textInput("new_project_name", NULL, value = example$name),
+          radioButtons("new_scrna_start_mode", NULL, choices = c("new" = "new"), selected = "new"),
+          radioButtons("new_scrna_sample_count", NULL, choices = c("single" = "single"), selected = "single"),
+          radioButtons("new_scrna_folder_type", NULL, choices = c("filtered_10x_matrix" = "filtered_10x_matrix"), selected = "filtered_10x_matrix"),
+          checkboxInput("new_scrna_use_manifest", NULL, value = FALSE)
+        ),
+        scrna_results_location_control
+      ) else tagList(
+        h4("New Project"),
+        textInput("new_project_name", "Project name", value = "", placeholder = "e.g. my_project"),
+        selectInput("new_project_analysis", "Analysis type", choices = analysis_choices(), selected = input$analysis, selectize = FALSE),
+        tags$p(class = "muted small-note", analysis_description(new_analysis_key)),
+        uiOutput("new_species_ui"),
+        uiOutput("new_genome_version_ui"),
+        if (!identical(new_analysis_key, "scrna")) radioButtons("new_paired_end", "Reads", choices = c("Paired-end" = "paired", "Single-end" = "single"), selected = "paired") else NULL,
+        NULL
+      ),
+      if (!scrna_example_selected) radioButtons(
         "new_project_mode", "Project source",
         choices = c(
           if (identical(new_analysis_key, "scrna")) c("Start from single-cell inputs" = "new") else c("Start from FASTQs" = "new"),
@@ -12991,7 +13009,7 @@ server <- function(input, output, session) {
         ),
         selected = "new"
       ),
-      conditionalPanel(
+      if (!scrna_example_selected) conditionalPanel(
         "input.new_project_mode == 'existing_results'",
         div(class = "new-project-path-control",
             textInput("new_existing_results_path", "Completed results folder", value = "", placeholder = "Choose or paste the completed pipeline-output folder"),
@@ -12999,7 +13017,7 @@ server <- function(input, output, session) {
             tags$p(class = "muted", "Registers the completed analysis without moving, deleting, or rerunning data. Only its Results Explorer is available; pipeline and design edits are disabled.")
         )
       ),
-      conditionalPanel(
+      if (!scrna_example_selected) conditionalPanel(
         "input.new_project_mode == 'new' && input.new_project_analysis == 'scRNA-seq'",
         div(class = "read-source-note",
             tags$strong("Choose where the analysis begins"),
@@ -13114,7 +13132,7 @@ server <- function(input, output, session) {
         textInput("new_counts_metadata_cols", "Metadata columns if no design is uploaded", value = "treatment", placeholder = "treatment, batch, sex"),
         tags$p(class = "muted", "Without a design file, sample names are taken from the count-matrix column names. Complete the metadata values in the Samples & Design tab before running DESeq2.")
       ),
-      if (!identical(new_analysis_key, "scrna")) conditionalPanel(
+      if (!scrna_example_selected && !identical(new_analysis_key, "scrna")) conditionalPanel(
         "input.new_project_mode != 'existing_results'",
         div(class = "new-project-path-control",
             textInput("new_results_root", "Results root", value = "", placeholder = paste("Optional; defaults to", DEFAULT_RESULTS_ROOT)),
@@ -13160,6 +13178,19 @@ server <- function(input, output, session) {
     }
     new_fastq_folders(character(0))
     if (identical(key, "scrna")) {
+      example_rows <- tryCatch(
+        validate_scrna_manifest(scrna_matrix_input_rows(example$matrix_dir, example$sample_name, discover_children = FALSE)),
+        error = function(e) e
+      )
+      if (inherits(example_rows, "error")) {
+        output$create_project_status <- renderText(paste("ERROR loading the PBMC example:", conditionMessage(example_rows)))
+        return()
+      }
+      # The example is a complete one-sample design; users should not need to
+      # visit Samples & Design or manually detect the matrix before creation.
+      new_scrna_inputs(example_rows)
+      new_scrna_input_message("PBMC 3k sample design is ready.")
+      scrna_example_mode(TRUE)
       updateRadioButtons(session, "new_scrna_start_mode", selected = "new")
       updateRadioButtons(session, "new_scrna_sample_count", selected = "single")
       updateRadioButtons(session, "new_scrna_folder_type", selected = "filtered_10x_matrix")
@@ -13169,14 +13200,15 @@ server <- function(input, output, session) {
       # Never silently choose where a user's analysis will be written.
       updateTextInput(session, "new_results_root", value = "")
     } else {
+      scrna_example_mode(FALSE)
       updateRadioButtons(session, "new_fastq_location_mode", selected = "one")
       updateTextInput(session, "new_fastq_dir", value = example$fastq_dir)
       updateTextInput(session, "new_design_matrix_path", value = example$design_dir)
       updateTextInput(session, "new_results_root", value = DEFAULT_RESULTS_ROOT)
     }
     updateSelectInput(session, "new_species", selected = example$species %||% "mouse")
-    updateRadioButtons(session, "new_paired_end", selected = example$paired_end %||% "paired")
-    output$create_project_status <- renderText(paste("Loaded the bundled", analysis_label(key), "example paths. Choose a project name and click Create project."))
+    if (!identical(key, "scrna")) updateRadioButtons(session, "new_paired_end", selected = example$paired_end %||% "paired")
+    output$create_project_status <- renderText(if (identical(key, "scrna")) "PBMC 3k is fully configured. Choose the results output location, then click Create project." else paste("Loaded the bundled", analysis_label(key), "example paths. Choose a project name and click Create project."))
   })
 
   output$project_manage_ui <- renderUI({
@@ -13507,6 +13539,10 @@ server <- function(input, output, session) {
   observeEvent(input$create_project_config, {
     if (!nzchar(trimws(input$new_project_name %||% ""))) {
       output$create_project_status <- renderText("ERROR: Enter a project name before creating the project.")
+      return()
+    }
+    if (isTRUE(scrna_example_mode()) && identical(analysis_key(input$analysis %||% ""), "scrna") && !nzchar(trimws(input$new_results_root %||% ""))) {
+      output$create_project_status <- renderText("ERROR: Choose a results output storage location for the PBMC 3k example.")
       return()
     }
     p <- new_project_from_inputs(new_project_input_values())
