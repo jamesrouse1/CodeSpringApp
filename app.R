@@ -12376,6 +12376,7 @@ server <- function(input, output, session) {
   scrna_dashboard_expression_error <- reactiveVal("")
   scrna_embedding_selection_reset <- reactiveVal(0L)
   scrna_embedding_manual_selection <- reactiveVal(character(0))
+  scrna_pbmc_marker_results_shown <- reactiveVal(character(0))
   # Named manual marker/signature collections are stored per project for the
   # browser session. A separate immutable TSV snapshot is written on submit.
   scrna_manual_annotation_sets <- reactiveVal(list())
@@ -14021,6 +14022,25 @@ server <- function(input, output, session) {
     if ((input$web_main_tabs %||% "") %in% c("Progress", "Run Pipeline")) safe_refresh_progress_now("tab refresh")
   }, ignoreInit = TRUE)
 
+  # The PBMC example is a teaching workflow: marker discovery is enabled by
+  # default and, once annotation completes, take the user directly to the
+  # resulting top-marker heatmaps instead of leaving that result buried in a
+  # later tab.
+  observeEvent(progress_refresh(), {
+    p <- current_project()
+    if (!is_scrna_project(p) || !scrna_is_pbmc3k_example(p)) return()
+    figures <- file.path(scrna_output_dir(p), "figures")
+    heatmaps <- if (dir.exists(figures)) list.files(figures, pattern = "^08_cluster_marker_heatmap_panel_[0-9]+\\.png$", full.names = TRUE) else character(0)
+    if (!length(heatmaps)) return()
+    key <- paste(p$id %||% p$name, paste(file.info(heatmaps)$mtime, collapse = "|"), sep = "::")
+    if (identical(isolate(scrna_pbmc_marker_results_shown()), key)) return()
+    scrna_pbmc_marker_results_shown(key)
+    session$onFlushed(function() {
+      updateTabsetPanel(session, "web_main_tabs", selected = "Results Explorer")
+      updateTabsetPanel(session, "scrna_results_tabs", selected = "Cluster markers")
+    }, once = TRUE)
+  }, ignoreInit = TRUE)
+
   output$progress_updated <- renderText({
     paste("Auto-refreshes active jobs every", PROGRESS_REFRESH_MS / 1000, "seconds. Last checked:", format(progress_refresh(), "%Y-%m-%d %H:%M:%S"))
   })
@@ -14837,7 +14857,7 @@ server <- function(input, output, session) {
         conditionalPanel("input.scrna_celltype_source == 'upload'", fileInput("scrna_celltype_upload", "Cell-to-cell-type mapping from laptop", accept = c(".tsv", ".txt")))
       ),
       conditionalPanel("input.scrna_annotation_method != 'reference'",
-        checkboxInput("scrna_find_cluster_markers", "Also calculate marker genes for every cluster", value = FALSE),
+        checkboxInput("scrna_find_cluster_markers", "Also calculate marker genes for every cluster", value = if (is.null(input$scrna_find_cluster_markers)) pbmc_example else isTRUE(input$scrna_find_cluster_markers)),
         tags$p(class = "muted small-note", "Optional and potentially slow for large datasets.")
       )
     )
