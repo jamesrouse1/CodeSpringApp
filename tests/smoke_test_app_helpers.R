@@ -221,6 +221,7 @@ utils::write.table(
 embedding_views <- app_env$scrna_embedding_view_choices(embedding_project)
 unintegrated_embedding <- app_env$scrna_embedding_table(embedding_project, columns = c("cluster", "condition", "sample_id", "cell_type"), max_points = Inf, view = "unintegrated")
 assert(identical(unname(embedding_views), c("integrated", "unintegrated")), "interactive UMAP offers integrated and unintegrated coordinates when both tables exist")
+assert(grepl('legend = list(itemsizing = "constant", font = list(size = 13))', app_text, fixed = TRUE), "interactive UMAP keeps categorical legend symbols visible when plotted cells are small")
 assert(grepl("After integration / final clustering UMAP", app_text, fixed = TRUE), "run section labels the final post-integration UMAP")
 assert(identical(unintegrated_embedding$UMAP_1, c(-1, -2)) && identical(as.character(unintegrated_embedding$cluster), c("0", "1")), "unintegrated UMAP retains its coordinates and joins final annotations by exact cell ID")
 assert(identical(as.character(unintegrated_embedding$cell_type), c("Monocyte", "HSC")) && "cell_type" %in% app_env$scrna_embedding_color_choices(embedding_project, "unintegrated"), "interactive UMAP discovers completed reference-transfer labels without requiring annotation to be rerun")

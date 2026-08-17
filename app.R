@@ -16202,6 +16202,7 @@ server <- function(input, output, session) {
       xaxis = list(title = "UMAP 1", zeroline = FALSE),
       yaxis = list(title = "UMAP 2", zeroline = FALSE, scaleanchor = "x", scaleratio = 1),
       showlegend = isTRUE(input$scrna_embedding_legend),
+      legend = list(itemsizing = "constant", font = list(size = 13)),
       hovermode = "closest",
       margin = list(l = 55, r = 30, t = 25, b = 50)
     )
