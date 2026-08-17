@@ -14483,16 +14483,28 @@ server <- function(input, output, session) {
 
   output$scrna_preprocess_settings_ui <- renderUI({
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
-    if (identical(scrna_ui_engine(), "scanpy")) {
-      return(tagList(
+    normalization_controls <- if (identical(scrna_ui_engine(), "scanpy")) {
+      tagList(
         tags$strong("Normalization"),
         tags$p(class = "muted small-note", "Scanpy standard normalization is used automatically: library-size normalization followed by log1p transformation. No selection is needed.")
-      ))
+      )
+    } else {
+      choices <- scrna_ui_choices()
+      tagList(
+        selectInput("scrna_normalization", "Normalization", choices = choices$normalization, selected = selected_choice(input$scrna_normalization, unname(choices$normalization), "auto"), selectize = FALSE),
+        tags$p(class = "muted small-note", "Automatic selects the recommended normalization for the chosen engine.")
+      )
     }
-    choices <- scrna_ui_choices()
     tagList(
-      selectInput("scrna_normalization", "Normalization", choices = choices$normalization, selected = selected_choice(input$scrna_normalization, unname(choices$normalization), "auto"), selectize = FALSE),
-      tags$p(class = "muted small-note", "Automatic selects the recommended normalization for the chosen engine.")
+      normalization_controls,
+      tags$h4("PCA and initial pre-integration UMAP"),
+      radioButtons("scrna_umap_focus", "Emphasize", choices = c("Local structure (nearby subpopulations)" = "local", "Global structure (broader population relationships)" = "global"), selected = input$scrna_umap_focus %||% "local", inline = TRUE),
+      tags$p(class = "muted small-note", "This choice sets the PCA-neighbour and UMAP parameters used to create the initial sample UMAP before integration. The same values are retained for the later integrated UMAP unless you edit them."),
+      fluidRow(
+        column(4, numericInput("scrna_n_neighbors", "Neighbours", value = input$scrna_n_neighbors %||% 15, min = 2, max = 200, step = 1)),
+        column(4, numericInput("scrna_umap_min_dist", "Minimum distance", value = input$scrna_umap_min_dist %||% 0.3, min = 0, max = 2, step = 0.05)),
+        column(4, numericInput("scrna_n_pcs", "Principal components", value = input$scrna_n_pcs %||% 30, min = 5, max = 100, step = 1))
+      )
     )
   })
 
@@ -14513,19 +14525,9 @@ server <- function(input, output, session) {
         tags$p(class = "muted small-note", "Automatic integration treats each input sample as one group by default. Use a broader technical-batch field only when multiple input samples came from the same library or run; never group by biological condition.")
       )
     }
-    umap_controls <- tagList(
-        tags$h4("UMAP parameters"),
-        radioButtons("scrna_umap_focus", "Emphasize", choices = c("Local structure (nearby subpopulations)" = "local", "Global structure (broader population relationships)" = "global"), selected = input$scrna_umap_focus %||% "local", inline = TRUE),
-        tags$p(class = "muted small-note", "The selected focus auto-fills neighbours and minimum distance. The PCA elbow auto-fills the recommended number of PCs after Normalize & PCA; all values remain editable and are applied consistently in Seurat and Scanpy."),
-        fluidRow(
-          column(4, numericInput("scrna_n_neighbors", "Neighbours", value = input$scrna_n_neighbors %||% 15, min = 2, max = 200, step = 1)),
-          column(4, numericInput("scrna_umap_min_dist", "Minimum distance", value = input$scrna_umap_min_dist %||% 0.3, min = 0, max = 2, step = 0.05)),
-          column(4, numericInput("scrna_n_pcs", "Principal components", value = input$scrna_n_pcs %||% 30, min = 5, max = 100, step = 1))
-        )
-      )
     tagList(
       integration_controls,
-      umap_controls,
+      tags$p(class = "muted small-note", "Neighbours, minimum distance, and PCA dimensions were selected during Normalize & PCA and were used for the pre-integration sample UMAP. Those same values will be used here for clustering after optional integration."),
       numericInput("scrna_cluster_resolution", "Clustering resolution", value = input$scrna_cluster_resolution %||% 0.6, min = 0.05, max = 5, step = 0.05),
       tags$details(tags$summary("Advanced clustering and Harmony settings"),
         numericInput("scrna_seed", "Random seed", value = input$scrna_seed %||% 1234, min = 1, step = 1),
