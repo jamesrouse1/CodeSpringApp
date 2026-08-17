@@ -9502,7 +9502,7 @@ submit_scrna_reference_inspection <- function(project, reference_file) {
   list(message = message, output_path = output_path, reference_file = reference_file, job_id = parse_sbatch_job_id(message))
 }
 
-submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto", normalization = "auto", integration = "auto", batch_column = "batch", cluster_resolution = 0.6, min_features = 200, min_counts = 0, max_features = 0, max_percent_mt = 20, min_cells_per_gene = 3, n_pcs = 30, n_neighbors = 15, umap_min_dist = 0.5, umap_spread = 1, umap_metric = "euclidean", umap_init_pos = "spectral", doublet_method = "auto", doublet_rate = 0, remove_doublets = TRUE, seed = 1234, scvi_max_epochs = 400, harmony_theta = 2, harmony_lambda = 1, harmony_max_iter = 20, marker_file = "", celltype_file = "", reference_file = "", marker_upload = NULL, celltype_upload = NULL, reference_upload = NULL, marker_source = "server", celltype_source = "server", reference_source = "server", reference_label_column = "", find_cluster_markers = FALSE, marker_manual = list(), marker_species = "same", marker_ortholog_file = "", marker_ortholog_upload = NULL, marker_ortholog_source = "server", annotation_name = "cell_type", signature_file = "", signature_upload = NULL, signature_source = "server", signature_manual = list(), signature_species = "same", signature_ortholog_file = "", signature_ortholog_upload = NULL, signature_ortholog_source = "server", de_group_column = "condition", de_reference = "", de_comparison = "", de_annotation_column = "", de_annotation_values = "all", de_method = "both", de_covariates = character(0), pathway_library = "MSigDB_Hallmark_2020", pathway_species = "auto", pathway_ortholog_file = "", pathway_ortholog_upload = NULL, pathway_ortholog_source = "server", pathway_gmt_file = "", pathway_gmt_upload = NULL, pathway_source = "server") {
+submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto", normalization = "auto", integration = "auto", batch_column = "batch", cluster_resolution = 0.6, min_features = 200, min_counts = 0, max_features = 0, max_percent_mt = 20, min_cells_per_gene = 3, n_pcs = 30, n_neighbors = 15, umap_min_dist = 0.3, umap_spread = 1, umap_metric = "euclidean", umap_init_pos = "spectral", doublet_method = "auto", doublet_rate = 0, remove_doublets = TRUE, seed = 1234, scvi_max_epochs = 400, harmony_theta = 2, harmony_lambda = 1, harmony_max_iter = 20, marker_file = "", celltype_file = "", reference_file = "", marker_upload = NULL, celltype_upload = NULL, reference_upload = NULL, marker_source = "server", celltype_source = "server", reference_source = "server", reference_label_column = "", find_cluster_markers = FALSE, marker_manual = list(), marker_species = "same", marker_ortholog_file = "", marker_ortholog_upload = NULL, marker_ortholog_source = "server", annotation_name = "cell_type", signature_file = "", signature_upload = NULL, signature_source = "server", signature_manual = list(), signature_species = "same", signature_ortholog_file = "", signature_ortholog_upload = NULL, signature_ortholog_source = "server", de_group_column = "condition", de_reference = "", de_comparison = "", de_annotation_column = "", de_annotation_values = "all", de_method = "both", de_covariates = character(0), pathway_library = "MSigDB_Hallmark_2020", pathway_species = "auto", pathway_ortholog_file = "", pathway_ortholog_upload = NULL, pathway_ortholog_source = "server", pathway_gmt_file = "", pathway_gmt_upload = NULL, pathway_source = "server") {
   if (missing(batch_column)) batch_column <- "sample_id"
   stage <- tolower(trimws(as.character(stage %||% "inspect")))
   step_label <- tryCatch(scrna_stage_step(stage), error = function(e) "")
@@ -14381,7 +14381,7 @@ server <- function(input, output, session) {
   }
 
   observeEvent(list(progress_refresh(), input$scrna_umap_focus), {
-    p <- current_project(); if (!is_scrna_project(p) || !identical(scrna_ui_engine(), "scanpy")) return()
+    p <- current_project(); if (!is_scrna_project(p)) return()
     focus <- input$scrna_umap_focus %||% "local"
     if (!focus %in% c("local", "global")) focus <- "local"
     recommendation_path <- file.path(scrna_output_dir(p), "tables", "pca_recommended_parameters.tsv")
@@ -14452,7 +14452,7 @@ server <- function(input, output, session) {
         tags$p(class = "muted small-note", "The selected focus auto-fills neighbours and minimum distance. The PCA elbow auto-fills the recommended number of PCs after Normalize & PCA; all values remain editable and are applied consistently in Seurat and Scanpy."),
         fluidRow(
           column(4, numericInput("scrna_n_neighbors", "Neighbours", value = input$scrna_n_neighbors %||% 15, min = 2, max = 200, step = 1)),
-          column(4, numericInput("scrna_umap_min_dist", "Minimum distance", value = input$scrna_umap_min_dist %||% 0.5, min = 0, max = 2, step = 0.05)),
+          column(4, numericInput("scrna_umap_min_dist", "Minimum distance", value = input$scrna_umap_min_dist %||% 0.3, min = 0, max = 2, step = 0.05)),
           column(4, numericInput("scrna_n_pcs", "Principal components", value = input$scrna_n_pcs %||% 30, min = 5, max = 100, step = 1))
         )
       )
@@ -15205,7 +15205,7 @@ server <- function(input, output, session) {
         min_cells_per_gene = input$scrna_min_cells_per_gene %||% 3,
         n_pcs = input$scrna_n_pcs %||% 30,
         n_neighbors = input$scrna_n_neighbors %||% 15,
-        umap_min_dist = input$scrna_umap_min_dist %||% 0.5,
+        umap_min_dist = input$scrna_umap_min_dist %||% 0.3,
         umap_spread = input$scrna_umap_spread %||% 1,
         umap_metric = input$scrna_umap_metric %||% "euclidean",
         umap_init_pos = input$scrna_umap_init_pos %||% "spectral",
@@ -16194,7 +16194,7 @@ server <- function(input, output, session) {
       fluidRow(
         column(5, radioButtons("scrna_embedding_color_mode", "Color UMAP by", choices = c("Cell metadata" = "metadata", "Marker expression" = "marker"), selected = isolate(input$scrna_embedding_color_mode) %||% "metadata", inline = TRUE)),
         column(5, conditionalPanel("input.scrna_embedding_color_mode == 'metadata'", selectInput("scrna_embedding_color", "Metadata field", choices = choices, selected = selected_choice(isolate(input$scrna_embedding_color), choices, choices[[1]]), selectize = FALSE)), conditionalPanel("input.scrna_embedding_color_mode == 'marker'", scrna_gene_select_input(p, "scrna_embedding_gene", "Marker gene", isolate(input$scrna_embedding_gene)))),
-        column(2, checkboxInput("scrna_embedding_legend", "Show legend", value = if (is.null(isolate(input$scrna_embedding_legend))) TRUE else isTRUE(isolate(input$scrna_embedding_legend))), actionButton("scrna_embedding_clear_selection", "Clear selected cells", class = "btn-default btn-sm"), tags$details(tags$summary("Display"), sliderInput("scrna_embedding_point_size", "Point size", min = 1, max = 8, value = isolate(input$scrna_embedding_point_size) %||% 4, step = 0.5), sliderInput("scrna_embedding_opacity", "Opacity", min = 0.1, max = 1, value = isolate(input$scrna_embedding_opacity) %||% 0.72, step = 0.05)))
+        column(2, checkboxInput("scrna_embedding_legend", "Show legend", value = if (is.null(isolate(input$scrna_embedding_legend))) TRUE else isTRUE(isolate(input$scrna_embedding_legend))), actionButton("scrna_embedding_clear_selection", "Clear selected cells", class = "btn-default btn-sm"), tags$details(tags$summary("Display"), sliderInput("scrna_embedding_point_size", "Point size", min = 1, max = 8, value = isolate(input$scrna_embedding_point_size) %||% 2, step = 0.5), sliderInput("scrna_embedding_opacity", "Opacity", min = 0.1, max = 1, value = isolate(input$scrna_embedding_opacity) %||% 0.72, step = 0.05)))
       ),
       tags$p(class = "muted small-note", "Showing all cells in the saved UMAP.")
     )
@@ -16278,9 +16278,9 @@ server <- function(input, output, session) {
     color_mode <- input$scrna_embedding_color_mode %||% "metadata"
     color_column <- if (identical(color_mode, "metadata")) scrna_embedding_color_column(p, input$scrna_embedding_color %||% "", embedding_view) else ""
     if (identical(color_mode, "metadata")) validate(need(nzchar(color_column), "The embedding table has no cell-level annotation columns to color."))
-    point_size <- suppressWarnings(as.numeric(input$scrna_embedding_point_size %||% 4))
+    point_size <- suppressWarnings(as.numeric(input$scrna_embedding_point_size %||% 2))
     opacity <- suppressWarnings(as.numeric(input$scrna_embedding_opacity %||% 0.72))
-    if (!is.finite(point_size)) point_size <- 4
+    if (!is.finite(point_size)) point_size <- 2
     if (!is.finite(opacity)) opacity <- 0.72
     point_size <- max(1, min(8, point_size)); opacity <- max(0.1, min(1, opacity))
     x <- scrna_embedding_table(p, columns = c(color_column, "sample_id", "condition", "batch", "cluster", "cell_type", "annotation_source"), max_points = Inf, view = embedding_view)
