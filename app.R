@@ -15984,7 +15984,10 @@ server <- function(input, output, session) {
   output$scrna_post_qc_plot_ui <- renderUI({
     progress_refresh()
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
-    files <- scrna_result_file_choices(p, "^01_qc_post_filter_.*\\.png$")
+    # Scanpy writes the standardized post-filter names. Accept the original
+    # Seurat names as well so completed projects made before this update render
+    # immediately rather than appearing to have no retained-cell figures.
+    files <- scrna_result_file_choices(p, "^(01_qc_post_filter_|01_qc_violin|02_qc_scatter).*\\.png$")
     if (!length(files)) return(div(class = "empty-box", "After you run QC, the retained-cell plots will appear here with the same applied cutoffs."))
     violin <- files[grepl("_violin\\.png$", unname(files), ignore.case = TRUE)]
     selected <- selected_choice(input$scrna_post_qc_plot, files, unname(if (length(violin)) violin else files)[[1]])
