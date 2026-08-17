@@ -8934,6 +8934,17 @@ scrna_is_pbmc3k_example <- function(project) {
   any(paths == example_dir)
 }
 
+scrna_pbmc3k_tutorial_settings <- function() {
+  # Seurat's PBMC 3K guided tutorial uses these QC and graph/clustering
+  # settings: 10 PCs, k = 20 neighbours, and resolution 0.5.
+  list(
+    normalization = "lognormalize", min_features = 200L, min_counts = 0L,
+    max_features = 2500L, max_percent_mt = 5, doublet_method = "none",
+    remove_doublets = FALSE, n_pcs = 10L, n_neighbors = 20L,
+    umap_min_dist = 0.3, cluster_resolution = 0.5
+  )
+}
+
 scrna_source_is_processed_object <- function(project) {
   manifest <- scrna_manifest(project)
   NROW(manifest) == 1L && grepl("\\.(rds|h5ad)$", trimws(as.character(manifest$input_path[[1]])), ignore.case = TRUE)
@@ -14469,6 +14480,10 @@ server <- function(input, output, session) {
 
   observeEvent(progress_refresh(), {
     p <- current_project(); if (!is_scrna_project(p)) return()
+    # The PBMC 3K example is intentionally a reproducible tutorial run, not
+    # a data-driven QC demonstration.  Keep its documented tutorial filters
+    # instead of replacing them with MAD-derived suggestions.
+    if (scrna_is_pbmc3k_example(p)) return()
     path <- file.path(scrna_output_dir(p), "tables", "qc_recommended_thresholds.tsv")
     if (!file.exists(path)) return()
     stamp <- paste(p$id %||% p$name, file.info(path)$mtime, sep = "::")
@@ -14505,8 +14520,9 @@ server <- function(input, output, session) {
     recommendation_stamp <- if (file.exists(recommendation_path)) as.character(file.info(recommendation_path)$mtime) else "no_pca_yet"
     stamp <- paste(p$id %||% p$name, focus, recommendation_stamp, sep = "::")
     if (identical(isolate(scrna_umap_defaults_applied()), stamp)) return()
-    defaults <- if (identical(focus, "global")) list(n_neighbors = 30, min_dist = 0.6) else list(n_neighbors = 15, min_dist = 0.3)
-    n_pcs <- scrna_pca_recommendation(p)
+    tutorial <- scrna_is_pbmc3k_example(p)
+    defaults <- if (tutorial) list(n_neighbors = 20, min_dist = 0.3) else if (identical(focus, "global")) list(n_neighbors = 30, min_dist = 0.6) else list(n_neighbors = 15, min_dist = 0.3)
+    n_pcs <- if (tutorial) 10L else scrna_pca_recommendation(p)
     session$onFlushed(function() {
       updateNumericInput(session, "scrna_n_neighbors", value = defaults$n_neighbors)
       updateNumericInput(session, "scrna_umap_min_dist", value = defaults$min_dist)
@@ -14528,21 +14544,24 @@ server <- function(input, output, session) {
   output$scrna_qc_settings_ui <- renderUI({
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
     choices <- scrna_ui_choices()
+    tutorial <- if (scrna_is_pbmc3k_example(p)) scrna_pbmc3k_tutorial_settings() else NULL
     tagList(
+      if (!is.null(tutorial)) div(class = "read-source-note", tags$strong("PBMC 3K tutorial preset"), tags$p("This example uses the documented Seurat PBMC 3K QC and clustering settings to reproduce the tutorial-scale populations. Use the Seurat engine for the closest match; Scanpy is a separate implementation.")),
       uiOutput("scrna_qc_recommendations_ui"),
-      numericInput("scrna_min_features", "Minimum detected genes per cell", value = input$scrna_min_features %||% 200, min = 0, step = 25),
-      numericInput("scrna_min_counts", "Minimum total counts per cell", value = input$scrna_min_counts %||% 0, min = 0, step = 100),
-      numericInput("scrna_max_percent_mt", "Maximum mitochondrial reads per cell (%)", value = input$scrna_max_percent_mt %||% 20, min = 0, max = 100, step = 1),
-      selectInput("scrna_doublet_method", "Doublet detection", choices = choices$doublets, selected = selected_choice(input$scrna_doublet_method, unname(choices$doublets), "auto"), selectize = FALSE),
+      numericInput("scrna_min_features", "Minimum detected genes per cell", value = input$scrna_min_features %||% tutorial$min_features %||% 200, min = 0, step = 25),
+      numericInput("scrna_min_counts", "Minimum total counts per cell", value = input$scrna_min_counts %||% tutorial$min_counts %||% 0, min = 0, step = 100),
+      numericInput("scrna_max_percent_mt", "Maximum mitochondrial reads per cell (%)", value = input$scrna_max_percent_mt %||% tutorial$max_percent_mt %||% 20, min = 0, max = 100, step = 1),
+      selectInput("scrna_doublet_method", "Doublet detection", choices = choices$doublets, selected = selected_choice(input$scrna_doublet_method, unname(choices$doublets), tutorial$doublet_method %||% "auto"), selectize = FALSE),
       checkboxInput("scrna_auto_doublet_rate", "Estimate the doublet rate automatically for each capture", value = if (is.null(input$scrna_auto_doublet_rate)) TRUE else isTRUE(input$scrna_auto_doublet_rate)),
       conditionalPanel("!input.scrna_auto_doublet_rate", numericInput("scrna_doublet_rate", "Expected doublet rate", value = input$scrna_doublet_rate %||% 0.05, min = 0.001, max = 0.5, step = 0.01)),
-      checkboxInput("scrna_remove_doublets", "Remove predicted doublets before downstream analysis", value = if (is.null(input$scrna_remove_doublets)) TRUE else isTRUE(input$scrna_remove_doublets)),
-      tags$details(tags$summary("Advanced QC setting"), numericInput("scrna_max_features", "Maximum detected genes per cell (0 = disabled)", value = input$scrna_max_features %||% 0, min = 0, step = 100))
+      checkboxInput("scrna_remove_doublets", "Remove predicted doublets before downstream analysis", value = if (is.null(input$scrna_remove_doublets)) tutorial$remove_doublets %||% TRUE else isTRUE(input$scrna_remove_doublets)),
+      tags$details(tags$summary("Advanced QC setting"), numericInput("scrna_max_features", "Maximum detected genes per cell (0 = disabled)", value = input$scrna_max_features %||% tutorial$max_features %||% 0, min = 0, step = 100))
     )
   })
 
   output$scrna_preprocess_settings_ui <- renderUI({
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
+    tutorial <- if (scrna_is_pbmc3k_example(p)) scrna_pbmc3k_tutorial_settings() else NULL
     normalization_controls <- if (identical(scrna_ui_engine(), "scanpy")) {
       tagList(
         tags$strong("Normalization"),
@@ -14551,7 +14570,7 @@ server <- function(input, output, session) {
     } else {
       choices <- scrna_ui_choices()
       tagList(
-        selectInput("scrna_normalization", "Normalization", choices = choices$normalization, selected = selected_choice(input$scrna_normalization, unname(choices$normalization), "auto"), selectize = FALSE),
+        selectInput("scrna_normalization", "Normalization", choices = choices$normalization, selected = selected_choice(input$scrna_normalization, unname(choices$normalization), tutorial$normalization %||% "auto"), selectize = FALSE),
         tags$p(class = "muted small-note", "Automatic selects the recommended normalization for the chosen engine.")
       )
     }
@@ -14561,9 +14580,9 @@ server <- function(input, output, session) {
       radioButtons("scrna_umap_focus", "Emphasize", choices = c("Local structure (nearby subpopulations)" = "local", "Global structure (broader population relationships)" = "global"), selected = input$scrna_umap_focus %||% "local", inline = TRUE),
       tags$p(class = "muted small-note", "This choice sets the PCA-neighbour and UMAP parameters used to create the initial sample UMAP before integration. The same values are retained for the later integrated UMAP unless you edit them."),
       fluidRow(
-        column(4, numericInput("scrna_n_neighbors", "Neighbours", value = input$scrna_n_neighbors %||% 15, min = 2, max = 200, step = 1)),
-        column(4, numericInput("scrna_umap_min_dist", "Minimum distance", value = input$scrna_umap_min_dist %||% 0.3, min = 0, max = 2, step = 0.05)),
-        column(4, numericInput("scrna_n_pcs", "Principal components", value = input$scrna_n_pcs %||% 30, min = 5, max = 100, step = 1))
+        column(4, numericInput("scrna_n_neighbors", "Neighbours", value = input$scrna_n_neighbors %||% tutorial$n_neighbors %||% 15, min = 2, max = 200, step = 1)),
+        column(4, numericInput("scrna_umap_min_dist", "Minimum distance", value = input$scrna_umap_min_dist %||% tutorial$umap_min_dist %||% 0.3, min = 0, max = 2, step = 0.05)),
+        column(4, numericInput("scrna_n_pcs", "Principal components", value = input$scrna_n_pcs %||% tutorial$n_pcs %||% 30, min = 5, max = 100, step = 1))
       )
     )
   })
@@ -14571,6 +14590,7 @@ server <- function(input, output, session) {
   output$scrna_cluster_settings_ui <- renderUI({
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
     choices <- scrna_ui_choices()
+    tutorial <- if (scrna_is_pbmc3k_example(p)) scrna_pbmc3k_tutorial_settings() else NULL
     multiple_inputs <- NROW(scrna_manifest(p)) > 1L
     integration_controls <- if (!multiple_inputs) {
       tags$p(class = "muted small-note", "One input sample detected: integration is not applicable. UMAP and clustering will use the PCA representation directly.")
@@ -14590,7 +14610,7 @@ server <- function(input, output, session) {
       tags$h4("UMAP parameters"),
       radioButtons("scrna_cluster_umap_focus", "Emphasize", choices = c("Local structure (nearby subpopulations)" = "local", "Global structure (broader population relationships)" = "global"), selected = input$scrna_umap_focus %||% "local", inline = TRUE),
       tags$p(class = "muted small-note", "Neighbours, minimum distance, and PCA dimensions were selected during Normalize & PCA and used for the pre-integration sample UMAP. Changing emphasis here updates those values for this final UMAP and clustering run."),
-      numericInput("scrna_cluster_resolution", "Clustering resolution", value = input$scrna_cluster_resolution %||% 0.6, min = 0.05, max = 5, step = 0.05),
+      numericInput("scrna_cluster_resolution", "Clustering resolution", value = input$scrna_cluster_resolution %||% tutorial$cluster_resolution %||% 0.6, min = 0.05, max = 5, step = 0.05),
       tags$details(tags$summary("Advanced clustering and Harmony settings"),
         numericInput("scrna_seed", "Random seed", value = input$scrna_seed %||% 1234, min = 1, step = 1),
         numericInput("scrna_harmony_theta", "Harmony diversity penalty (theta)", value = input$scrna_harmony_theta %||% 2, min = 0, max = 20, step = 0.5),
