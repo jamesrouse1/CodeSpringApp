@@ -12979,15 +12979,18 @@ server <- function(input, output, session) {
       ) else NULL,
       if (scrna_example_selected) tagList(
         h4("PBMC 3k example"),
-        tags$p(class = "muted", "One human filtered 10x matrix is already configured with a one-row sample design. Enter only the results output location, then create the project."),
-        # Keep the required project and one-sample settings present without
-        # asking the user to interact with any setup options.
-        tags$div(style = "display:none;",
-          textInput("new_project_name", NULL, value = example$name),
-          radioButtons("new_scrna_start_mode", NULL, choices = c("new" = "new"), selected = "new"),
-          radioButtons("new_scrna_sample_count", NULL, choices = c("single" = "single"), selected = "single"),
-          radioButtons("new_scrna_folder_type", NULL, choices = c("filtered_10x_matrix" = "filtered_10x_matrix"), selected = "filtered_10x_matrix"),
-          checkboxInput("new_scrna_use_manifest", NULL, value = FALSE)
+        tags$p(class = "muted", "One human filtered 10x matrix is already configured with a one-row sample design. Give this run a project name and choose where to save its results."),
+        # The example mode supplies its fixed analysis settings in the server
+        # logic.  Do not render hidden radio controls here: hidden controls
+        # are still initialized by Shiny and can leave the form in an
+        # inconsistent state while this UI is being replaced.
+        textInput(
+          "new_project_name", "Project name",
+          value = {
+            current_name <- isolate(input$new_project_name %||% "")
+            if (nzchar(trimws(current_name))) current_name else example$name
+          },
+          placeholder = "e.g. pbmc3k_example"
         ),
         scrna_results_location_control
       ) else tagList(
@@ -13191,12 +13194,6 @@ server <- function(input, output, session) {
       new_scrna_inputs(example_rows)
       new_scrna_input_message("PBMC 3k sample design is ready.")
       scrna_example_mode(TRUE)
-      updateRadioButtons(session, "new_scrna_start_mode", selected = "new")
-      updateRadioButtons(session, "new_scrna_sample_count", selected = "single")
-      updateRadioButtons(session, "new_scrna_folder_type", selected = "filtered_10x_matrix")
-      updateCheckboxInput(session, "new_scrna_use_manifest", value = FALSE)
-      updateTextInput(session, "new_scrna_matrix_path", value = example$matrix_dir)
-      updateTextInput(session, "new_scrna_sample_name", value = example$sample_name)
       # Never silently choose where a user's analysis will be written.
       updateTextInput(session, "new_results_root", value = "")
     } else {
@@ -13581,9 +13578,10 @@ server <- function(input, output, session) {
       example_design_copied <- ""
       counts_message <- ""
       if (is_scrna_project(p)) {
-        start_mode <- tolower(input$new_scrna_start_mode %||% "new")
+        example_mode <- isTRUE(scrna_example_mode()) && identical(p$analysis_key, "scrna")
+        start_mode <- if (example_mode) "new" else tolower(input$new_scrna_start_mode %||% "new")
         input_source <- input$new_scrna_input_source %||% "server"
-        use_manifest <- identical(start_mode, "new") && isTRUE(input$new_scrna_use_manifest)
+        use_manifest <- !example_mode && identical(start_mode, "new") && isTRUE(input$new_scrna_use_manifest)
         manifest_source_mode <- input$new_scrna_manifest_source %||% "server"
         input_path <- if (identical(start_mode, "object") && identical(input_source, "upload")) {
           copy_uploaded_project_file(
@@ -13610,7 +13608,7 @@ server <- function(input, output, session) {
         manifest <- if (identical(start_mode, "new") && !use_manifest) {
           built <- apply_design_form_values(new_scrna_inputs(), reactiveValuesToList(input), "new_scrna_form")
           if (!NROW(built)) stop("Detect and add at least one FASTQ or filtered-matrix sample before creating the project.")
-          expected_samples <- input$new_scrna_sample_count %||% "multiple"
+          expected_samples <- if (example_mode) "single" else input$new_scrna_sample_count %||% "multiple"
           if (identical(expected_samples, "single") && NROW(built) != 1L) stop("One sample was selected, but the input table contains ", NROW(built), " samples. Clear the table and add the intended sample folder.")
           if (identical(expected_samples, "multiple") && NROW(built) < 2L) stop("Multiple samples was selected, but only one sample was detected. Add the remaining sample folders or choose One sample.")
           built <- validate_scrna_manifest(built)
