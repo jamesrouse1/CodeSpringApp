@@ -1045,6 +1045,36 @@ safe_read_table <- function(path, n = Inf) {
   })
 }
 
+scrna_gene_list_preview_ui <- function(path, set_column, title) {
+  path <- trimws(as.character(path %||% ""))
+  if (!nzchar(path)) return(tags$p(class = "muted small-note", "Choose a TSV to preview its gene sets."))
+  if (!file.exists(path) || dir.exists(path) || file.access(path, mode = 4) != 0) {
+    return(div(class = "summary-job-status failed", tags$strong(paste0(title, " is not readable")), tags$p(class = "muted small-note", path)))
+  }
+  tab <- safe_read_table(path, n = 20000L)
+  if (!all(c(set_column, "gene") %in% names(tab))) {
+    return(div(class = "summary-job-status failed", tags$strong(paste0(title, " needs ‘", set_column, "’ and ‘gene’ columns."))))
+  }
+  tab[[set_column]] <- trimws(as.character(tab[[set_column]])); tab$gene <- trimws(as.character(tab$gene))
+  tab <- tab[nzchar(tab[[set_column]]) & nzchar(tab$gene), c(set_column, "gene"), drop = FALSE]
+  if (!NROW(tab)) return(div(class = "summary-job-status failed", tags$strong(paste0(title, " has no non-empty gene entries."))))
+  sets <- split(tab$gene, tab[[set_column]], drop = TRUE)
+  cards <- lapply(utils::head(names(sets), 24L), function(name) {
+    genes <- unique(unlist(strsplit(sets[[name]], "[,;[:space:]]+"), use.names = FALSE))
+    genes <- genes[nzchar(genes)]
+    div(class = "gene-list-preview-card",
+      tags$strong(name),
+      tags$span(class = "gene-list-preview-count", paste(length(genes), "genes")),
+      div(class = "gene-list-preview-genes", lapply(genes, function(gene) tags$span(gene)))
+    )
+  })
+  tagList(
+    tags$p(class = "muted small-note", paste0(title, ": ", length(sets), " sets and ", sum(lengths(lapply(sets, function(values) unique(unlist(strsplit(values, "[,;[:space:]]+"), use.names = FALSE))))), " listed genes.")),
+    div(class = "gene-list-preview", cards),
+    if (length(sets) > 24L) tags$p(class = "muted small-note", paste0("Previewing the first 24 of ", length(sets), " sets.")) else NULL
+  )
+}
+
 read_key_value_table <- function(path, key_name = "Metric", value_name = "Value") {
   lines <- read_metric_lines(path)
   lines <- lines[nzchar(lines)]
@@ -11507,6 +11537,11 @@ body { background:#eef3f8; color:#17202f; }
 .resource-strip { display:grid; grid-template-columns:minmax(280px,.85fr) minmax(460px,1.45fr); gap:16px; align-items:stretch; margin:12px 0 18px 0; }
 .resource-card { background:white; border:1px solid #d8dde8; border-radius:8px; padding:16px; min-width:0; }
 .resource-card p { white-space:normal; overflow-wrap:anywhere; word-break:break-word; }
+.gene-list-preview { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:10px; margin:10px 0 14px; }
+.gene-list-preview-card { background:#f8fbff; border:1px solid #d7e4f1; border-radius:9px; padding:10px 11px; min-width:0; }
+.gene-list-preview-count { display:block; color:#657084; font-size:11px; font-weight:700; margin:3px 0 7px; }
+.gene-list-preview-genes { display:flex; flex-wrap:wrap; gap:5px; }
+.gene-list-preview-genes span { background:#e7f1fb; color:#254b70; border-radius:999px; padding:3px 7px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11px; line-height:1.2; }
 .resource-card.flowchart-card { display:flex; align-items:center; justify-content:center; min-height:360px; overflow:hidden; }
 .resource-card img { width:100%; max-width:100%; max-height:380px; object-fit:contain; }
 .progress-note { color:#657084; margin-bottom:10px; }
@@ -14698,6 +14733,17 @@ server <- function(input, output, session) {
     set_scrna_annotation_ui_value("celltype_source", input$scrna_celltype_source_intent)
   }, ignoreInit = TRUE)
 
+  output$scrna_marker_list_preview_ui <- renderUI({
+    source <- input$scrna_marker_source %||% ""
+    path <- if (identical(source, "upload")) input$scrna_marker_upload$datapath %||% "" else if (identical(source, "server")) input$scrna_marker_file %||% "" else ""
+    scrna_gene_list_preview_ui(path, "cell_type", "Marker-list preview")
+  })
+  output$scrna_signature_list_preview_ui <- renderUI({
+    source <- input$scrna_signature_source %||% ""
+    path <- if (identical(source, "upload")) input$scrna_signature_upload$datapath %||% "" else if (identical(source, "server")) input$scrna_signature_file %||% "" else ""
+    scrna_gene_list_preview_ui(path, "signature", "Signature-list preview")
+  })
+
   output$scrna_annotation_settings_ui <- renderUI({
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
     engine <- scrna_ui_engine()
@@ -14754,6 +14800,7 @@ server <- function(input, output, session) {
       )),
       conditionalPanel("input.scrna_marker_source == 'server'", div(class = "new-project-path-control", textInput("scrna_marker_file", "Marker list", value = default_marker_path, placeholder = "Absolute server .tsv with cell_type and gene columns"), actionButton("browse_scrna_marker_file", "Browse server", class = "btn-default"))),
       conditionalPanel("input.scrna_marker_source == 'upload'", fileInput("scrna_marker_upload", "Marker list from laptop", accept = c(".tsv", ".txt"))),
+      conditionalPanel("input.scrna_marker_source != 'manual'", uiOutput("scrna_marker_list_preview_ui")),
       selectInput("scrna_marker_species", "Species used by these marker genes", choices = c("Same as the expression dataset — no conversion" = "same", "Mouse" = "mouse", "Human" = "human"), selected = isolate(input$scrna_marker_species) %||% "same", selectize = FALSE),
         conditionalPanel("input.scrna_marker_species != 'same'",
           tags$p(class = "muted small-note", "If marker and expression species differ, genes are converted before scoring. Leave the table blank to use CodeSpringLab's bundled MGI mouse–human table, or supply the same table used by RNA-seq."),
@@ -14832,6 +14879,7 @@ server <- function(input, output, session) {
       )),
       conditionalPanel("input.scrna_signature_source == 'server'", div(class = "new-project-path-control", textInput("scrna_signature_file", "Signature list", value = default_signature_path, placeholder = "Absolute server .tsv with signature and gene columns"), actionButton("browse_scrna_signature_file", "Browse server", class = "btn-default"))),
       conditionalPanel("input.scrna_signature_source == 'upload'", fileInput("scrna_signature_upload", "Signature list from laptop", accept = c(".tsv", ".txt"))),
+      conditionalPanel("input.scrna_signature_source != 'manual'", uiOutput("scrna_signature_list_preview_ui")),
       selectInput("scrna_signature_species", "Species used by these signature genes", choices = c("Same as the expression dataset — no conversion" = "same", "Mouse" = "mouse", "Human" = "human"), selected = isolate(input$scrna_signature_species) %||% "same", selectize = FALSE),
       conditionalPanel("input.scrna_signature_species != 'same'",
         tags$p(class = "muted small-note", "If signature and expression species differ, genes are converted before scoring. Leave the table blank to use CodeSpringLab's bundled MGI mouse–human table, or supply the same table used by RNA-seq."),
