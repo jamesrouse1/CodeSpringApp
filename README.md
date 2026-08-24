@@ -40,7 +40,47 @@ Example FASTQs remain read-only inputs. When the project is created, CodeSpringA
 
 The server folder browser starts from the current user's home directory and hides dotfiles by default. Folders are selectable for navigation, while visible files are listed separately for confirmation. Typed paths are validated before navigation, and empty, hidden-only, missing, and unreadable folders receive distinct messages.
 
-## FetchNGS
+
+## Run On The Server
+
+Use the launcher script. It checks required packages, finds an open server port, starts Shiny, and prints the exact SSH tunnel command to run from your laptop.
+
+By default, each Unix account receives its own predictable private block of 100 ports, derived from its Unix user ID. This means two people launching CodeSpringApp at the same time do not contend for port `8601`. The launcher selects the first free port in that user's block and prints the exact tunnel command and URL. To deliberately start from a particular port, pass it as an argument (for example, `./run_codespringweb.sh 8601`).
+
+On the server:
+
+```bash
+cd ~/CodeSpringApp
+./run_codespringweb.sh --check-config
+./run_codespringweb.sh
+```
+
+The optional first command prints the verified Unix user and all identity-sensitive paths without starting the app. Every printed path should belong to the logged-in user.
+
+From your laptop, copy the SSH command printed by the launcher. It will use the port that was actually started:
+
+```bash
+ssh -N -L <PORT>:localhost:<PORT> $USER@<DEV_NODE>
+```
+
+Then open the complete private URL printed by the launcher:
+
+```text
+http://localhost:<PORT>/?token=<PRIVATE_TOKEN>
+```
+
+`<DEV_NODE>` is the node where you ran `./run_codespringweb.sh` (for example,
+`bamdev2`). The launcher detects and prints it automatically. If your cluster
+uses a different SSH alias or gateway, set `CSL_WEB_SSH_HOST` before launching
+to print that address instead.
+
+Example launcher output. The port in your terminal may differ if the default port is already busy:
+
+![CodeSpringApp launcher output](docs/assets/launcher_output.png)
+
+## What It Does
+
+### FetchNGS
 
 Choose **FetchNGS** from the main **Analysis type** dropdown to open its isolated
 workspace. It runs `nf-core/fetchngs` as a standalone SLURM job. Users can
@@ -115,7 +155,7 @@ or interrupted run can be selected and resumed with Nextflow's `-resume`
 behavior. **Create bundle only** writes and validates the input, parameter,
 manifest, and Slurm files without submitting a job.
 
-### FetchNGS accession and download safeguards
+#### FetchNGS accession and download safeguards
 
 CodeSpringApp strictly accepts the accession families documented by
 nf-core/fetchngs 1.12.0:
@@ -213,47 +253,6 @@ export CSL_FETCHNGS_RESULTS_ROOT=/path/to/csl_results/fetchngs
 export CSL_FETCHNGS_RUNTIME_ROOT=/path/to/private/fetchngs_runtime
 ./run_codespringweb.sh
 ```
-
-## Run On The Server
-
-Use the launcher script. It checks required packages, finds an open server port, starts Shiny, and prints the exact SSH tunnel command to run from your laptop.
-
-By default, each Unix account receives its own predictable private block of 100 ports, derived from its Unix user ID. This means two people launching CodeSpringApp at the same time do not contend for port `8601`. The launcher selects the first free port in that user's block and prints the exact tunnel command and URL. To deliberately start from a particular port, pass it as an argument (for example, `./run_codespringweb.sh 8601`).
-
-On the server:
-
-```bash
-cd ~/CodeSpringApp
-./run_codespringweb.sh --check-config
-./run_codespringweb.sh
-```
-
-The optional first command prints the verified Unix user and all identity-sensitive paths without starting the app. Every printed path should belong to the logged-in user.
-
-From your laptop, copy the SSH command printed by the launcher. It will use the port that was actually started:
-
-```bash
-ssh -N -L <PORT>:localhost:<PORT> $USER@<DEV_NODE>
-```
-
-Then open the complete private URL printed by the launcher:
-
-```text
-http://localhost:<PORT>/?token=<PRIVATE_TOKEN>
-```
-
-`<DEV_NODE>` is the node where you ran `./run_codespringweb.sh` (for example,
-`bamdev2`). The launcher detects and prints it automatically. If your cluster
-uses a different SSH alias or gateway, set `CSL_WEB_SSH_HOST` before launching
-to print that address instead.
-
-Example launcher output. The port in your terminal may differ if the default port is already busy:
-
-![CodeSpringApp launcher output](docs/assets/launcher_output.png)
-
-## What It Does
-
-- Retrieves public sequencing data through a standalone nf-core/fetchngs SLURM workflow.
 
 ### Single-cell RNA-seq
 
