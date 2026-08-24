@@ -382,6 +382,7 @@ assert(
 assert(
   grepl("input.analysis == 'FetchNGS'", app_text, fixed = TRUE) &&
     grepl('fetchngs_tabs <- c("FetchNGS", "FetchNGS Outputs")', server_source, fixed = TRUE) &&
+      grepl('analysis_tabs <- c("Setup", "Samples & Design", "Run Pipeline", "Progress", "Results Explorer", "Logs", "Methods")', app_text, fixed = TRUE) &&
     grepl('updateTabsetPanel(session, "web_main_tabs", selected = "FetchNGS")', server_source, fixed = TRUE) &&
     grepl('updateTabsetPanel(session, "web_main_tabs", selected = "Setup")', server_source, fixed = TRUE),
   "FetchNGS selection exposes its run and output tabs while returning to an analysis restores the project tabs"
