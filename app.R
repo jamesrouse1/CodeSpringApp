@@ -10653,9 +10653,9 @@ submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto
     signature_file <- SCRNA_PBMC3K_SIGNATURES_FILE
   }
   marker_species <- tolower(trimws(as.character(marker_species %||% "auto")))
-  signature_species <- tolower(trimws(as.character(signature_species %||% "same")))
+  signature_species <- tolower(trimws(as.character(signature_species %||% "auto")))
   if (!marker_species %in% c("auto", "same", "mouse", "human")) marker_species <- "auto"
-  if (!signature_species %in% c("same", "mouse", "human")) signature_species <- "same"
+  if (!signature_species %in% c("auto", "same", "mouse", "human")) signature_species <- "auto"
   marker_ortholog_file <- trimws(as.character(marker_ortholog_file %||% ""))
   signature_ortholog_file <- trimws(as.character(signature_ortholog_file %||% ""))
   pathway_species <- tolower(trimws(as.character(pathway_species %||% "auto")))
@@ -10728,7 +10728,7 @@ submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto
   if (identical(stage, "differential")) {
     de_group_column <- trimws(as.character(de_group_column %||% "")); de_reference <- trimws(as.character(de_reference %||% "")); de_comparison <- trimws(as.character(de_comparison %||% ""))
     de_method <- tolower(trimws(as.character(de_method %||% "both")))
-    metadata <- setdiff(scrna_embedding_columns(project), c("cell", "UMAP_1", "UMAP_2", "input_path", "source_barcode", "annotation_source"))
+    metadata <- setdiff(scrna_all_metadata_columns(project), c("cell", "UMAP_1", "UMAP_2", "input_path", "source_barcode", "annotation_source"))
     single_sample <- length(scrna_biological_sample_ids(project)) <= 1L
     valid_fields <- if (single_sample) scrna_de_population_fields(project, metadata) else scrna_de_sample_fields(project, metadata)
     if (!nzchar(de_group_column) || !de_group_column %in% valid_fields || !nzchar(de_reference) || !nzchar(de_comparison) || identical(de_reference, de_comparison)) {
@@ -11949,6 +11949,11 @@ scrna_embedding_columns <- function(project, view = "integrated") {
   scrna_table_columns(scrna_embedding_path(project, view))
 }
 
+scrna_all_metadata_columns <- function(project, view = "integrated") {
+  auxiliary_columns <- unlist(lapply(scrna_auxiliary_metadata_paths(project), scrna_table_columns), use.names = FALSE)
+  unique(c(scrna_embedding_columns(project, view), scrna_embedding_columns(project, "integrated"), auxiliary_columns))
+}
+
 scrna_selected_embedding_view <- function(project, requested = "") {
   choices <- scrna_embedding_view_choices(project)
   if (!length(choices)) return("")
@@ -12253,7 +12258,7 @@ scrna_discrete_metadata_fields <- function(project) {
     "cluster", "sample_id", "condition", "batch", "cell_type",
     "annotation_source", "predicted_doublet", "input_kind",
     scrna_composition_fields(project),
-    grep("^(annotation_source__|cell_type|celltype|subtype$)", scrna_embedding_columns(project), value = TRUE, ignore.case = TRUE)
+    grep("^(annotation_source__|cell_type|celltype|subtype$)", scrna_all_metadata_columns(project), value = TRUE, ignore.case = TRUE)
   ))
 }
 
@@ -15391,6 +15396,22 @@ server <- function(input, output, session) {
     },
     valueFunc = function() TRUE
   )
+  scrna_annotation_metadata_stamp <- reactivePoll(
+    intervalMillis = PROGRESS_REFRESH_MS,
+    session = session,
+    checkFunc = function() {
+      p <- isolate(current_project())
+      if (!is_scrna_project(p)) return("")
+      paths <- unique(c(scrna_embedding_path(p, "integrated"), scrna_auxiliary_metadata_paths(p)))
+      paths <- paths[file.exists(paths)]
+      if (!length(paths)) return("")
+      paste(vapply(paths, function(path) {
+        info <- file.info(path)
+        paste(basename(path), info$size[[1]], as.numeric(info$mtime[[1]]), sep = "@")
+      }, character(1)), collapse = ";")
+    },
+    valueFunc = function() TRUE
+  )
 
   existing_project_selected <- reactive({
     if (is_fetchngs_analysis(input$analysis %||% "RNA-seq")) return(FALSE)
@@ -17042,20 +17063,15 @@ server <- function(input, output, session) {
       conditionalPanel("input.scrna_signature_source == 'server'", div(class = "new-project-path-control", textInput("scrna_signature_file", "Signature list", value = default_signature_path, placeholder = "Absolute server .tsv with signature and gene columns"), actionButton("browse_scrna_signature_file", "Browse server", class = "btn-default"))),
       conditionalPanel("input.scrna_signature_source == 'upload'", fileInput("scrna_signature_upload", "Signature list from laptop", accept = c(".tsv", ".txt"))),
       conditionalPanel("input.scrna_signature_source != 'manual'", uiOutput("scrna_signature_list_preview_ui")),
-      selectInput("scrna_signature_species", "Species used by these signature genes", choices = c("Same as the expression dataset — no conversion" = "same", "Mouse" = "mouse", "Human" = "human"), selected = isolate(input$scrna_signature_species) %||% "same", selectize = FALSE),
-      conditionalPanel("input.scrna_signature_species != 'same'",
-        tags$p(class = "muted small-note", "If signature and expression species differ, genes are converted before scoring. Leave the table blank to use CodeSpringLab's bundled MGI mouse–human table, or supply the same table used by RNA-seq."),
-        radioButtons("scrna_signature_ortholog_source", "Ortholog table", choices = c("Bundled table or server path" = "server", "Upload from laptop" = "upload"), selected = isolate(input$scrna_signature_ortholog_source) %||% "server", inline = TRUE),
-        conditionalPanel("input.scrna_signature_ortholog_source == 'server'", div(class = "new-project-path-control", textInput("scrna_signature_ortholog_file", "Optional ortholog table path", value = isolate(input$scrna_signature_ortholog_file) %||% "", placeholder = "Blank uses bundled mouse_human_orthologs_MGI.tsv"), actionButton("browse_scrna_signature_ortholog_file", "Browse server", class = "btn-default"))),
-        conditionalPanel("input.scrna_signature_ortholog_source == 'upload'", fileInput("scrna_signature_ortholog_upload", "Ortholog table from laptop", accept = c(".tsv", ".txt", ".csv")))
-      ),
+      tags$p(class = "muted small-note", "Signature-gene species is detected automatically from overlap with the expression matrix. Case differences are handled automatically, and the bundled mouse–human ortholog table is used only when conversion is needed."),
       tags$p(class = "muted small-note", "At least two unique genes are required per signature. Missing genes are recorded in the output coverage table; signatures with no usable genes are rejected by the pipeline.")
     )
   })
 
   output$scrna_differential_settings_ui <- renderUI({
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
-    columns <- scrna_embedding_columns(p)
+    scrna_annotation_metadata_stamp()
+    columns <- scrna_all_metadata_columns(p)
     metadata <- setdiff(columns, c("cell", "UMAP_1", "UMAP_2", "input_path", "source_barcode", "annotation_source"))
     sample_ids <- scrna_biological_sample_ids(p)
     single_sample <- length(sample_ids) <= 1L
@@ -17639,10 +17655,10 @@ server <- function(input, output, session) {
         signature_upload = input$scrna_signature_upload,
         signature_source = input$scrna_signature_source %||% "manual",
         signature_manual = isolate(scrna_manual_entries(scrna_manual_signature_sets, p)),
-        signature_species = input$scrna_signature_species %||% "same",
-        signature_ortholog_file = input$scrna_signature_ortholog_file %||% "",
-        signature_ortholog_upload = input$scrna_signature_ortholog_upload,
-        signature_ortholog_source = input$scrna_signature_ortholog_source %||% "server",
+        signature_species = "auto",
+        signature_ortholog_file = "",
+        signature_ortholog_upload = NULL,
+        signature_ortholog_source = "server",
         de_group_column = input$scrna_de_group_column %||% "condition",
         de_reference = input$scrna_de_reference %||% "",
         de_comparison = input$scrna_de_comparison %||% "",

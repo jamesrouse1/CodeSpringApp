@@ -289,6 +289,18 @@ utils::write.table(
   file.path(pbmc_manifest_dir, "scrna", "tables", "umap_coordinates.tsv"),
   sep = "\t", row.names = FALSE, quote = FALSE
 )
+utils::write.table(
+  data.frame(cell = c("cell_A", "cell_B"), cell_type = c("Naive CD4 T", "B cells")),
+  file.path(pbmc_manifest_dir, "scrna", "tables", "cell_metadata.tsv"),
+  sep = "\t", row.names = FALSE, quote = FALSE
+)
+assert(
+  "cell_type" %in% app_env$scrna_all_metadata_columns(pbmc_project) &&
+    "cell_type" %in% app_env$scrna_de_population_fields(pbmc_project, app_env$scrna_all_metadata_columns(pbmc_project)) &&
+    grepl('signature_species = "auto"', app_text, fixed = TRUE) &&
+    !grepl('selectInput("scrna_signature_species"', app_text, fixed = TRUE),
+  "completed annotations feed cell-type differential expression and signature species is detected automatically"
+)
 manual_map <- app_env$write_scrna_manual_cluster_mapping(pbmc_project, "cell_type", c(`0` = "Naive CD4 T", `1` = "B cells"))
 manual_values <- utils::read.delim(manual_map, stringsAsFactors = FALSE)
 assert(identical(manual_values$cell_type, c("Naive CD4 T", "B cells")), "manual PBMC cluster choices are expanded to a pipeline-ready per-cell mapping")
