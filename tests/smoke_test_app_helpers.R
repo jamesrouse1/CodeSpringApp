@@ -787,7 +787,12 @@ assert(
     !grepl("Design matrix", rna_ui_text, fixed = TRUE),
   "RNA overview exposes the live sample progress matrix without redundant pipeline or design summaries"
 )
-assert(grepl("rna_file_category", rna_ui_text, fixed = TRUE), "RNA Files tab exposes a categorized project file catalog")
+assert(
+  grepl("rna_file_tool", rna_ui_text, fixed = TRUE) &&
+    grepl("rna_file_sample_ui", rna_ui_text, fixed = TRUE) &&
+    !grepl("rna_file_category", rna_ui_text, fixed = TRUE),
+  "RNA Files tab filters the readable filename catalog by tool and sample"
+)
 
 fake_jobs <- data.frame(
   step = c("Bowtie2", "Bowtie2", "Bowtie2", "Bowtie2", "FastQC"),
