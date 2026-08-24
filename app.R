@@ -1366,7 +1366,7 @@ design_matrix_columns <- function(df) {
 default_metadata_cols <- function(project = NULL, analysis = NULL) {
   key <- if (!is.null(project)) analysis_key(project$analysis_key %||% project$analysis) else analysis_key(analysis %||% "rna")
   if (identical(key, "cutrun")) return(c("cell_type", "mark", "target_class", "seacr_stringency", "condition", "replicate", "control_sample"))
-  if (identical(key, "atac")) return(c("cell_type", "condition", "replicate"))
+  if (identical(key, "atac")) return(c("condition", "replicate"))
   if (identical(key, "chip")) return(c("treatment", "reference", "condition", "replicate", "control_sample"))
   "treatment"
 }

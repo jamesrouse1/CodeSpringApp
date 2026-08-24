@@ -484,6 +484,10 @@ duplicate_design <- data.frame(
 atac_design_project <- chip_project
 atac_design_project$analysis_key <- "atac"
 atac_design_project$analysis <- "ATAC-seq"
+assert(
+  identical(app_env$default_metadata_cols(atac_design_project), c("condition", "replicate")),
+  "new ATAC designs default to only condition and replicate"
+)
 duplicate_error <- tryCatch({
   app_env$write_design_matrix(atac_design_project, duplicate_design, c("condition", "replicate"))
   ""
@@ -501,7 +505,21 @@ valid_design$sample <- "sample1"
 saved_design <- app_env$write_design_matrix(atac_design_project, valid_design, c("condition", "replicate"))
 assert(file.exists(saved_design) && file.info(saved_design)$size > 0, "design matrix saved atomically")
 saved_table <- app_env$safe_read_table(saved_design)
-assert(all(c("cell_type", "condition", "replicate") %in% names(saved_table)), "required ATAC metadata columns preserved")
+assert(
+  all(c("condition", "replicate") %in% names(saved_table)) && !"cell_type" %in% names(saved_table),
+  "new ATAC designs omit the optional cell_type column"
+)
+
+legacy_atac_project <- atac_design_project
+legacy_atac_project$design_matrix_path <- saved_design
+legacy_atac_table <- saved_table
+legacy_atac_table$cell_type <- "CD4"
+legacy_atac_table <- legacy_atac_table[, c("sample", "cell_type", "condition", "replicate", "filename"), drop = FALSE]
+write.table(legacy_atac_table, saved_design, sep = "\t", row.names = FALSE, quote = FALSE)
+assert(
+  "cell_type" %in% app_env$project_metadata_cols(legacy_atac_project),
+  "existing ATAC projects retain an explicitly saved cell_type column"
+)
 
 unsafe_design <- valid_design
 unsafe_design$condition <- "A\tB"
