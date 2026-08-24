@@ -104,6 +104,8 @@ else
   CSL_ROOT="$USER_HOME/CSH/CodeSpringLab"
 fi
 LOG_DIR="${CSL_WEB_LOG_DIR:-$USER_HOME/.codespringweb}"
+FETCHNGS_RESULTS_ROOT="${CSL_FETCHNGS_RESULTS_ROOT:-$USER_HOME/csl_results/fetchngs}"
+FETCHNGS_RUNTIME_ROOT="${CSL_FETCHNGS_RUNTIME_ROOT:-$USER_HOME/.codespringflow}"
 if ! path_within_user_home "$CSL_ROOT"; then
   printf '\033[31mRefusing CodeSpringLab root outside %s:\033[0m %s\n' "$USER_HOME" "$CSL_ROOT"
   exit 1
@@ -126,6 +128,8 @@ if [[ "$CHECK_CONFIG" == "1" ]]; then
   printf 'CodeSpringApp: %s\n' "$APP_DIR"
   printf 'CodeSpringLab: %s\n' "$CSL_ROOT"
   printf 'Private app state: %s\n' "$LOG_DIR"
+  printf 'FetchNGS results root: %s\n' "$FETCHNGS_RESULTS_ROOT"
+  printf 'FetchNGS runtime root: %s\n' "$FETCHNGS_RUNTIME_ROOT"
   exit 0
 fi
 
@@ -314,7 +318,9 @@ for candidate in $(seq "$PORT" "$MAX_PORT"); do
   LOG_FILE="$LOG_DIR/codespringweb_${PORT}.log"
 
   nohup env HOME="$USER_HOME" USER="$USER_NAME" LOGNAME="$USER_NAME" \
-    CSL_CODESPRINGLAB_ROOT="$CSL_ROOT" CSL_WEB_HOME="$LOG_DIR" \
+    CSL_CODESPRINGLAB_ROOT="$CSL_ROOT" CSL_WEB_HOME="$LOG_DIR" CSL_WEB_APP_ROOT="$APP_DIR" \
+    CSL_FETCHNGS_RESULTS_ROOT="$FETCHNGS_RESULTS_ROOT" \
+    CSL_FETCHNGS_RUNTIME_ROOT="$FETCHNGS_RUNTIME_ROOT" \
     CSL_SCANPY_SIF="${CSL_SCANPY_SIF:-}" \
     CSL_WEB_ACCESS_TOKEN="$ACCESS_TOKEN" CSL_WEB_IDLE_SHUTDOWN_SECONDS="$IDLE_SHUTDOWN_SECONDS" \
     Rscript -e "shiny::runApp('$APP_DIR', host='$HOST', port=$PORT)" > "$LOG_FILE" 2>&1 &

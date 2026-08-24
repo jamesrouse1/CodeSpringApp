@@ -1,0 +1,524 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+
+umask 0002
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+DEFAULT_RESULTS_ROOT="$HOME/csl_results/fetchngs"
+RESULTS_ROOT="${CODESPRINGFLOW_RESULTS_ROOT:-$DEFAULT_RESULTS_ROOT}"
+RUNTIME_ROOT="${CODESPRINGFLOW_RUNTIME_ROOT:-$HOME/.codespringflow}"
+RUNS_ROOT="$RESULTS_ROOT"
+WORK_NAMESPACE="${CODESPRINGFLOW_WORK_NAMESPACE:-}"
+if [[ -z "$WORK_NAMESPACE" && "$RESULTS_ROOT" != "$DEFAULT_RESULTS_ROOT" ]]; then
+    read -r results_root_checksum _ < <(printf '%s' "$RESULTS_ROOT" | cksum)
+    WORK_NAMESPACE="root_${results_root_checksum}"
+fi
+[[ -z "$WORK_NAMESPACE" || "$WORK_NAMESPACE" =~ ^[A-Za-z0-9._-]+$ ]] || {
+    printf 'Error: CODESPRINGFLOW_WORK_NAMESPACE contains unsupported characters.\n' >&2
+    exit 1
+}
+WORK_RUNS_ROOT="$RUNTIME_ROOT/work/fetchngs"
+[[ -z "$WORK_NAMESPACE" ]] || WORK_RUNS_ROOT="$WORK_RUNS_ROOT/$WORK_NAMESPACE"
+CONFIG_FILE="${CODESPRINGFLOW_CONFIG:-$APP_ROOT/conf/fetchngs_cshl_slurm.config}"
+
+DEFAULT_NXF_VERSION="24.04.4"
+DEFAULT_PIPELINE_VERSION="1.12.0"
+DEFAULT_DOWNLOAD_METHOD="sratools"
+# ENA retired the parent_study read_run field in August 2026. FetchNGS 1.12.0
+# still requests it by default, which yields header-only runinfo files. Keep an
+# explicit compatible field list until the pinned pipeline release is updated.
+DEFAULT_ENA_METADATA_FIELDS="run_accession,experiment_accession,sample_accession,secondary_sample_accession,study_accession,secondary_study_accession,submission_accession,run_alias,experiment_alias,sample_alias,study_alias,library_layout,library_selection,library_source,library_strategy,library_name,instrument_model,instrument_platform,base_count,read_count,tax_id,scientific_name,sample_title,experiment_title,study_title,sample_description,fastq_md5,fastq_bytes,fastq_ftp,fastq_galaxy,fastq_aspera"
+
+die() {
+    printf 'Error: %s\n' "$*" >&2
+    exit 1
+}
+
+usage() {
+    cat <<'EOF'
+CodeSpringFlow - nf-core launch commands for the CSHL cluster
+
+Usage:
+  codespringflow fetchngs --input FILE --name RUN_NAME [options]
+  codespringflow resume RUN_NAME
+  codespringflow status RUN_NAME
+  codespringflow logs RUN_NAME [--follow]
+  codespringflow list
+  codespringflow root          # print the FetchNGS results root
+  codespringflow runtime-root  # print the cache/work root
+  codespringflow help
+
+FetchNGS options:
+  --input FILE             Accession file (.txt, .csv, or .tsv)
+  --name RUN_NAME          Unique, descriptive run name
+  --metadata-only          Retrieve metadata without downloading FASTQs
+  --pipeline-version VER   FetchNGS release (default: 1.12.0)
+  --dry-run                Create the run bundle but do not submit it
+  -h, --help               Show this help
+
+Environment:
+  CODESPRINGFLOW_RESULTS_ROOT  User-facing FetchNGS results root
+  CODESPRINGFLOW_RUNTIME_ROOT  Nextflow cache, temporary, and work root
+  CODESPRINGFLOW_WORK_NAMESPACE Optional private work namespace; custom results roots receive one automatically
+  CODESPRINGFLOW_CONFIG     Nextflow configuration file
+  NEXTFLOW_BIN              Nextflow executable (default: ~/bin/nextflow)
+  NXF_VER                   Nextflow version (default: 24.04.4)
+
+The validated download method is sratools. FTP is intentionally unavailable
+on this cluster because its FetchNGS wget container cannot resolve DNS under
+Singularity 3.6.3.
+EOF
+}
+
+require_command() {
+    command -v "$1" >/dev/null 2>&1 || die "Required command '$1' was not found."
+}
+
+validate_run_name() {
+    local run_name="$1"
+    [[ "$run_name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] ||
+        die "Run names may contain only letters, numbers, periods, underscores, and hyphens."
+}
+
+validate_pipeline_version() {
+    local version="$1"
+    [[ "$version" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] ||
+        die "The pipeline version contains unsupported characters."
+}
+
+run_dir_for() {
+    printf '%s/%s\n' "$RUNS_ROOT" "$1"
+}
+
+prepare_storage() {
+    mkdir -p \
+        "$RUNS_ROOT" \
+        "$RUNTIME_ROOT/cache/singularity" \
+        "$RUNTIME_ROOT/tmp" \
+        "$WORK_RUNS_ROOT"
+    [[ -w "$RESULTS_ROOT" ]] || die "FetchNGS results root is not writable: $RESULTS_ROOT"
+    [[ -w "$RUNTIME_ROOT" ]] || die "FetchNGS runtime root is not writable: $RUNTIME_ROOT"
+}
+
+write_run_bundle() {
+    local input_file="$1"
+    local run_name="$2"
+    local metadata_only="$3"
+    local pipeline_version="$4"
+    local run_dir
+    local copied_input
+    local nextflow_bin
+    local nextflow_version
+    local nf_run_name
+
+    run_dir="$(run_dir_for "$run_name")"
+    # FetchNGS 1.12 validates the input filename before reading the one-ID-per-line
+    # content. Normalize every supported source extension to CSV so that pasted
+    # accessions and server-side .txt/.tsv lists follow the documented interface.
+    copied_input="$run_dir/input/accessions.csv"
+    nextflow_bin="${NEXTFLOW_BIN:-$HOME/bin/nextflow}"
+    nextflow_version="${NXF_VER:-$DEFAULT_NXF_VERSION}"
+    nf_run_name="${run_name//[^A-Za-z0-9_]/_}"
+
+    mkdir -p "$run_dir/input" "$run_dir/results" "$run_dir/logs"
+    mkdir -p "$WORK_RUNS_ROOT/$run_name"
+    cp "$input_file" "$copied_input"
+
+    cat > "$run_dir/params.yml" <<EOF
+input: '$copied_input'
+outdir: '$run_dir/results'
+download_method: '$DEFAULT_DOWNLOAD_METHOD'
+ena_metadata_fields: '$DEFAULT_ENA_METADATA_FIELDS'
+skip_fastq_download: $metadata_only
+EOF
+
+    cat > "$run_dir/run.sbatch" <<EOF
+#!/usr/bin/env bash
+
+#SBATCH --job-name=fetchngs-${run_name}
+#SBATCH --partition=cpuq
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=2
+#SBATCH --mem=4G
+#SBATCH --time=24:00:00
+#SBATCH --output=${run_dir}/logs/controller-%j.out
+#SBATCH --error=${run_dir}/logs/controller-%j.err
+
+set -Eeuo pipefail
+
+module load singularity/3.6.3
+
+export NXF_VER="$nextflow_version"
+export NXF_SINGULARITY_CACHEDIR="$RUNTIME_ROOT/cache/singularity"
+export SINGULARITY_CACHEDIR="$RUNTIME_ROOT/cache/singularity"
+export NXF_TEMP="$RUNTIME_ROOT/tmp"
+export TMPDIR="$RUNTIME_ROOT/tmp"
+
+RUN_DIR="$run_dir"
+WORK_DIR="$WORK_RUNS_ROOT/$run_name"
+NEXTFLOW_BIN="$nextflow_bin"
+
+if [[ ! -x "\$NEXTFLOW_BIN" ]]; then
+    printf 'Nextflow executable was not found or is not executable: %s\n' "\$NEXTFLOW_BIN" >&2
+    exit 1
+fi
+
+resume_args=(-name "$nf_run_name")
+if [[ "\${CODESPRINGFLOW_RESUME:-false}" == "true" ]]; then
+    resume_args=(-resume)
+fi
+
+cd "\$RUN_DIR"
+
+"\$NEXTFLOW_BIN" run nf-core/fetchngs \
+    -r "$pipeline_version" \
+    -profile singularity \
+    -c "$CONFIG_FILE" \
+    -params-file "\$RUN_DIR/params.yml" \
+    -work-dir "\$WORK_DIR" \
+    -with-report "\$RUN_DIR/logs/report-\${SLURM_JOB_ID}.html" \
+    -with-timeline "\$RUN_DIR/logs/timeline-\${SLURM_JOB_ID}.html" \
+    -with-trace "\$RUN_DIR/logs/trace-\${SLURM_JOB_ID}.txt" \
+    -ansi-log false \
+    "\${resume_args[@]}"
+EOF
+    chmod 0750 "$run_dir/run.sbatch"
+
+    {
+        printf 'field\tvalue\n'
+        printf 'run_name\t%s\n' "$run_name"
+        printf 'created\t%s\n' "$(date --iso-8601=seconds)"
+        printf 'input_source\t%s\n' "$(readlink -f "$input_file")"
+        printf 'copied_input\t%s\n' "$copied_input"
+        printf 'download_method\t%s\n' "$DEFAULT_DOWNLOAD_METHOD"
+        printf 'ena_metadata_fields\t%s\n' "$DEFAULT_ENA_METADATA_FIELDS"
+        printf 'metadata_only\t%s\n' "$metadata_only"
+        printf 'fetchngs_version\t%s\n' "$pipeline_version"
+        printf 'nextflow_version\t%s\n' "$nextflow_version"
+        printf 'infrastructure_config\t%s\n' "$CONFIG_FILE"
+        printf 'results_root\t%s\n' "$RESULTS_ROOT"
+        printf 'runtime_root\t%s\n' "$RUNTIME_ROOT"
+        printf 'work_namespace\t%s\n' "$WORK_NAMESPACE"
+        printf 'work_directory\t%s\n' "$WORK_RUNS_ROOT/$run_name"
+    } > "$run_dir/run_manifest.tsv"
+
+    printf '%s\n' "$run_dir"
+}
+
+ensure_compatible_ena_metadata_fields() {
+    local run_name="$1"
+    local params_file
+
+    params_file="$(run_dir_for "$run_name")/params.yml"
+    [[ -f "$params_file" ]] || die "No parameter file exists for '$run_name'."
+    if grep -Eq '^[[:space:]]*ena_metadata_fields:' "$params_file"; then
+        return
+    fi
+    printf "ena_metadata_fields: '%s'\n" "$DEFAULT_ENA_METADATA_FIELDS" >> "$params_file"
+}
+
+resume_run_script_is_valid() {
+    local run_script="$1"
+    local nf_run_name="$2"
+
+    [[ -s "$run_script" ]] || return 1
+    bash -n "$run_script" >/dev/null 2>&1 || return 1
+    grep -Fq "resume_args=(-name \"$nf_run_name\")" "$run_script" || return 1
+    grep -Fq 'resume_args=(-resume)' "$run_script" || return 1
+    grep -Fq '"${resume_args[@]}"' "$run_script" || return 1
+    ! grep -Eq "(^|[[:space:]])-name[[:space:]]+\"${nf_run_name}\"([[:space:]]|$)" "$run_script"
+}
+
+ensure_compatible_resume_cli() {
+    local run_name="$1"
+    local nf_run_name
+    local run_script
+    local backup_script
+    local source_script
+    local migrated_script
+
+    nf_run_name="${run_name//[^A-Za-z0-9_]/_}"
+    run_script="$(run_dir_for "$run_name")/run.sbatch"
+    backup_script="${run_script}.pre-resume-cli-fix"
+    [[ -f "$run_script" ]] || die "No generated run exists for '$run_name'."
+
+    if resume_run_script_is_valid "$run_script" "$nf_run_name"; then
+        return
+    fi
+
+    source_script="$run_script"
+    if [[ ! -s "$run_script" ]]; then
+        [[ -s "$backup_script" ]] ||
+            die "The generated run script is empty and no non-empty recovery backup exists for '$run_name'."
+        source_script="$backup_script"
+    fi
+
+    migrated_script="$(mktemp "${run_script}.migrate.XXXXXX")"
+    if resume_run_script_is_valid "$source_script" "$nf_run_name"; then
+        cp -p -- "$source_script" "$migrated_script"
+    else
+        if ! grep -Fq 'resume_args=()' "$source_script" ||
+           ! grep -Eq "(^|[[:space:]])-name[[:space:]]+\"${nf_run_name}\"([[:space:]]|$)" "$source_script"; then
+            rm -f -- "$migrated_script"
+            die "The generated run script has an unsupported resume format for '$run_name'."
+        fi
+        if ! awk -v run_name="$nf_run_name" '
+            $0 == "resume_args=()" {
+                print "resume_args=(-name \"" run_name "\")"
+                next
+            }
+            {
+                fixed_name = "-name \"" run_name "\""
+                position = index($0, fixed_name)
+                if (position > 0 && $0 !~ /^resume_args=/) {
+                    before = substr($0, 1, position - 1)
+                    after = substr($0, position + length(fixed_name))
+                    if (before ~ /^[[:space:]]*$/ && after ~ /^[[:space:]]*\\[[:space:]]*$/) next
+                    sub(/[[:space:]]+$/, "", before)
+                    sub(/^[[:space:]]+/, " ", after)
+                    print before after
+                    next
+                }
+                print
+            }
+        ' "$source_script" > "$migrated_script"; then
+            rm -f -- "$migrated_script"
+            die "Could not migrate the resume command for '$run_name'."
+        fi
+    fi
+
+    if ! resume_run_script_is_valid "$migrated_script" "$nf_run_name"; then
+        rm -f -- "$migrated_script"
+        die "The resume migration candidate failed validation for '$run_name'; the original run script was left unchanged."
+    fi
+
+    if [[ "$source_script" == "$run_script" && ! -e "$backup_script" ]]; then
+        cp -p -- "$run_script" "$backup_script"
+    fi
+    chmod 0750 "$migrated_script"
+    mv -- "$migrated_script" "$run_script"
+}
+
+fetchngs_scheduler_state_for_job() {
+    local job_id="$1"
+    local state=""
+
+    if command -v squeue >/dev/null 2>&1; then
+        state="$(squeue -h -j "$job_id" -o '%T' 2>/dev/null | awk 'NF { print toupper($1); exit }' || true)"
+    fi
+    if [[ -z "$state" ]] && command -v sacct >/dev/null 2>&1; then
+        state="$(sacct -n -X -j "$job_id" --format=State 2>/dev/null | awk '
+            NF {
+                state = toupper($1)
+                sub(/[+ ].*$/, "", state)
+                print state
+                exit
+            }
+        ' || true)"
+    fi
+    printf '%s\n' "$state"
+}
+
+fetchngs_scheduler_state_is_active() {
+    case "${1^^}" in
+        RUNNING|PENDING|CONFIGURING|COMPLETING|RESIZING|SUSPENDED) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+ensure_no_active_fetchngs_job() {
+    local run_name="$1"
+    local run_dir
+    local job_id_path
+    local job_id
+    local state
+
+    run_dir="$(run_dir_for "$run_name")"
+    job_id_path="$run_dir/job_id.txt"
+    [[ -s "$job_id_path" ]] || return 0
+    job_id="$(head -n 1 "$job_id_path")"
+    [[ "$job_id" =~ ^[0-9]+$ ]] || return 0
+
+    state="$(fetchngs_scheduler_state_for_job "$job_id")"
+    if fetchngs_scheduler_state_is_active "$state"; then
+        die "Run $run_name still has active SLURM job $job_id ($state). Wait for it to finish or cancel it before resuming."
+    fi
+    if [[ "${state^^}" == "COMPLETED" ]]; then
+        die "Run $run_name completed successfully as SLURM job $job_id. Resume is only available for failed or stopped runs."
+    fi
+    if [[ -z "$state" ]] && find "$job_id_path" -mmin -5 -print -quit | grep -q .; then
+        die "Run $run_name was submitted recently as SLURM job $job_id. Wait for Slurm to register it before trying Resume again."
+    fi
+}
+
+submit_run() {
+    local run_name="$1"
+    local resume_mode="$2"
+    local run_dir
+    local submission
+    local job_id
+
+    run_dir="$(run_dir_for "$run_name")"
+    [[ -f "$run_dir/run.sbatch" ]] || die "No generated run exists for '$run_name'."
+    if [[ "$resume_mode" == "true" ]]; then
+        ensure_no_active_fetchngs_job "$run_name"
+        ensure_compatible_resume_cli "$run_name"
+        ensure_compatible_ena_metadata_fields "$run_name"
+    fi
+    require_command sbatch
+
+    if [[ "$resume_mode" == "true" ]]; then
+        submission="$(sbatch --export=ALL,CODESPRINGFLOW_RESUME=true "$run_dir/run.sbatch")"
+    else
+        submission="$(sbatch "$run_dir/run.sbatch")"
+    fi
+
+    printf '%s\n' "$submission"
+    job_id="${submission##* }"
+    [[ "$job_id" =~ ^[0-9]+$ ]] || die "Could not parse the Slurm job ID."
+    printf '%s\n' "$job_id" > "$run_dir/job_id.txt"
+    printf '%s\n' "$job_id" >> "$run_dir/job_history.txt"
+    printf 'Run directory: %s\n' "$run_dir"
+}
+
+cmd_fetchngs() {
+    local input_file=""
+    local run_name=""
+    local metadata_only="false"
+    local pipeline_version="$DEFAULT_PIPELINE_VERSION"
+    local dry_run="false"
+    local run_dir
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --input)
+                [[ $# -ge 2 ]] || die "--input requires a file."
+                input_file="$2"
+                shift 2
+                ;;
+            --name)
+                [[ $# -ge 2 ]] || die "--name requires a value."
+                run_name="$2"
+                shift 2
+                ;;
+            --metadata-only)
+                metadata_only="true"
+                shift
+                ;;
+            --pipeline-version)
+                [[ $# -ge 2 ]] || die "--pipeline-version requires a value."
+                pipeline_version="$2"
+                shift 2
+                ;;
+            --dry-run)
+                dry_run="true"
+                shift
+                ;;
+            -h|--help)
+                usage
+                return
+                ;;
+            *)
+                die "Unknown FetchNGS option: $1"
+                ;;
+        esac
+    done
+
+    [[ -n "$input_file" ]] || die "--input is required."
+    [[ -n "$run_name" ]] || die "--name is required."
+    [[ -f "$input_file" ]] || die "Input file does not exist: $input_file"
+    [[ -s "$input_file" ]] || die "Input file is empty: $input_file"
+    [[ "$input_file" =~ \.(txt|csv|tsv)$ ]] || die "The input filename must end in .txt, .csv, or .tsv."
+    validate_run_name "$run_name"
+    validate_pipeline_version "$pipeline_version"
+    [[ -f "$CONFIG_FILE" ]] || die "Missing infrastructure config: $CONFIG_FILE"
+    prepare_storage
+
+    run_dir="$(run_dir_for "$run_name")"
+    [[ ! -e "$run_dir" ]] || die "Run '$run_name' already exists. Resume it or use a new name."
+    if [[ "$dry_run" != "true" ]]; then
+        [[ -x "${NEXTFLOW_BIN:-$HOME/bin/nextflow}" ]] || die "Nextflow was not found at ${NEXTFLOW_BIN:-$HOME/bin/nextflow}."
+    fi
+
+    run_dir="$(write_run_bundle "$input_file" "$run_name" "$metadata_only" "$pipeline_version")"
+    printf 'Created run bundle: %s\n' "$run_dir"
+    if [[ "$dry_run" == "true" ]]; then
+        printf 'Dry run only; nothing was submitted.\n'
+    else
+        submit_run "$run_name" "false"
+    fi
+}
+
+cmd_resume() {
+    [[ $# -eq 1 ]] || die "Usage: codespringflow resume RUN_NAME"
+    validate_run_name "$1"
+    submit_run "$1" "true"
+}
+
+cmd_status() {
+    local run_name="$1"
+    local run_dir
+    local job_id
+    validate_run_name "$run_name"
+    run_dir="$(run_dir_for "$run_name")"
+    [[ -f "$run_dir/job_id.txt" ]] || die "No job ID is recorded for '$run_name'."
+    job_id="$(<"$run_dir/job_id.txt")"
+    printf 'Current Slurm queue entry:\n'
+    squeue -j "$job_id" -o '%.18i %.24j %.10T %.12M %.20R' || true
+    printf '\nAccounting record:\n'
+    sacct -j "$job_id" --format=JobID,JobName%30,State,Elapsed,ExitCode,MaxRSS || true
+}
+
+cmd_logs() {
+    local run_name="$1"
+    local follow="false"
+    local run_dir
+    local files
+    shift
+    validate_run_name "$run_name"
+    if [[ $# -gt 0 ]]; then
+        [[ "$1" == "--follow" && $# -eq 1 ]] || die "Usage: codespringflow logs RUN_NAME [--follow]"
+        follow="true"
+    fi
+    run_dir="$(run_dir_for "$run_name")"
+    [[ -d "$run_dir/logs" ]] || die "No logs exist for '$run_name'."
+    shopt -s nullglob
+    files=("$run_dir"/logs/controller-*.out "$run_dir"/logs/controller-*.err)
+    shopt -u nullglob
+    [[ ${#files[@]} -gt 0 ]] || die "No controller log exists yet for '$run_name'."
+    local newest="${files[0]}"
+    local candidate
+    for candidate in "${files[@]}"; do
+        [[ "$candidate" -nt "$newest" ]] && newest="$candidate"
+    done
+    printf 'Log: %s\n' "$newest"
+    if [[ "$follow" == "true" ]]; then tail -f "$newest"; else tail -n 120 "$newest"; fi
+}
+
+cmd_list() {
+    if [[ ! -d "$RUNS_ROOT" ]]; then
+        printf 'No FetchNGS runs have been created.\n'
+        return
+    fi
+    find "$RUNS_ROOT" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort
+}
+
+main() {
+    local command="${1:-help}"
+    [[ $# -eq 0 ]] || shift
+    case "$command" in
+        fetchngs) cmd_fetchngs "$@" ;;
+        resume) [[ $# -eq 1 ]] || die "Usage: codespringflow resume RUN_NAME"; cmd_resume "$@" ;;
+        status) [[ $# -eq 1 ]] || die "Usage: codespringflow status RUN_NAME"; cmd_status "$@" ;;
+        logs) [[ $# -ge 1 ]] || die "Usage: codespringflow logs RUN_NAME [--follow]"; cmd_logs "$@" ;;
+        list) [[ $# -eq 0 ]] || die "Usage: codespringflow list"; cmd_list ;;
+        root) [[ $# -eq 0 ]] || die "Usage: codespringflow root"; printf '%s\n' "$RESULTS_ROOT" ;;
+        runtime-root) [[ $# -eq 0 ]] || die "Usage: codespringflow runtime-root"; printf '%s\n' "$RUNTIME_ROOT" ;;
+        help|-h|--help) usage ;;
+        *) die "Unknown command '$command'. Run 'codespringflow help'." ;;
+    esac
+}
+
+main "$@"

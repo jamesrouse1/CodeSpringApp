@@ -1,0 +1,12 @@
+# FetchNGS / Nextflow runtime data must stay outside version control.
+cache/
+tmp/
+work/
+runs/
+.nextflow/
+.nextflow.log*
+
+# Local editor and operating-system files.
+.DS_Store
+*.swp
+

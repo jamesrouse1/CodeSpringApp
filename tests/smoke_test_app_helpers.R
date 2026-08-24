@@ -41,7 +41,7 @@ runtime_files <- c(
 runtime_text <- unlist(lapply(runtime_files[file.exists(runtime_files)], readLines, warn = FALSE), use.names = FALSE)
 app_text <- paste(readLines(file.path(repo_root, "app.R"), warn = FALSE), collapse = "\n")
 launcher_text <- paste(readLines(file.path(repo_root, "run_codespringweb.sh"), warn = FALSE), collapse = "\n")
-server_source <- paste(deparse(body(app_env$MAIN_SERVER)), collapse = "\n")
+server_source <- paste(deparse(body(app_env$MAIN_SERVER), width.cutoff = 500L), collapse = "\n")
 cutrun_batch_status_source <- paste(deparse(body(app_env$cutrun_diffbind_batch_status_ui)), collapse = "\n")
 owner_path_pattern <- "(/grid/bsr/home/rouse|/home/rouse|/Users/rouse|rouse@bamdev)"
 assert(!any(grepl(owner_path_pattern, runtime_text, ignore.case = TRUE)), "runtime code contains no hardcoded rouse home, login, or server path")
@@ -348,7 +348,42 @@ assert(
     grepl('batch_column = if (is.null(input$scrna_batch_column)) "sample_id"', app_text, fixed = TRUE),
   "multi-sample integration defaults to one integration group per input sample"
 )
-assert(identical(unname(app_env$analysis_choices()), c("RNA-seq", "scRNA-seq", "ATAC-seq", "CUT&RUN", "ChIP-seq")), "all analysis selectors use one canonical order and spelling")
+assert(identical(unname(app_env$project_analysis_choices()), c("RNA-seq", "scRNA-seq", "ATAC-seq", "CUT&RUN", "ChIP-seq")), "biological project selectors use one canonical order and spelling")
+assert(
+  grepl('unset = file.path(DEFAULT_RESULTS_ROOT, "fetchngs")', app_text, fixed = TRUE) &&
+    grepl('unset = file.path(CURRENT_HOME, ".codespringflow")', app_text, fixed = TRUE) &&
+    !identical(app_env$FETCHNGS_RESULTS_ROOT, app_env$FETCHNGS_RUNTIME_ROOT),
+  "FetchNGS results use the user's csl_results folder while cache and work data use a separate private runtime folder"
+)
+main_analysis_choices <- unname(app_env$analysis_choices())
+project_creation_choices <- unname(app_env$project_analysis_choices())
+established_project_choices <- c("RNA-seq", "scRNA-seq", "ATAC-seq", "CUT&RUN", "ChIP-seq")
+assert(
+  sum(main_analysis_choices == "FetchNGS") == 1L &&
+    !"FetchNGS" %in% project_creation_choices &&
+    all(established_project_choices %in% main_analysis_choices) &&
+    all(established_project_choices %in% project_creation_choices) &&
+    identical(app_env$analysis_key("FetchNGS"), "fetchngs") &&
+    identical(app_env$analysis_label("fetchngs"), "FetchNGS"),
+  "FetchNGS is a distinct main analysis choice but is excluded from biological project creation"
+)
+assert(
+  grepl("input.analysis == 'FetchNGS'", app_text, fixed = TRUE) &&
+    grepl('fetchngs_tabs <- c("FetchNGS", "FetchNGS Outputs")', server_source, fixed = TRUE) &&
+    grepl('updateTabsetPanel(session, "web_main_tabs", selected = "FetchNGS")', server_source, fixed = TRUE) &&
+    grepl('updateTabsetPanel(session, "web_main_tabs", selected = "Setup")', server_source, fixed = TRUE),
+  "FetchNGS selection exposes its run and output tabs while returning to an analysis restores the project tabs"
+)
+show_fetch_tabs_pos <- regexpr('lapply(fetchngs_tabs, function(tab) showTab("web_main_tabs", tab, session = session))', server_source, fixed = TRUE)[[1]]
+hide_analysis_tabs_pos <- regexpr('lapply(analysis_tabs, function(tab) hideTab("web_main_tabs", tab, session = session))', server_source, fixed = TRUE)[[1]]
+show_analysis_tabs_pos <- regexpr('lapply(non_viewer_tabs, function(tab) showTab("web_main_tabs", tab, session = session))', server_source, fixed = TRUE)[[1]]
+hide_fetch_tabs_pos <- regexpr('lapply(fetchngs_tabs, function(tab) hideTab("web_main_tabs", tab, session = session))', server_source, fixed = TRUE)[[1]]
+assert(
+  all(c(show_fetch_tabs_pos, hide_analysis_tabs_pos, show_analysis_tabs_pos, hide_fetch_tabs_pos) > 0L) &&
+    show_fetch_tabs_pos < hide_analysis_tabs_pos &&
+    show_analysis_tabs_pos < hide_fetch_tabs_pos,
+  "analysis switching reveals and selects a destination before hiding the active source tab"
+)
 for (key in c("rna", "atac", "cutrun", "chip")) {
   tabs <- app_env$results_explorer_tabs(key)
   assert(identical(tabs[[1]], "Overview") && identical(tail(tabs, 1), "Files") && "QC" %in% tabs, paste(key, "follows the shared Results Explorer navigation contract"))
@@ -360,6 +395,349 @@ assert(!app_env$is_codespring_process_command("Rscript -e shiny::runApp('/home/u
 root <- tempfile("codespring-app-smoke-")
 dir.create(root, recursive = TRUE)
 on.exit(unlink(root, recursive = TRUE, force = TRUE), add = TRUE)
+
+custom_fetchngs_root <- file.path(root, "custom_fetchngs")
+assert(
+  identical(
+    app_env$resolve_fetchngs_results_root("default", "", app_env$FETCHNGS_RESULTS_ROOT),
+    normalizePath(app_env$FETCHNGS_RESULTS_ROOT, winslash = "/", mustWork = FALSE)
+  ) &&
+    identical(
+      app_env$resolve_fetchngs_results_root("custom", custom_fetchngs_root, app_env$FETCHNGS_RESULTS_ROOT),
+      normalizePath(custom_fetchngs_root, winslash = "/", mustWork = FALSE)
+    ) &&
+    identical(app_env$ensure_fetchngs_results_root(custom_fetchngs_root), normalizePath(custom_fetchngs_root, winslash = "/", mustWork = TRUE)) &&
+    dir.exists(custom_fetchngs_root),
+  "FetchNGS keeps the home-folder default and creates an explicitly selected writable custom root"
+)
+relative_root_error <- tryCatch({ app_env$resolve_fetchngs_results_root("custom", "relative/fetchngs"); "" }, error = conditionMessage)
+filesystem_root_error <- tryCatch({ app_env$resolve_fetchngs_results_root("custom", "/"); "" }, error = conditionMessage)
+assert(
+  grepl("absolute server path", relative_root_error, fixed = TRUE) &&
+    grepl("filesystem root", filesystem_root_error, fixed = TRUE),
+  "FetchNGS rejects relative custom roots and the filesystem root"
+)
+
+fetchngs_accessions <- app_env$parse_fetchngs_accessions("SRR14593545\nERR1160846, SRR14593545")
+assert(
+  identical(fetchngs_accessions, c("SRR14593545", "ERR1160846")),
+  "FetchNGS pasted accessions are split and deduplicated"
+)
+accepted_fetchngs_accessions <- c(
+  "SRR11605097", "ERR4007730", "DRR171822",
+  "SRX8171613", "ERX4009132", "DRX162434",
+  "SRS6531847", "ERS4399630", "DRS090921",
+  "SAMN14689442", "SAMEA6638373", "SAMD00114846",
+  "SRP256957", "ERP120836", "DRP004793",
+  "SRA1068758", "ERA2420837", "DRA008156",
+  "PRJNA625551", "PRJEB37513", "PRJDB4176",
+  "GSM4432381", "GSE147507"
+)
+accepted_fetchngs_types <- vapply(accepted_fetchngs_accessions, app_env$fetchngs_accession_type, character(1))
+invalid_fetchngs_accession_error <- tryCatch({ app_env$parse_fetchngs_accessions("NOT_AN_ACCESSION"); "" }, error = conditionMessage)
+assert(
+  all(nzchar(accepted_fetchngs_types)) &&
+    identical(app_env$parse_fetchngs_accessions("srr14593545"), "SRR14593545") &&
+    grepl("Unrecognized accession format", invalid_fetchngs_accession_error, fixed = TRUE),
+  "FetchNGS recognizes only documented accession families and normalizes them to uppercase"
+)
+too_many_run_accessions <- paste0("SRR", seq_len(app_env$FETCHNGS_MAX_RUNS + 1L))
+too_many_run_error <- tryCatch({ app_env$fetchngs_validate_run_accession_limit(too_many_run_accessions); "" }, error = conditionMessage)
+assert(
+  grepl(paste0("limit is ", app_env$FETCHNGS_MAX_RUNS), too_many_run_error, fixed = TRUE),
+  "FetchNGS rejects more direct run accessions than the administrator limit"
+)
+fetchngs_pasted_input <- app_env$write_fetchngs_accession_input(
+  "pasted_app_helper",
+  paste(fetchngs_accessions, collapse = "\n"),
+  app_home = root
+)
+assert(
+  identical(tolower(tools::file_ext(fetchngs_pasted_input)), "csv") &&
+    identical(readLines(fetchngs_pasted_input, warn = FALSE), fetchngs_accessions),
+  "Shiny writes pasted FetchNGS accessions one per line with a validator-compatible CSV extension"
+)
+fetchngs_input <- file.path(root, "fetchngs_accessions.txt")
+writeLines(fetchngs_accessions, fetchngs_input)
+fetchngs_root <- file.path(root, "csl_results", "fetchngs")
+fetchngs_runtime_root <- file.path(root, ".codespringflow")
+fetchngs_output <- app_env$run_fetchngs_cli(
+  c("fetchngs", "--input", fetchngs_input, "--name", "app_helper_smoke", "--metadata-only", "--dry-run"),
+  results_root = fetchngs_root,
+  runtime_root = fetchngs_runtime_root
+)
+fetchngs_run <- app_env$fetchngs_run_dir("app_helper_smoke", fetchngs_root)
+fetchngs_summary <- app_env$fetchngs_run_summary("app_helper_smoke", fetchngs_root, query_scheduler = FALSE)
+manifest_fixture_dir <- file.path(root, "fetchngs_manifest_fixture")
+dir.create(manifest_fixture_dir, recursive = TRUE, showWarnings = FALSE)
+writeLines(
+  c("field\tvalue", "run_name\tmanifest_fixture", "work_namespace\t", "metadata_only\ttrue"),
+  file.path(manifest_fixture_dir, "run_manifest.tsv")
+)
+manifest_fixture <- app_env$fetchngs_read_manifest(manifest_fixture_dir)
+manifestless_run <- app_env$fetchngs_run_dir("legacy_manifestless", fetchngs_root)
+dir.create(manifestless_run, recursive = TRUE, showWarnings = FALSE)
+manifestless_summary <- app_env$fetchngs_run_summary("legacy_manifestless", fetchngs_root, query_scheduler = FALSE)
+fetchngs_history_path <- file.path(root, "fetchngs_results_roots.tsv")
+app_env$remember_fetchngs_results_root(fetchngs_root, fetchngs_history_path)
+known_fetchngs_roots <- app_env$fetchngs_known_results_roots(custom_fetchngs_root, fetchngs_history_path)
+assert(
+  grepl("Dry run only", fetchngs_output, fixed = TRUE) &&
+    file.exists(file.path(fetchngs_run, "run.sbatch")) &&
+    file.exists(file.path(fetchngs_run, "input", "accessions.csv")) &&
+    identical(fetchngs_summary$Status[[1]], "Bundle only") &&
+    identical(fetchngs_summary$`Metadata only`[[1]], "Yes") &&
+    identical(app_env$fetchngs_manifest_value(manifest_fixture, "metadata_only", "false"), "true") &&
+    identical(app_env$fetchngs_manifest_value(manifest_fixture, "work_namespace", "default"), "default") &&
+    identical(app_env$fetchngs_manifest_value(manifest_fixture, "missing_field", "fallback"), "fallback") &&
+    identical(manifestless_summary$Status[[1]], "Bundle only") &&
+    identical(manifestless_summary$`Metadata only`[[1]], "No") &&
+    identical(manifestless_summary$`FetchNGS version`[[1]], app_env$FETCHNGS_DEFAULT_VERSION),
+  "Shiny FetchNGS helpers create a validator-compatible metadata-only bundle without submitting Slurm"
+)
+assert(
+  all(normalizePath(c(custom_fetchngs_root, fetchngs_root), winslash = "/", mustWork = TRUE) %in% known_fetchngs_roots),
+  "FetchNGS remembers prior readable output roots so older runs remain selectable"
+)
+fake_ena_reports <- list(
+  SRR14593545 = data.frame(run_accession = "SRR14593545", fastq_bytes = "1000;2000", stringsAsFactors = FALSE),
+  ERR1160846 = data.frame(run_accession = "ERR1160846", fastq_bytes = "4000", stringsAsFactors = FALSE)
+)
+fake_ena_report_fetcher <- function(accession, max_rows) fake_ena_reports[[accession]]
+fake_shared_space <- function(path) list(filesystem = "testfs", available_bytes = 1000000, checked_path = path, mount = "/test")
+fetchngs_preflight <- app_env$fetchngs_download_preflight(
+  fetchngs_accessions,
+  results_root = fetchngs_root,
+  runtime_root = fetchngs_runtime_root,
+  max_runs = 20L,
+  max_download_bytes = 10000,
+  storage_multiplier = 4,
+  report_fetcher = fake_ena_report_fetcher,
+  space_fetcher = fake_shared_space
+)
+assert(
+  identical(fetchngs_preflight$run_count, 2L) &&
+    identical(fetchngs_preflight$estimated_bytes, 7000) &&
+    identical(fetchngs_preflight$required_storage_bytes, 28000),
+  "FetchNGS preflight deduplicates ENA runs, sums paired FASTQ bytes, and applies the storage multiplier"
+)
+oversize_preflight_error <- tryCatch({
+  app_env$fetchngs_download_preflight(
+    fetchngs_accessions, fetchngs_root, fetchngs_runtime_root,
+    max_runs = 20L, max_download_bytes = 6000, storage_multiplier = 4,
+    report_fetcher = fake_ena_report_fetcher, space_fetcher = fake_shared_space
+  )
+  ""
+}, error = conditionMessage)
+missing_size_fetcher <- function(accession, max_rows) data.frame(run_accession = accession, fastq_bytes = "", stringsAsFactors = FALSE)
+missing_size_preflight <- app_env$fetchngs_download_preflight(
+  c("SRR14593545", "ERR1160846"), fetchngs_root, fetchngs_runtime_root,
+  report_fetcher = function(accession, max_rows) {
+    if (identical(accession, "SRR14593545")) return(missing_size_fetcher(accession, max_rows))
+    fake_ena_reports[[accession]]
+  },
+  space_fetcher = fake_shared_space
+)
+missing_size_skip <- app_env$fetchngs_preflight_accessions(missing_size_preflight, "skip")
+missing_size_continue <- app_env$fetchngs_preflight_accessions(missing_size_preflight, "continue")
+all_unknown_skip_error <- tryCatch({
+  all_unknown <- app_env$fetchngs_download_preflight(
+    "SRR14593545", fetchngs_root, fetchngs_runtime_root,
+    report_fetcher = missing_size_fetcher, space_fetcher = fake_shared_space
+  )
+  app_env$fetchngs_preflight_accessions(all_unknown, "skip")
+  ""
+}, error = conditionMessage)
+lookup_failure_preflight <- app_env$fetchngs_download_preflight(
+  "SRP256957", fetchngs_root, fetchngs_runtime_root,
+  report_fetcher = function(accession, max_rows) stop("simulated ENA timeout"),
+  space_fetcher = fake_shared_space
+)
+too_many_resolved_fetcher <- function(accession, max_rows) {
+  data.frame(
+    run_accession = paste0("SRR", seq_len(max_rows)),
+    fastq_bytes = rep("100", max_rows),
+    stringsAsFactors = FALSE
+  )
+}
+too_many_resolved_error <- tryCatch({
+  app_env$fetchngs_download_preflight(
+    "SRP256957", fetchngs_root, fetchngs_runtime_root,
+    max_runs = 20L, report_fetcher = too_many_resolved_fetcher, space_fetcher = fake_shared_space
+  )
+  ""
+}, error = conditionMessage)
+fake_low_space <- function(path) list(filesystem = "testfs", available_bytes = 20000, checked_path = path, mount = "/test")
+low_space_preflight_error <- tryCatch({
+  app_env$fetchngs_download_preflight(
+    fetchngs_accessions, fetchngs_root, fetchngs_runtime_root,
+    max_runs = 20L, max_download_bytes = 10000, storage_multiplier = 4,
+    report_fetcher = fake_ena_report_fetcher, space_fetcher = fake_low_space
+  )
+  ""
+}, error = conditionMessage)
+assert(
+  grepl("above the administrator limit", oversize_preflight_error, fixed = TRUE) &&
+    grepl("more than the administrator limit", too_many_resolved_error, fixed = TRUE) &&
+    grepl("Insufficient free storage", low_space_preflight_error, fixed = TRUE),
+  "FetchNGS blocks oversized, over-20-run, and insufficient-storage downloads before submission"
+)
+assert(
+  isTRUE(missing_size_preflight$has_unknown_size) &&
+    identical(missing_size_preflight$unknown_runs, "SRR14593545") &&
+    identical(missing_size_skip, "ERR1160846") &&
+    identical(missing_size_continue, c("SRR14593545", "ERR1160846")) &&
+    grepl("nothing left to submit", all_unknown_skip_error, fixed = TRUE) &&
+    isTRUE(lookup_failure_preflight$has_unknown_size) &&
+    identical(lookup_failure_preflight$unknown_accessions, "SRP256957"),
+  "FetchNGS reports unknown sizes and supports explicit skip or acknowledged-continue decisions"
+)
+fetchngs_bundle_input <- file.path(fetchngs_run, "input", "accessions.csv")
+fetchngs_bundle_backup <- app_env$replace_fetchngs_run_accession_input(
+  fetchngs_bundle_input, missing_size_skip, fetchngs_run
+)
+assert(
+  file.exists(fetchngs_bundle_backup) &&
+    identical(readLines(fetchngs_bundle_backup, warn = FALSE), fetchngs_accessions) &&
+    identical(readLines(fetchngs_bundle_input, warn = FALSE), missing_size_skip),
+  "FetchNGS resume skip safely backs up and replaces the bundle accession list"
+)
+fetchngs_metadata_dir <- file.path(fetchngs_run, "results", "metadata")
+fetchngs_fastq_dir <- file.path(fetchngs_run, "results", "fastq")
+dir.create(fetchngs_metadata_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(fetchngs_fastq_dir, recursive = TRUE, showWarnings = FALSE)
+fetchngs_metadata_file <- file.path(fetchngs_metadata_dir, "runinfo.tsv")
+fetchngs_yaml_file <- file.path(fetchngs_run, "results", "software_versions.yml")
+fetchngs_fastq_file <- file.path(fetchngs_fastq_dir, "sample.fastq.gz")
+writeLines(c("run\tlibrary_layout", "SRR14593545\tPAIRED"), fetchngs_metadata_file)
+writeLines(c("fetchngs: 1.12.0", "nextflow: 24.04.4"), fetchngs_yaml_file)
+writeLines("compressed-placeholder", fetchngs_fastq_file)
+fetchngs_catalog <- app_env$fetchngs_output_file_catalog("app_helper_smoke", fetchngs_root)
+limited_fetchngs_files <- app_env$fetchngs_output_files("app_helper_smoke", fetchngs_root, max_files = 2L)
+assert(
+  NROW(fetchngs_catalog) == 3L &&
+    all(c("File", "Folder", "Type", "Size", "Modified", "path") %in% names(fetchngs_catalog)) &&
+    identical(app_env$validated_fetchngs_output_path("app_helper_smoke", fetchngs_metadata_file, fetchngs_root), normalizePath(fetchngs_metadata_file)) &&
+    identical(app_env$validated_fetchngs_output_path("app_helper_smoke", fetchngs_input, fetchngs_root), "") &&
+    identical(app_env$fetchngs_output_preview_kind(fetchngs_metadata_file), "table") &&
+    identical(app_env$fetchngs_output_preview_kind(fetchngs_yaml_file), "text") &&
+    identical(app_env$fetchngs_output_preview_kind(fetchngs_fastq_file), "binary"),
+  "FetchNGS output viewing catalogs only selected-run result files and chooses safe preview modes"
+)
+assert(
+  length(limited_fetchngs_files) == 2L && isTRUE(attr(limited_fetchngs_files, "truncated")),
+  "FetchNGS output scanning is bounded so large result trees cannot block the app indefinitely"
+)
+fetchngs_log_dir <- file.path(fetchngs_run, "logs")
+dir.create(fetchngs_log_dir, recursive = TRUE, showWarnings = FALSE)
+writeLines("900002", file.path(fetchngs_run, "job_id.txt"))
+writeLines("OLD FAILURE THAT MUST NOT BE SHOWN", file.path(fetchngs_log_dir, "controller-900001.err"))
+waiting_fetchngs_log <- app_env$fetchngs_latest_log("app_helper_smoke", fetchngs_root)
+waiting_fetchngs_summary <- app_env$fetchngs_run_summary("app_helper_smoke", fetchngs_root, query_scheduler = FALSE)
+assert(
+  grepl("SLURM job 900002 is the current submission", waiting_fetchngs_log, fixed = TRUE) &&
+    !grepl("OLD FAILURE", waiting_fetchngs_log, fixed = TRUE) &&
+    identical(waiting_fetchngs_summary$Status[[1]], "Submitted; waiting for Slurm"),
+  "FetchNGS follows a newly recorded resume job while Slurm creates its current controller log"
+)
+writeLines("CURRENT RESUME LOG", file.path(fetchngs_log_dir, "controller-900002.out"))
+current_fetchngs_log <- app_env$fetchngs_latest_log("app_helper_smoke", fetchngs_root)
+assert(
+  grepl("Current SLURM job: 900002", current_fetchngs_log, fixed = TRUE) &&
+    grepl("CURRENT RESUME LOG", current_fetchngs_log, fixed = TRUE) &&
+    !grepl("OLD FAILURE", current_fetchngs_log, fixed = TRUE),
+  "FetchNGS displays only the current resumed job's controller logs"
+)
+assert(
+  app_env$fetchngs_job_is_active("RUNNING") &&
+    app_env$fetchngs_job_is_active("PENDING") &&
+    !app_env$fetchngs_job_is_active("FAILED") &&
+    !app_env$fetchngs_job_is_active("COMPLETED") &&
+    app_env$fetchngs_job_is_terminal("FAILED") &&
+    app_env$fetchngs_job_is_terminal("COMPLETED") &&
+    !app_env$fetchngs_job_is_terminal("RUNNING") &&
+    !app_env$fetchngs_job_is_terminal("UNKNOWN_TRANSITION"),
+  "FetchNGS deletion distinguishes active jobs from terminal jobs"
+)
+# Simulate a successful resume replacing the previous job ID.
+writeLines(c("111111", "222222"), file.path(fetchngs_run, "job_history.txt"))
+writeLines("222222", file.path(fetchngs_run, "job_id.txt"))
+dir.create(file.path(fetchngs_run, "logs"), recursive = TRUE, showWarnings = FALSE)
+writeLines("resumed controller log", file.path(fetchngs_run, "logs", "controller-222222.out"))
+original_fetchngs_scheduler_state <- app_env$fetchngs_scheduler_state
+app_env$fetchngs_scheduler_state <- function(job_id) if (identical(job_id, "222222")) "RUNNING" else ""
+resumed_fetchngs_summary <- app_env$fetchngs_run_summary("app_helper_smoke", fetchngs_root, query_scheduler = TRUE)
+resumed_fetchngs_log <- app_env$fetchngs_latest_log("app_helper_smoke", fetchngs_root)
+app_env$fetchngs_scheduler_state <- original_fetchngs_scheduler_state
+assert(
+  identical(resumed_fetchngs_summary$`Job ID`[[1]], "222222") &&
+    identical(resumed_fetchngs_summary$Status[[1]], "Running") &&
+    grepl("controller-222222.out", resumed_fetchngs_log, fixed = TRUE) &&
+    grepl("resumed controller log", resumed_fetchngs_log, fixed = TRUE) &&
+    isTRUE(app_env$fetchngs_job_submission_is_recent(fetchngs_run)),
+  "FetchNGS resume synchronization replaces the old job ID and follows the new status and controller log"
+)
+Sys.setFileTime(file.path(fetchngs_run, "job_id.txt"), Sys.time() - 600)
+assert(
+  !app_env$fetchngs_job_submission_is_recent(fetchngs_run),
+  "FetchNGS recent-submission protection expires after the scheduler registration window"
+)
+
+fetchngs_delete_message <- app_env$delete_fetchngs_run(
+  "app_helper_smoke",
+  results_root = fetchngs_root,
+  runtime_root = fetchngs_runtime_root,
+  app_home = root,
+  query_scheduler = FALSE
+)
+assert(
+  grepl("Deleted FetchNGS run", fetchngs_delete_message, fixed = TRUE) &&
+    !dir.exists(fetchngs_run) &&
+    !dir.exists(file.path(fetchngs_runtime_root, "work", "fetchngs", "app_helper_smoke")) &&
+    dir.exists(fetchngs_root),
+  "FetchNGS deletion removes only the selected result and work folders while keeping the results root"
+)
+initial_fetchngs_ui <- as.character(htmltools::renderTags(app_env$MAIN_UI)$html)
+assert(
+    grepl('tabPanel("FetchNGS"', app_text, fixed = TRUE) &&
+    grepl('tabPanel("FetchNGS Outputs"', app_text, fixed = TRUE) &&
+    grepl('textInput("fetchngs_older_results_root"', app_text, fixed = TRUE) &&
+    grepl('uiOutput("fetchngs_output_root_ui")', app_text, fixed = TRUE) &&
+    grepl('"fetchngs_results_mode", "FetchNGS results folder"', app_text, fixed = TRUE) &&
+    grepl('actionButton("browse_fetchngs_results_root"', app_text, fixed = TRUE) &&
+    grepl('actionButton("submit_fetchngs"', app_text, fixed = TRUE) &&
+    grepl('uiOutput("fetchngs_run_actions_ui")', app_text, fixed = TRUE) &&
+    grepl('selection = "single"', app_text, fixed = TRUE) &&
+    grepl("fetchngs_runs_table_rows_selected", app_text, fixed = TRUE) &&
+    grepl('updateSelectInput(session, "fetchngs_selected_run"', app_text, fixed = TRUE) &&
+    grepl('"resume_fetchngs", "Resume selected run"', server_source, fixed = TRUE) &&
+    grepl('"delete_fetchngs", "Delete selected run"', server_source, fixed = TRUE) &&
+    grepl('completed <- identical(toupper(trimws(state)), "COMPLETED")', app_text, fixed = TRUE) &&
+    grepl("resume_blocked <- active || recent || completed", app_text, fixed = TRUE) &&
+    grepl("delete_blocked <- active || recent", app_text, fixed = TRUE) &&
+    grepl('disabled = if (resume_blocked) "disabled" else NULL', app_text, fixed = TRUE) &&
+    grepl('disabled = if (delete_blocked) "disabled" else NULL', app_text, fixed = TRUE) &&
+    grepl("fetchngs_job_submission_is_recent(run_dir)", server_source, fixed = TRUE) &&
+    grepl("fetchngs_run_actions_ui", initial_fetchngs_ui, fixed = TRUE) &&
+    !grepl("resume_fetchngs", initial_fetchngs_ui, fixed = TRUE) &&
+    !grepl("delete_fetchngs", initial_fetchngs_ui, fixed = TRUE) &&
+    grepl('actionButton("confirm_delete_fetchngs"', server_source, fixed = TRUE) &&
+    grepl('tags$strong("Accepted accessions")', app_text, fixed = TRUE) &&
+    grepl('tags$strong("Download safeguards")', app_text, fixed = TRUE) &&
+    grepl('uiOutput("fetchngs_message")', app_text, fixed = TRUE) &&
+    grepl('actionButton("confirm_fetchngs_unknown_size"', server_source, fixed = TRUE) &&
+    grepl('actionButton("cancel_fetchngs_unknown_size"', server_source, fixed = TRUE) &&
+    grepl('fetchngs_unknown_size_ack', server_source, fixed = TRUE) &&
+    grepl("fetchngs_download_preflight(accessions, results_root = results_root)", server_source, fixed = TRUE) &&
+    grepl("Rechecking accession and download safety before resuming", server_source, fixed = TRUE) &&
+    grepl("manifest <- fetchngs_read_manifest(run_dir)", server_source, fixed = TRUE) &&
+    grepl("Resume submitted for", server_source, fixed = TRUE) &&
+    grepl("job_id <- fetchngs_latest_job_id(context$run_dir)", server_source, fixed = TRUE) &&
+    grepl("body:not(:has(#analysis option[value='FetchNGS']:checked))", app_text, fixed = TRUE) &&
+    !grepl("codespring-tabs-initializing", app_text, fixed = TRUE) &&
+    !grepl("codespring-tabs-ready", app_text, fixed = TRUE),
+  "the app exposes FetchNGS location, creation, status, output viewing, resume, and confirmed deletion controls"
+)
 
 shared_scanpy_sif <- "/grid/bsr/data/data/bsr_readable_data/containers/scanpy/codespring-scanpy_1.0.0.sif"
 assert(
