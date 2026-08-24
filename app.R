@@ -4645,14 +4645,22 @@ cutrun_individual_peak_navigation <- function(path, max_peaks = 250L, scan_limit
     if (identical(cached$signature, signature)) return(cached$value)
   }
 
-  ranking_path <- sub("\\.bed$", "_ranking.tsv", path)
-  ranking_available <- file.exists(ranking_path) && file_size_for(ranking_path) > 0
+  ranking_path <- if (grepl("\\.bed$", path, ignore.case = TRUE)) sub("\\.bed$", "_ranking.tsv", path, ignore.case = TRUE) else ""
+  ranking_available <- nzchar(ranking_path) && !identical(ranking_path, path) && file.exists(ranking_path) && file_size_for(ranking_path) > 0
   # Newly generated shared-overlap sets include a small pre-ranked sidecar.
   # For individual caller output, read ordinary peak files in full when they
   # are reasonably sized so the menu is actually ranked across the callset,
   # not merely across the first genomic chunk of the file.
   read_limit <- if (ranking_available) as.integer(max_peaks) else if (info$size[[1]] <= 50 * 1024^2) -1L else scan_limit
   peaks <- safe_read_result_table(if (ranking_available) ranking_path else path, read_limit)
+  ext <- tolower(tools::file_ext(path))
+  is_macs2 <- ext %in% c("narrowpeak", "broadpeak") || grepl("/macs2/", path, fixed = TRUE)
+  is_seacr <- grepl("/seacr/", path, fixed = TRUE)
+  if (NROW(peaks) && is_macs2 && NCOL(peaks) >= 3L && !all(c("chrom", "start", "end") %in% names(peaks))) {
+    macs2_columns <- c("chrom", "start", "end", "name", "score", "strand", "signalValue", "pValue", "qValue", "peak")
+    mapped_columns <- seq_len(min(NCOL(peaks), length(macs2_columns)))
+    names(peaks)[mapped_columns] <- macs2_columns[mapped_columns]
+  }
   if (NROW(peaks) && !all(c("chrom", "start", "end") %in% names(peaks)) && NCOL(peaks) >= 3L) {
     names(peaks)[seq_len(3L)] <- c("chrom", "start", "end")
   }
@@ -4697,10 +4705,9 @@ cutrun_individual_peak_navigation <- function(path, max_peaks = 250L, scan_limit
       b_rank <- if ("source_b_rank" %in% names(peaks)) as.character(peaks$source_b_rank[ranked]) else ""
       label <- paste0(label, " — combined rank ", format(signif(score, 4), trim = TRUE), " (", a_rank, " + ", b_rank, ")")
     } else if (length(score_column)) {
-      evidence_label <- if (identical(score_column[[1]], "qValue")) "MACS2 -log10(q)" else if (identical(score_column[[1]], "pValue")) "MACS2 -log10(p)" else if (score_column[[1]] %in% c("signalValue", "score")) "signal" else "SEACR signal"
+      evidence_label <- if (identical(score_column[[1]], "qValue")) "MACS2 -log10(q)" else if (identical(score_column[[1]], "pValue")) "MACS2 -log10(p)" else if (score_column[[1]] %in% c("signalValue", "score")) "signal" else if (is_seacr) "SEACR signal" else "signal"
       label <- paste0(label, " — ", evidence_label, " ", format(signif(score, 4), trim = TRUE))
     }
-    ext <- tolower(tools::file_ext(path))
     total <- if (ext == "bed") cutrun_browser_peak_total(path) else {
       summaries <- list.files(dirname(path), pattern = "_macs2_summary\\.txt$", full.names = TRUE)
       values <- if (length(summaries)) metric_file_to_named_list(summaries[[1]]) else list()

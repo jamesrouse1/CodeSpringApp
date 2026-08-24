@@ -695,7 +695,10 @@ run_log <- file.path(sample_dir, "A1_macs2.log")
 marker <- file.path(sample_dir, "A1_macs2_complete.txt")
 writeLines("chr1\t1\t2", legacy_peak)
 assert(identical(app_env$atac_macs2_completion_target(atac_project, "A1"), legacy_peak), "legacy ATAC peaks remain recognized")
-writeLines(c("chr1\t1\t200\tpeak1", "chr1\t300\t500\tpeak2"), legacy_peak)
+writeLines(c(
+  "chr1\t1\t200\tpeak1\t50\t.\t8\t6\t5\t75",
+  "chr1\t300\t500\tpeak2\t40\t.\t7\t5\t4\t60"
+), legacy_peak)
 atac_peak_catalog <- app_env$genome_browser_track_catalog(atac_project)
 assert(
   NROW(atac_peak_catalog[atac_peak_catalog$kind == "peaks" & atac_peak_catalog$sample == "A1", , drop = FALSE]) >= 1L,
@@ -703,8 +706,11 @@ assert(
 )
 atac_peak_navigation <- app_env$cutrun_individual_peak_navigation(legacy_peak)
 assert(
-  length(atac_peak_navigation$peaks) == 2L && identical(unname(atac_peak_navigation$peaks)[[1]], "chr1:2-200"),
-  "ATAC sample-peak view provides interval navigation from the selected peak file"
+  length(atac_peak_navigation$peaks) == 2L &&
+    identical(unname(atac_peak_navigation$peaks)[[1]], "chr1:2-200") &&
+    grepl("MACS2 -log10(q)", names(atac_peak_navigation$peaks)[[1]], fixed = TRUE) &&
+    !any(grepl("SEACR", names(atac_peak_navigation$peaks), fixed = TRUE)),
+  "ATAC sample-peak navigation uses MACS2 evidence labels without CUT&RUN terminology"
 )
 completed_selector_samples <- app_env$completed_samples_for_step(atac_project, "MACS2 Peaks", c("A1", "A2"))
 assert("A1" %in% completed_selector_samples && !"A2" %in% completed_selector_samples, "sample selectors identify completed samples without unchecking unfinished samples")
