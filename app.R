@@ -11919,53 +11919,24 @@ write_scrna_manual_cluster_mapping <- function(project, annotation_name, assignm
 
 scrna_embedding_candidate_paths <- function(project, view = "integrated") {
   file <- if (identical(tolower(view %||% "integrated"), "unintegrated")) "preintegration_umap_coordinates.tsv" else "umap_coordinates.tsv"
-  unique(c(
-    file.path(scrna_output_dir(project), "tables", file),
+  configured_root <- scrna_output_dir(project)
+  canonical_root <- file.path(project$results_root %||% DEFAULT_RESULTS_ROOT, project$name %||% project$label, "data", "scrna")
+  default_root <- file.path(DEFAULT_RESULTS_ROOT, project$name %||% project$label, "data", "scrna")
+  output_roots <- unique(c(
+    configured_root,
+    canonical_root,
+    default_root,
     # Completed-results projects may already use the scRNA output folder as
     # data_dir. Do not append a second /scrna in that layout.
-    if (identical(tolower(basename(normalizePath(project$data_dir, winslash = "/", mustWork = FALSE))), "scrna")) file.path(project$data_dir, "tables", file) else character(0)
+    if (identical(tolower(basename(normalizePath(project$data_dir, winslash = "/", mustWork = FALSE))), "scrna")) project$data_dir else character(0)
   ))
+  file.path(output_roots, "tables", file)
 }
 
 scrna_embedding_path <- function(project, view = "integrated") {
   candidates <- scrna_embedding_candidate_paths(project, view)
   ready <- candidates[file.exists(candidates) & vapply(candidates, file_size_for, numeric(1)) > 0]
   if (length(ready)) ready[[1]] else candidates[[1]]
-}
-
-scrna_seurat_embedding_restore_source <- function(project) {
-  out_dir <- scrna_output_dir(project)
-  candidates <- c(
-    file.path(out_dir, "objects", "processed_seurat.rds"),
-    file.path(out_dir, "checkpoints", "04_clustered_seurat.rds")
-  )
-  ready <- candidates[file.exists(candidates) & vapply(candidates, file_size_for, numeric(1)) > 0]
-  if (length(ready)) ready[[1]] else ""
-}
-
-submit_scrna_embedding_restore_job <- function(project) {
-  out_dir <- scrna_output_dir(project)
-  source_object <- scrna_seurat_embedding_restore_source(project)
-  if (!nzchar(source_object)) return(record_preflight_failure(project, "Restore interactive UMAP", "No saved Seurat object or clustered checkpoint is available for coordinate recovery.", "scrna_umap_restore"))
-  qsub <- file.path(SCRIPTS_DIR, "singleCellRNAseq", "qsub_scrna_pipeline.sh")
-  runner <- file.path(SCRIPTS_DIR, "singleCellRNAseq", "scrna_pipeline.sh")
-  restore_script <- file.path(SCRIPTS_DIR, "singleCellRNAseq", "restore_seurat_umap_coordinates.R")
-  missing <- c(qsub, runner, restore_script)[!file.exists(c(qsub, runner, restore_script))]
-  if (length(missing)) return(record_preflight_failure(project, "Restore interactive UMAP", "Update CodeSpringLab before restoring the viewer coordinates.", "scrna_umap_restore"))
-  manifest_path <- project$scrna_input_manifest %||% project$design_matrix_path %||% file.path(project$data_dir, "manifest", "scrna_samples.tsv")
-  params_path <- file.path(project$data_dir, "manifest", "scrna_parameters.tsv")
-  input_bytes <- file_size_for(source_object)
-  submit_sbatch(
-    project,
-    "Restore interactive UMAP",
-    qsub,
-    c(runner, "seurat", manifest_path, out_dir, params_path, "restore_embedding", ""),
-    "scrna_umap_restore",
-    "saved Seurat UMAP (no recomputation)",
-    target = file.path(out_dir, "tables", "umap_coordinates.tsv"),
-    reference = basename(source_object),
-    sbatch_options = scrna_stage_resource_options("inspect", input_bytes, "seurat")
-  )
 }
 
 scrna_table_columns <- function(path) {
@@ -18824,15 +18795,8 @@ server <- function(input, output, session) {
       # Poll only while UMAP outputs are absent. Once the viewer is ready,
       # avoid rebuilding its controls at each scheduler-status refresh.
       progress_refresh()
-      restore_source <- scrna_seurat_embedding_restore_source(p)
-      return(div(
-        class = "empty-box",
-        tags$p("Interactive UMAP coordinates are not available yet."),
-        if (nzchar(restore_source)) tagList(
-          tags$p("A saved Seurat UMAP was found. Restore the coordinate table from that object without recalculating PCA, neighbors, clusters, or UMAP."),
-          actionButton("restore_scrna_embedding", "Restore interactive UMAP", class = "btn-primary")
-        ) else tags$p("No saved UMAP object was found. Complete UMAP & clustering with the current CodeSpringLab version.")
-      ))
+      expected <- scrna_embedding_candidate_paths(p, "integrated")
+      return(div(class = "empty-box", tags$p("Interactive UMAP coordinates are not available yet."), tags$p(class = "muted small-note", paste("Checked:", paste(expected, collapse = " | ")))))
     }
     selected_view <- scrna_selected_embedding_view(p, isolate(input$scrna_embedding_view) %||% "")
     columns <- scrna_embedding_columns(p, selected_view)
@@ -18855,14 +18819,6 @@ server <- function(input, output, session) {
       uiOutput("scrna_embedding_display_note")
     )
   })
-  observeEvent(input$restore_scrna_embedding, {
-    p <- current_project(); req(is_scrna_project(p))
-    run_submission(
-      "Restore interactive UMAP",
-      submit_scrna_embedding_restore_job(p),
-      "saved Seurat UMAP coordinates"
-    )
-  }, ignoreInit = TRUE)
   output$scrna_embedding_marker_gene_ui <- renderUI({
     # Reading a legacy processed object to recreate its gene list can take
     # noticeable time. Do it only when marker coloring is explicitly chosen,
