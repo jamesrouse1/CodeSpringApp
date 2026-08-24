@@ -140,6 +140,13 @@ assert(
   "comparison views use a separate opt-in for potentially large individual sample peak tracks"
 )
 assert(
+  grepl('c("Individual sample peaks" = "sample_peak")', app_text, fixed = TRUE) &&
+    grepl('"genome_browser_sample_peak_sample", "Sample"', app_text, fixed = TRUE) &&
+    grepl('"genome_browser_sample_peak_file", "Peak file"', app_text, fixed = TRUE) &&
+    grepl('selectInput("genome_browser_comparison", "Differential comparison"', app_text, fixed = TRUE),
+  "ATAC genome browser exposes sample-peak and completed-comparison selectors"
+)
+assert(
   grepl("new_counts_source_mode", server_source, fixed = TRUE) &&
     grepl("browse_new_counts_server_file", server_source, fixed = TRUE) &&
     grepl("open_server_browser(\"new_counts_server_file\", \"file\"", server_source, fixed = TRUE),
@@ -689,6 +696,16 @@ marker <- file.path(sample_dir, "A1_macs2_complete.txt")
 writeLines("chr1\t1\t2", legacy_peak)
 assert(identical(app_env$atac_macs2_completion_target(atac_project, "A1"), legacy_peak), "legacy ATAC peaks remain recognized")
 writeLines(c("chr1\t1\t200\tpeak1", "chr1\t300\t500\tpeak2"), legacy_peak)
+atac_peak_catalog <- app_env$genome_browser_track_catalog(atac_project)
+assert(
+  NROW(atac_peak_catalog[atac_peak_catalog$kind == "peaks" & atac_peak_catalog$sample == "A1", , drop = FALSE]) >= 1L,
+  "ATAC genome browser discovers per-sample MACS2 peak tracks"
+)
+atac_peak_navigation <- app_env$cutrun_individual_peak_navigation(legacy_peak)
+assert(
+  length(atac_peak_navigation$peaks) == 2L && identical(unname(atac_peak_navigation$peaks)[[1]], "chr1:2-200"),
+  "ATAC sample-peak view provides interval navigation from the selected peak file"
+)
 completed_selector_samples <- app_env$completed_samples_for_step(atac_project, "MACS2 Peaks", c("A1", "A2"))
 assert("A1" %in% completed_selector_samples && !"A2" %in% completed_selector_samples, "sample selectors identify completed samples without unchecking unfinished samples")
 failed_macs_job <- data.frame(step = "MACS2 Peaks", sample = "A1", slurm_state = "FAILED", elapsed = "00:01:00", stderr = "", stringsAsFactors = FALSE)
