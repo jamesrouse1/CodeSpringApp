@@ -17284,12 +17284,14 @@ server <- function(input, output, session) {
     if (!NROW(comparisons)) return(div(class = "empty-box", "Run at least one differential-expression comparison first. Completed comparisons will appear here automatically."))
     selected_library <- selected_choice(isolate(input$scrna_pathway_library), GSEAPY_GENESET_OPTIONS, "MSigDB_Hallmark_2020")
     project_species <- genome_species(p)
-    default_pathway_species <- if (project_species %in% c("mouse", "human")) project_species else "auto"
+    pbmc_example <- scrna_is_pbmc3k_example(p)
+    default_pathway_species <- if (pbmc_example) "human" else if (project_species %in% c("mouse", "human")) project_species else "auto"
+    selected_pathway_species <- if (pbmc_example) "human" else isolate(input$scrna_pathway_species) %||% default_pathway_species
     tagList(
       div(class = "read-source-note", tags$strong("Ranked pathway analysis"), tags$p("Choose any completed comparison. Pseudobulk results use the DESeq2 Wald statistic; cell-level Wilcoxon results use the full signed rank or signed P-value ranking. No DEG cutoff is imposed.")),
       selectInput("scrna_pathway_de_file", "Differential-expression comparison", choices = stats::setNames(comparisons$path, comparisons$label), selected = selected_choice(isolate(input$scrna_pathway_de_file), comparisons$path, comparisons$path[[1]]), selectize = FALSE),
       selectInput("scrna_pathway_library", "Pathway database", choices = GSEAPY_GENESET_OPTIONS, selected = selected_library, selectize = FALSE),
-      selectInput("scrna_pathway_species", "Species of the differential-expression genes", choices = c("Detect from gene symbols" = "auto", "Mouse — convert to human orthologs" = "mouse", "Human — no conversion" = "human"), selected = isolate(input$scrna_pathway_species) %||% default_pathway_species, selectize = FALSE),
+      selectInput("scrna_pathway_species", "Species of the differential-expression genes", choices = c("Detect from gene symbols" = "auto", "Mouse — convert to human orthologs" = "mouse", "Human — no conversion" = "human"), selected = selected_pathway_species, selectize = FALSE),
       conditionalPanel("input.scrna_pathway_species != 'human'",
         radioButtons("scrna_pathway_ortholog_source", "Ortholog table", choices = c("Bundled table or server path" = "server", "Upload from laptop" = "upload"), selected = isolate(input$scrna_pathway_ortholog_source) %||% "server", inline = TRUE),
         conditionalPanel("input.scrna_pathway_ortholog_source == 'server'", div(class = "new-project-path-control", textInput("scrna_pathway_ortholog_file", "Optional ortholog table path", value = isolate(input$scrna_pathway_ortholog_file) %||% "", placeholder = "Blank uses bundled mouse_human_orthologs_MGI.tsv"), actionButton("browse_scrna_pathway_ortholog_file", "Browse server", class = "btn-default"))),
