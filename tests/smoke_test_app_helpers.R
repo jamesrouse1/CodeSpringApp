@@ -644,6 +644,10 @@ cutadapt_dir <- file.path(root, "cutadapt")
 dir.create(cutadapt_dir, recursive = TRUE, showWarnings = FALSE)
 partial_cutadapt_output <- file.path(cutadapt_dir, "A1.fastq.gz")
 writeBin(as.raw(rep(seq_len(100), 2)), partial_cutadapt_output)
+assert(
+  isTRUE(app_env$trimmed_checkbox_default(atac_project, FALSE)),
+  "ATAC trimmed-read controls default on when Cutadapt output is available"
+)
 partial_cutadapt_progress <- app_env$sample_progress(atac_project, jobs = data.frame())$table
 assert(
   identical(partial_cutadapt_progress$status[partial_cutadapt_progress$sample == "A1" & partial_cutadapt_progress$step == "Cutadapt"], "Completed"),
@@ -655,6 +659,10 @@ assert(
   "mixed completed and untouched Cutadapt samples report Partial rather than Not started"
 )
 assert(identical(partial_cutadapt_status$detail[partial_cutadapt_status$step == "Cutadapt"], "1/8 samples complete"), "partial Cutadapt status reports the completed sample count")
+assert(
+  lengths(regmatches(app_text, gregexpr('updateCheckboxInput(session, "atac_bowtie2_use_trimmed", value = TRUE)', app_text, fixed = TRUE))) >= 2L,
+  "project switching and Cutadapt submission activate the ATAC trimmed-read default"
+)
 assert(identical(app_env$status_css_key("Partial"), "partial"), "partial pipeline status has a dedicated visual state")
 unlink(partial_cutadapt_output)
 partial_targets <- app_env$sample_step_targets(atac_project, "A1", "Bowtie2")

@@ -1872,7 +1872,7 @@ cutadapt_outputs_available <- function(project) {
 }
 
 trimmed_checkbox_default <- function(project, current_value) {
-  if (is.null(current_value)) cutadapt_outputs_available(project) else isTRUE(current_value)
+  cutadapt_outputs_available(project) || isTRUE(current_value)
 }
 
 extract_job_id <- function(x) {
@@ -13516,6 +13516,8 @@ server <- function(input, output, session) {
       updateCheckboxInput(session, "star_use_trimmed", value = TRUE)
       updateCheckboxInput(session, "kallisto_use_trimmed", value = TRUE)
       updateCheckboxInput(session, "cutrun_bowtie2_use_trimmed", value = TRUE)
+      updateCheckboxInput(session, "atac_bowtie2_use_trimmed", value = TRUE)
+      updateCheckboxInput(session, "chip_bowtie2_use_trimmed", value = TRUE)
     }
     if (isTRUE(existing_project_selected())) safe_refresh_progress_now("project switch")
   }, ignoreInit = FALSE)
@@ -15643,6 +15645,8 @@ server <- function(input, output, session) {
       updateCheckboxInput(session, "star_use_trimmed", value = TRUE)
       updateCheckboxInput(session, "kallisto_use_trimmed", value = TRUE)
       updateCheckboxInput(session, "cutrun_bowtie2_use_trimmed", value = TRUE)
+      updateCheckboxInput(session, "atac_bowtie2_use_trimmed", value = TRUE)
+      updateCheckboxInput(session, "chip_bowtie2_use_trimmed", value = TRUE)
     }
   })
   observeEvent(input$run_cutrun_bowtie2, {
