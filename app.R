@@ -12654,6 +12654,7 @@ server <- function(input, output, session) {
   scrna_reference_inspection <- reactiveVal(list(status = "idle", project_id = "", reference_file = "", output_path = "", job_id = "", choices = data.frame(), message = ""))
   cutrun_normalization_choice <- reactiveVal("spikein")
   genome_browser_mode_state <- reactiveVal("")
+  genome_browser_catalog_refresh <- reactiveVal(0L)
   atac_file_catalog_refresh <- reactiveVal(0L)
   selected_atac_download_path <- reactiveVal("")
   pending_atac_delete_path <- reactiveVal("")
@@ -17214,9 +17215,26 @@ server <- function(input, output, session) {
     progress_refresh()
     peak_signal_track_table(current_project())
   }, page_length = 50, scroll_y = "600px")
+  observeEvent(list(input$atac_results_tabs, input$chip_signal_peak_tabs, input$cutrun_results_tabs), {
+    selected_tabs <- c(
+      input$atac_results_tabs %||% "",
+      input$chip_signal_peak_tabs %||% "",
+      input$cutrun_results_tabs %||% ""
+    )
+    if ("Genome Browser" %in% selected_tabs) {
+      genome_browser_catalog_refresh(isolate(genome_browser_catalog_refresh()) + 1L)
+    }
+  }, ignoreInit = TRUE)
+  observeEvent(list(input$refresh_atac_results, input$refresh_cutrun_results), {
+    genome_browser_catalog_refresh(isolate(genome_browser_catalog_refresh()) + 1L)
+  }, ignoreInit = TRUE)
+  genome_browser_catalog <- reactive({
+    genome_browser_catalog_refresh()
+    genome_browser_track_catalog(current_project())
+  })
   output$genome_browser_controls_ui <- renderUI({
     p <- current_project()
-    catalog <- genome_browser_track_catalog(p)
+    catalog <- genome_browser_catalog()
     if (!NROW(catalog)) return(div(class = "empty-box", "No bigWig signal or peak files are available yet."))
     comparisons <- genome_browser_comparison_catalog(p)
     has_cutrun_peaks <- is_cutrun_project(p) && any(catalog$kind == "peaks")
@@ -17315,14 +17333,6 @@ server <- function(input, output, session) {
       peak_rows <- atac_individual_peak_rows(catalog, peak_sample)
       peak_choices <- stats::setNames(peak_rows$path, make.unique(basename(peak_rows$path), sep = " — "))
       peak_path <- selected_choice(input$genome_browser_sample_peak_file, peak_choices, peak_rows$path[[1]])
-      navigation <- cutrun_individual_peak_navigation(
-        peak_path, max_peaks = 250L,
-        score_preference = c("signalValue", "qValue", "pValue", "score", "V4"),
-        locus_flank = 500L
-      )
-      peak_loci <- c("Choose a peak..." = "", navigation$peaks)
-      selected_locus <- as.character(input$genome_browser_sample_peak_interval %||% "")
-      if (!selected_locus %in% unname(peak_loci)) selected_locus <- if (length(navigation$peaks)) unname(navigation$peaks)[[1]] else ""
       controls <- c(controls, list(
         selectInput(
           "genome_browser_sample_peak_sample", "Sample",
@@ -17332,24 +17342,7 @@ server <- function(input, output, session) {
           "genome_browser_sample_peak_file", "Peak file",
           choices = peak_choices, selected = peak_path, selectize = FALSE
         ),
-        if (length(navigation$peaks)) selectizeInput(
-          "genome_browser_sample_peak_interval", "Peak interval",
-          choices = peak_loci, selected = selected_locus,
-          options = list(
-            placeholder = "Strongest called peaks first",
-            maxOptions = 250L,
-            dropdownParent = "body"
-          )
-        ) else div(class = "muted small-note", "This peak file contains no called intervals."),
-        div(
-          class = "muted small-note",
-          "The browser loads the selected sample's CPM bigWig with this peak file. ",
-          format(navigation$total, big.mark = ","), " called peak", if (navigation$total == 1L) "" else "s",
-          if (navigation$shown) paste0(
-            "; showing the top ", format(navigation$shown, big.mark = ","),
-            " ranked by ", navigation$ranking %||% "MACS2 signalValue", "."
-          ) else "."
-        )
+        uiOutput("genome_browser_sample_peak_navigation_ui")
       ))
     } else if (identical(mode, "comparison") && NROW(comparisons)) {
       comparison_choices <- stats::setNames(comparisons$id, make.unique(comparisons$label, sep = " — "))
@@ -17425,6 +17418,44 @@ server <- function(input, output, session) {
     }
     do.call(tagList, controls)
   })
+  output$genome_browser_sample_peak_navigation_ui <- renderUI({
+    p <- current_project()
+    if (!is_atac_project(p) || !identical(genome_browser_mode_state(), "sample_peak")) return(NULL)
+    catalog <- genome_browser_catalog()
+    peak_samples <- unique(as.character(catalog$sample[catalog$kind == "peaks"]))
+    if (!length(peak_samples)) return(div(class = "muted small-note", "No called ATAC peaks are available."))
+    peak_sample <- selected_choice(input$genome_browser_sample_peak_sample, peak_samples, peak_samples[[1]])
+    peak_rows <- atac_individual_peak_rows(catalog, peak_sample)
+    if (!NROW(peak_rows)) return(div(class = "muted small-note", "No scored MACS2 peak file is available for this sample."))
+    peak_path <- selected_choice(input$genome_browser_sample_peak_file, peak_rows$path, peak_rows$path[[1]])
+    navigation <- cutrun_individual_peak_navigation(
+      peak_path, max_peaks = 250L,
+      score_preference = c("signalValue", "qValue", "pValue", "score", "V4"),
+      locus_flank = 500L
+    )
+    if (!length(navigation$peaks)) return(div(class = "muted small-note", "This peak file contains no called intervals."))
+    peak_loci <- c("Choose a peak..." = "", navigation$peaks)
+    selected_locus <- as.character(input$genome_browser_sample_peak_interval %||% "")
+    if (!selected_locus %in% unname(peak_loci)) selected_locus <- unname(navigation$peaks)[[1]]
+    tagList(
+      selectizeInput(
+        "genome_browser_sample_peak_interval", "Peak interval",
+        choices = peak_loci, selected = selected_locus,
+        options = list(
+          placeholder = "Strongest called peaks first",
+          maxOptions = 250L,
+          dropdownParent = "body"
+        )
+      ),
+      div(
+        class = "muted small-note",
+        "The browser loads the selected sample's CPM bigWig with this peak file. ",
+        format(navigation$total, big.mark = ","), " called peak", if (navigation$total == 1L) "" else "s",
+        "; showing the top ", format(navigation$shown, big.mark = ","),
+        " ranked by ", navigation$ranking %||% "MACS2 signalValue", "."
+      )
+    )
+  })
   observeEvent(input$genome_browser_mode, {
     mode <- trimws(as.character(input$genome_browser_mode %||% ""))
     if (nzchar(mode)) genome_browser_mode_state(mode)
@@ -17458,7 +17489,7 @@ server <- function(input, output, session) {
   send_genome_browser <- function(comparison_override = "", samples_override = NULL, locus_override = "", mode_override = "") {
     p <- current_project()
     if (!is_atac_project(p) && !is_chip_project(p) && !is_cutrun_project(p)) return(invisible(NULL))
-    catalog <- genome_browser_track_catalog(p)
+    catalog <- genome_browser_catalog()
     if (!NROW(catalog)) {
       session$sendCustomMessage("codespring-igv-load", list(
         elementId = "codespring_igv_browser",
@@ -17714,7 +17745,7 @@ server <- function(input, output, session) {
   observeEvent(list(input$genome_browser_cutrun_tool, input$genome_browser_cutrun_parameters), {
     p <- current_project()
     if (!is_cutrun_project(p) || !identical(genome_browser_mode_state(), "cutrun_peak")) return(invisible(NULL))
-    catalog <- genome_browser_track_catalog(p)
+    catalog <- genome_browser_catalog()
     target_sample <- trimws(as.character(input$genome_browser_cutrun_sample %||% ""))
     matched_igg <- cutrun_control_sample_for(p, target_sample)
     modes <- cutrun_browser_signal_modes(catalog, unique(c(target_sample, if (nzchar(matched_igg)) matched_igg)))
@@ -17745,7 +17776,7 @@ server <- function(input, output, session) {
     hit <- match(comparison_id, comparisons$id)
     if (is.na(hit)) return(invisible(NULL))
     comparison <- comparisons[hit, , drop = FALSE]
-    catalog <- genome_browser_track_catalog(p)
+    catalog <- genome_browser_catalog()
     available <- comparison$samples[[1]]
     available <- available[available %in% unique(as.character(catalog$sample))]
     direction <- selected_choice(input$genome_browser_peak_direction, c("all", "comparison", "reference"), "all")
@@ -17774,7 +17805,7 @@ server <- function(input, output, session) {
     if (is.na(hit)) return(invisible(NULL))
     comparison <- comparisons[hit, , drop = FALSE]
     available <- comparison$samples[[1]]
-    catalog <- genome_browser_track_catalog(p)
+    catalog <- genome_browser_catalog()
     available <- available[available %in% unique(as.character(catalog$sample))]
     navigation <- genome_browser_comparison_navigation(
       comparison$id[[1]], project = p, max_peaks = 200L, direction = direction
@@ -17786,7 +17817,14 @@ server <- function(input, output, session) {
     send_genome_browser(comparison_override = comparison$id[[1]], samples_override = available, locus_override = top_peak)
   }, ignoreInit = TRUE)
   observeEvent(input$load_genome_browser, send_genome_browser(), ignoreInit = TRUE)
-  observeEvent(input$genome_browser_ready, send_genome_browser(), ignoreInit = TRUE)
+  observeEvent(input$genome_browser_ready, {
+    p <- current_project()
+    if (
+      is_atac_project(p) && identical(genome_browser_mode_state(), "sample_peak") &&
+      is.null(input$genome_browser_sample_peak_sample)
+    ) return(invisible(NULL))
+    send_genome_browser()
+  }, ignoreInit = TRUE)
   output$atac_diffbind_dir_ui <- renderUI({
     progress_refresh(); root <- file.path(current_project()$data_dir, "diffbind"); dirs <- if (dir.exists(root)) list.dirs(root, recursive = FALSE, full.names = TRUE) else character(0); dirs <- dirs[vapply(dirs, diffbind_comparison_complete, logical(1))]
     if (!length(dirs)) return(div(class = "empty-box", "No DiffBind comparison found yet.")); selectInput("atac_diffbind_dir", "Comparison", choices = stats::setNames(dirs, basename(dirs)), selected = selected_choice(input$atac_diffbind_dir, dirs, dirs[[1]]), selectize = FALSE)

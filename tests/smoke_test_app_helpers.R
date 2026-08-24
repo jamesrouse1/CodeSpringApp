@@ -115,9 +115,11 @@ assert(
   "CUT&RUN DiffBind Results Explorer exposes the contrast-specific differential-peak PCA"
 )
 assert(
-  grepl("observeEvent(input$genome_browser_ready, send_genome_browser()", server_source, fixed = TRUE) &&
+  grepl("observeEvent(input$genome_browser_ready, {", server_source, fixed = TRUE) &&
+    grepl("is.null(input$genome_browser_sample_peak_sample)", server_source, fixed = TRUE) &&
+    grepl("send_genome_browser()", server_source, fixed = TRUE) &&
     grepl("genome_browser_mode_state", server_source, fixed = TRUE),
-  "genome browser uses immediate loading while preserving the selected browser mode"
+  "genome browser loads immediately after lightweight ATAC controls while preserving the selected browser mode"
 )
 assert(
   any(grepl("window.codespringIgvSignature === signature", runtime_text, fixed = TRUE)) &&
@@ -872,6 +874,13 @@ assert(
     !grepl("For CUT&RUN, Individual sample peak mode", atac_ui_text, fixed = TRUE) &&
     !grepl('output$genome_browser_controls_ui <- renderUI({\n    req(identical(input$web_main_tabs', server_source, fixed = TRUE),
   "shared genome browser uses assay-neutral guidance and renders controls in completed-results/read-only layouts"
+)
+assert(
+  grepl("genome_browser_catalog <- reactive", server_source, fixed = TRUE) &&
+    grepl('uiOutput("genome_browser_sample_peak_navigation_ui")', server_source, fixed = TRUE) &&
+    grepl("output$genome_browser_sample_peak_navigation_ui <- renderUI", server_source, fixed = TRUE) &&
+    grepl("is.null(input$genome_browser_sample_peak_sample)", server_source, fixed = TRUE),
+  "ATAC genome-browser track discovery is cached and lightweight sample/file controls render before peak ranking and browser loading"
 )
 atac_signal_position <- regexpr("Signal &amp; Peaks", atac_ui_text, fixed = TRUE)[[1]]
 atac_browser_position <- regexpr("Genome Browser", atac_ui_text, fixed = TRUE)[[1]]
