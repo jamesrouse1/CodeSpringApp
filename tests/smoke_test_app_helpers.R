@@ -233,12 +233,73 @@ assert(
   grepl("setup-path-preview", app_text, fixed = TRUE) &&
     grepl('`data-path-source` = "new_design_matrix_path"', app_text, fixed = TRUE) &&
     grepl('`data-path-source` = "new_results_root"', app_text, fixed = TRUE) &&
-    grepl("fastq-path-layout-open", app_text, fixed = TRUE) &&
+    grepl("setup-sidebar-wide", app_text, fixed = TRUE) &&
     grepl("cslSyncFastqPathUi", app_text, fixed = TRUE) &&
     grepl("var setupTabActive", app_text, fixed = TRUE) &&
-    grepl("showWideSidebar = setupTabActive", app_text, fixed = TRUE),
-  "raw FASTQ setup exposes a scrollable full-path preview and widens the sidebar only on the Setup tab"
+    grepl("showWideSidebar = setupTabActive && $('#new_project_ui:visible').length > 0", app_text, fixed = TRUE),
+  "new-project setup exposes scrollable full-path previews and widens the sidebar only on the Setup tab"
 )
+assert(
+  grepl('textInput("new_results_root", "Results output storage location", value = DEFAULT_RESULTS_ROOT', app_text, fixed = TRUE) &&
+    grepl('choices = c("Seurat" = "seurat", "Scanpy" = "scanpy")', app_text, fixed = TRUE) &&
+    grepl('updateSelectInput(session, "new_scrna_engine", selected = "seurat")', app_text, fixed = TRUE),
+  "single-cell setup visibly defaults to the current user's results folder and the PBMC example defaults to Seurat"
+)
+pbmc_defaults <- app_env$scrna_pbmc3k_tutorial_settings()
+assert(
+  identical(pbmc_defaults$max_features, 2500L) &&
+    identical(pbmc_defaults$doublet_method, "auto") &&
+    isTRUE(pbmc_defaults$remove_doublets) &&
+    grepl('numericInput("scrna_max_features", "Maximum detected genes per cell (0 = disabled)"', app_text, fixed = TRUE) &&
+    !grepl('tags$summary("Advanced QC setting")', app_text, fixed = TRUE),
+  "the PBMC example exposes its maximum-gene filter directly and removes predicted doublets by default"
+)
+pbmc_manifest_dir <- tempfile("pbmc_example_")
+dir.create(file.path(pbmc_manifest_dir, "manifest"), recursive = TRUE)
+pbmc_manifest <- file.path(pbmc_manifest_dir, "manifest", "scrna_samples.tsv")
+utils::write.table(data.frame(sample_id = "pbmc3k", input_path = app_env$SCRNA_PBMC3K_EXAMPLE_DIR), pbmc_manifest, sep = "\t", row.names = FALSE, quote = FALSE)
+pbmc_project <- list(data_dir = pbmc_manifest_dir, design_matrix_path = pbmc_manifest, scrna_input_manifest = pbmc_manifest)
+pbmc_local_umap <- app_env$scrna_umap_focus_settings(pbmc_project, "local")
+pbmc_global_umap <- app_env$scrna_umap_focus_settings(pbmc_project, "global")
+assert(
+  identical(pbmc_local_umap, list(n_neighbors = 20L, min_dist = 0.3, n_pcs = 10L)) &&
+    identical(pbmc_global_umap, list(n_neighbors = 30L, min_dist = 0.6, n_pcs = 10L)) &&
+    grepl('if (is.null(tutorial)) fluidRow(', app_text, fixed = TRUE) &&
+    grepl('tutorial_umap$n_neighbors %||% input$scrna_n_neighbors', app_text, fixed = TRUE),
+  "the PBMC example hides manual embedding fields and applies distinct Local/Global presets"
+)
+dir.create(file.path(pbmc_manifest_dir, "scrna", "tables"), recursive = TRUE)
+utils::write.table(
+  data.frame(cluster = c("0", "1"), `Naive CD4 T` = c(0.8, 0.1), `B cells` = c(0.2, 0.9), check.names = FALSE),
+  file.path(pbmc_manifest_dir, "scrna", "tables", "marker_annotation_cluster_scores.tsv"),
+  sep = "\t", row.names = FALSE, quote = FALSE
+)
+suggestions <- app_env$scrna_marker_suggestion_table(pbmc_project)
+assert(
+  identical(suggestions$top_suggestion, c("Naive CD4 T", "B cells")) &&
+    grepl("Automatically use the highest normalized average per cluster", app_text, fixed = TRUE) &&
+    grepl("Review suggestions and label clusters manually", app_text, fixed = TRUE) &&
+    grepl('marker_species = "auto"', app_text, fixed = TRUE),
+  "the PBMC example supports automatic species detection and ranked automatic/manual cluster annotation"
+)
+utils::write.table(
+  data.frame(cell = c("cell_A", "cell_B"), UMAP_1 = c(0, 1), UMAP_2 = c(1, 0), cluster = c("0", "1")),
+  file.path(pbmc_manifest_dir, "scrna", "tables", "umap_coordinates.tsv"),
+  sep = "\t", row.names = FALSE, quote = FALSE
+)
+manual_map <- app_env$write_scrna_manual_cluster_mapping(pbmc_project, "cell_type", c(`0` = "Naive CD4 T", `1` = "B cells"))
+manual_values <- utils::read.delim(manual_map, stringsAsFactors = FALSE)
+assert(identical(manual_values$cell_type, c("Naive CD4 T", "B cells")), "manual PBMC cluster choices are expanded to a pipeline-ready per-cell mapping")
+de_dir <- file.path(pbmc_manifest_dir, "scrna", "differential_expression", "B_cells_vs_Naive_CD4_T", "global")
+dir.create(de_dir, recursive = TRUE)
+writeLines("gene\tavg_log2FC\tp_val\nCD79A\t1.2\t0.001", file.path(de_dir, "cell_level_Wilcoxon__B_cells_vs_Naive_CD4_T__global.tsv"))
+de_catalog <- app_env$scrna_completed_de_comparison_catalog(pbmc_project)
+assert(
+  NROW(de_catalog) == 1L && identical(de_catalog$method[[1]], "Cell-level Wilcoxon") &&
+    grepl('selectInput("scrna_pathway_de_file", "Differential-expression comparison"', app_text, fixed = TRUE),
+  "pathway analysis lists every completed cell-level or pseudobulk comparison"
+)
+unlink(pbmc_manifest_dir, recursive = TRUE)
 assert(
   grepl("rna_overview_sample_progress_ui", server_source, fixed = TRUE) &&
     grepl('"Results Explorer"', server_source, fixed = TRUE),
@@ -1907,7 +1968,7 @@ assert(
 assert(
   grepl("scrna_annotation_method_intent", app_text, fixed = TRUE) &&
     grepl("click.cslAnnotationIntent_", app_text, fixed = TRUE) &&
-    grepl("annotation_method <- annotation_ui$method %||% input$scrna_annotation_method", app_text, fixed = TRUE),
+    grepl('annotation_method <- if (pbmc_example) "markers" else annotation_ui$method %||% input$scrna_annotation_method', app_text, fixed = TRUE),
   "annotation method and source persistence is driven by explicit user intent rather than dynamic-control recreation"
 )
 assert(
