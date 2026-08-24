@@ -294,13 +294,28 @@ utils::write.table(
   file.path(pbmc_manifest_dir, "scrna", "tables", "cell_metadata.tsv"),
   sep = "\t", row.names = FALSE, quote = FALSE
 )
+utils::write.table(
+  data.frame(signature = c("CD8 T", "B cells"), metadata_column = c("signature__CD8_T", "signature__B_cells"), genes_requested = 5L, genes_found = 5L, coverage = 1),
+  file.path(pbmc_manifest_dir, "scrna", "tables", "signature_gene_coverage.tsv"),
+  sep = "\t", row.names = FALSE, quote = FALSE
+)
+utils::write.table(
+  data.frame(cell = c("cell_A", "cell_B"), signature__CD8_T = c(0.8, 0.1), signature__B_cells = c(0.1, 0.9), check.names = FALSE),
+  file.path(pbmc_manifest_dir, "scrna", "tables", "signature_scores_per_cell.tsv"),
+  sep = "\t", row.names = FALSE, quote = FALSE
+)
+signature_choices <- app_env$scrna_signature_score_choices(pbmc_project)
 assert(
   "cell_type" %in% app_env$scrna_all_metadata_columns(pbmc_project) &&
     "cell_type" %in% app_env$scrna_de_population_fields(pbmc_project, app_env$scrna_all_metadata_columns(pbmc_project)) &&
+    identical(app_env$scrna_default_b_cell_signature(signature_choices), "signature__B_cells") &&
     grepl('signature_species = "auto"', app_text, fixed = TRUE) &&
     !grepl('selectInput("scrna_signature_species"', app_text, fixed = TRUE) &&
     grepl('Group marker figures by', app_text, fixed = TRUE) &&
-    grepl('(_panel_[0-9]+)?\\\\.png', app_text, fixed = TRUE),
+    grepl('(_panel_[0-9]+)?\\\\.png', app_text, fixed = TRUE) &&
+    grepl('requested_gene <- "CD8A"', app_text, fixed = TRUE) &&
+    grepl('default_group <- if ("cell_type" %in% group_choices)', app_text, fixed = TRUE) &&
+    grepl('scrna_run_signature_umap_plot', app_text, fixed = TRUE),
   "completed annotations feed cell-type differential expression and signature species is detected automatically"
 )
 manual_map <- app_env$write_scrna_manual_cluster_mapping(pbmc_project, "cell_type", c(`0` = "Naive CD4 T", `1` = "B cells"))

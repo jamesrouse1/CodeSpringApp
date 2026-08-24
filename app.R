@@ -11954,6 +11954,27 @@ scrna_all_metadata_columns <- function(project, view = "integrated") {
   unique(c(scrna_embedding_columns(project, view), scrna_embedding_columns(project, "integrated"), auxiliary_columns))
 }
 
+scrna_signature_score_choices <- function(project) {
+  columns <- grep("^signature__", scrna_all_metadata_columns(project), value = TRUE)
+  if (!length(columns)) return(character(0))
+  coverage <- safe_read_table(file.path(scrna_output_dir(project), "tables", "signature_gene_coverage.tsv"), 10000)
+  labels <- gsub("_+", " ", gsub("^signature__", "", columns))
+  if (NROW(coverage) && all(c("signature", "metadata_column") %in% names(coverage))) {
+    lookup <- stats::setNames(trimws(as.character(coverage$signature)), trimws(as.character(coverage$metadata_column)))
+    matched <- unname(lookup[columns])
+    labels[!is.na(matched) & nzchar(matched)] <- matched[!is.na(matched) & nzchar(matched)]
+  }
+  stats::setNames(columns, make.unique(labels))
+}
+
+scrna_default_b_cell_signature <- function(choices) {
+  if (!length(choices)) return("")
+  labels <- gsub("[^a-z0-9]+", " ", tolower(names(choices)))
+  hit <- which(trimws(labels) %in% c("b cell", "b cells"))[1]
+  if (is.na(hit)) hit <- grep("(^| )b cells?( |$)", labels)[1]
+  if (is.na(hit)) unname(choices)[[1]] else unname(choices)[[hit]]
+}
+
 scrna_selected_embedding_view <- function(project, requested = "") {
   choices <- scrna_embedding_view_choices(project)
   if (!length(choices)) return("")
@@ -12070,6 +12091,8 @@ scrna_gene_select_input <- function(project, input_id, label, selected = "") {
       tags$p(class = "muted small-note", "The app is rebuilding the gene list from the existing processed object. You can also enter an exact gene symbol.")
     ))
   }
+  case_match <- match(tolower(selected), tolower(genes))
+  if (nzchar(selected) && !is.na(case_match)) selected <- genes[[case_match]]
   selectizeInput(
     input_id,
     label,
@@ -16239,7 +16262,7 @@ server <- function(input, output, session) {
         if (!reuse_existing || show_rebuild) tool_panel("Normalize & PCA", status, "Normalize retained cells, identify variable genes, scale, and calculate PCA. PCA outputs appear here as soon as this step finishes.", tagList(uiOutput("scrna_preprocess_settings_ui"), uiOutput("scrna_pca_output_ui")), "run_scrna_preprocess", "Run normalization & PCA", show_sample_progress = FALSE) else NULL,
         if (!reuse_existing || show_rebuild) tool_panel("UMAP & clustering", status, "Compare the uncorrected embedding first. For multiple inputs, optionally correct a technical batch; then calculate neighbors, UMAP, and clusters.", tagList(uiOutput("scrna_preintegration_umap_ui"), uiOutput("scrna_cluster_settings_ui"), uiOutput("scrna_umap_output_ui")), "run_scrna_cluster", "Run UMAP & clustering", show_sample_progress = FALSE) else NULL,
         tool_panel("Annotate & markers", status, "Use the project's saved post-UMAP object to add a named annotation metadata field.", uiOutput("scrna_annotation_settings_ui"), "run_scrna_annotate", "Run annotation", show_sample_progress = FALSE, button_ui = uiOutput("scrna_annotation_run_button_ui")),
-        tool_panel("Signature scoring", status, "Score one or more named gene signatures on normalized expression and store every score as reusable cell metadata in the processed object.", uiOutput("scrna_signature_settings_ui"), "run_scrna_score", "Run signature scoring", show_sample_progress = FALSE),
+        tool_panel("Signature scoring", status, "Score one or more named gene signatures on normalized expression and store every score as reusable cell metadata in the processed object.", tagList(uiOutput("scrna_signature_settings_ui"), uiOutput("scrna_run_signature_umap_ui")), "run_scrna_score", "Run signature scoring", show_sample_progress = FALSE),
         tool_panel("Differential expression", status, "Use pseudobulk DESeq2 when independent biological samples are available; one-sample projects instead offer exploratory cell-level comparisons between annotated populations.", uiOutput("scrna_differential_settings_ui"), "run_scrna_differential", "Run differential expression", show_sample_progress = FALSE),
         tool_panel("Pathway analysis", status, "Choose any completed differential-expression comparison and run ranked fgsea.", uiOutput("scrna_pathway_settings_ui"), "run_scrna_pathway", "Run pathway analysis", show_sample_progress = FALSE)
       ))
@@ -17067,6 +17090,44 @@ server <- function(input, output, session) {
       tags$p(class = "muted small-note", "At least two unique genes are required per signature. Missing genes are recorded in the output coverage table; signatures with no usable genes are rejected by the pipeline.")
     )
   })
+
+  output$scrna_run_signature_umap_ui <- renderUI({
+    scrna_signature_scores_stamp()
+    p <- current_project(); if (!is_scrna_project(p)) return(NULL)
+    choices <- scrna_signature_score_choices(p)
+    if (!length(choices)) return(NULL)
+    selected <- selected_choice(isolate(input$scrna_run_signature_umap), choices, scrna_default_b_cell_signature(choices))
+    tagList(
+      tags$hr(),
+      tags$h4("Signature-score UMAP"),
+      tags$p(class = "muted small-note", "Completed signature scores are shown on the final UMAP. Select any stored signature below."),
+      selectInput("scrna_run_signature_umap", "Signature", choices = choices, selected = selected, selectize = FALSE),
+      plotOutput("scrna_run_signature_umap_plot", height = "700px")
+    )
+  })
+
+  output$scrna_run_signature_umap_plot <- renderPlot({
+    scrna_signature_scores_stamp()
+    p <- current_project(); req(is_scrna_project(p))
+    score_column <- input$scrna_run_signature_umap %||% ""
+    req(nzchar(score_column))
+    choices <- scrna_signature_score_choices(p)
+    req(score_column %in% unname(choices))
+    x <- scrna_embedding_table(p, columns = score_column, max_points = 100000L)
+    req(NROW(x) > 0L, score_column %in% names(x))
+    x$score <- suppressWarnings(as.numeric(x[[score_column]]))
+    x <- x[is.finite(x$score), , drop = FALSE]
+    req(NROW(x) > 0L)
+    x <- x[order(x$score), , drop = FALSE]
+    label <- names(choices)[match(score_column, unname(choices))] %||% gsub("^signature__", "", score_column)
+    ggplot2::ggplot(x, ggplot2::aes(x = .data$UMAP_1, y = .data$UMAP_2, color = .data$score)) +
+      ggplot2::geom_point(size = scrna_embedding_auto_point_size(NROW(x)), alpha = 0.9, stroke = 0) +
+      ggplot2::scale_color_gradientn(colors = c("#DCE3EC", "#74A9CF", "#2B8CBE", "#7A0177"), name = "Module score") +
+      ggplot2::coord_equal() +
+      ggplot2::labs(title = paste0(label, " signature score"), subtitle = paste(format(NROW(x), big.mark = ","), "cells; higher-scoring cells are drawn last"), x = "UMAP 1", y = "UMAP 2") +
+      ggplot2::theme_classic(base_size = 13) +
+      ggplot2::theme(plot.title = ggplot2::element_text(face = "bold"), legend.position = "right")
+  }, res = 130)
 
   output$scrna_differential_settings_ui <- renderUI({
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
@@ -18536,7 +18597,8 @@ server <- function(input, output, session) {
     scrna_signature_scores_stamp()
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
     columns <- scrna_embedding_columns(p)
-    signatures <- grep("^signature__", columns, value = TRUE)
+    signature_choices <- scrna_signature_score_choices(p)
+    signatures <- unname(signature_choices)
     # Reference-transfer and post-hoc annotation labels may live in the
     # auxiliary per-cell metadata table rather than the original UMAP TSV.
     # scrna_embedding_table() joins those columns when requested, so expose
@@ -18557,13 +18619,15 @@ server <- function(input, output, session) {
     mode_choices <- c("Individual gene" = "gene")
     if (length(signatures)) mode_choices <- c(mode_choices, "Stored signature score" = "signature")
     mode <- selected_choice(isolate(input$scrna_violin_value_mode), mode_choices, "gene")
-    signature_choices <- stats::setNames(signatures, gsub("^signature__", "", signatures))
+    requested_gene <- trimws(as.character(isolate(input$scrna_violin_gene) %||% ""))
+    if (!nzchar(requested_gene)) requested_gene <- "CD8A"
+    default_group <- if ("cell_type" %in% group_choices) "cell_type" else if ("cluster" %in% group_choices) "cluster" else group_choices[[1]]
     facet_choices <- c("No facets" = "", stats::setNames(intersect(c("sample_id", "condition", "batch"), columns), intersect(c("sample_id", "condition", "batch"), columns)))
     tagList(
       fluidRow(
         column(3, radioButtons("scrna_violin_value_mode", "Show", choices = mode_choices, selected = mode, inline = FALSE)),
-        column(3, conditionalPanel("input.scrna_violin_value_mode == 'gene'", scrna_violin_gene_input(p, isolate(input$scrna_violin_gene))), conditionalPanel("input.scrna_violin_value_mode == 'signature'", selectInput("scrna_violin_signature", "Signature", choices = signature_choices, selected = selected_choice(isolate(input$scrna_violin_signature), signature_choices, if (length(signature_choices)) unname(signature_choices)[[1]] else ""), selectize = FALSE))),
-        column(3, selectInput("scrna_violin_group", "Separate violins by", choices = group_choices, selected = selected_choice(isolate(input$scrna_violin_group), group_choices, if ("cluster" %in% group_choices) "cluster" else group_choices[[1]]), selectize = FALSE)),
+        column(3, conditionalPanel("input.scrna_violin_value_mode == 'gene'", scrna_violin_gene_input(p, requested_gene)), conditionalPanel("input.scrna_violin_value_mode == 'signature'", selectInput("scrna_violin_signature", "Signature", choices = signature_choices, selected = selected_choice(isolate(input$scrna_violin_signature), signature_choices, scrna_default_b_cell_signature(signature_choices)), selectize = FALSE))),
+        column(3, selectInput("scrna_violin_group", "Separate violins by", choices = group_choices, selected = selected_choice(isolate(input$scrna_violin_group), group_choices, default_group), selectize = FALSE)),
         column(3, selectInput("scrna_violin_facet", "Optional facets", choices = facet_choices, selected = selected_choice(isolate(input$scrna_violin_facet), facet_choices, ""), selectize = FALSE))
       ),
       tags$p(class = "muted small-note", paste(if (length(signatures)) "Stored signatures are available because signature scoring has been completed. Gene violins use normalized expression from the processed object." else "Run Signature scoring to add reusable signature-score violins. Gene violins use normalized expression from the processed object.", "The y-axis ends at the 98th percentile of the displayed violin with the highest mean so rare extreme cells do not compress the distributions."))
