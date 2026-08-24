@@ -15428,7 +15428,7 @@ server <- function(input, output, session) {
   observe({
     fetchngs_mode <- is_fetchngs_analysis(input$analysis %||% "RNA-seq")
     fetchngs_tabs <- c("FetchNGS", "FetchNGS Outputs")
-    analysis_tabs <- c("Setup", "Design Matrix", "Run Pipeline", "Progress", "Results Explorer", "Logs", "Methods")
+    analysis_tabs <- c("Setup", "Samples & Design", "Run Pipeline", "Progress", "Results Explorer", "Logs", "Methods")
     current_tab <- input$web_main_tabs %||% ""
     if (fetchngs_mode) {
       lapply(fetchngs_tabs, function(tab) showTab("web_main_tabs", tab, session = session))
