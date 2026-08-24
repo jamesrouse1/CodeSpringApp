@@ -11835,6 +11835,33 @@ scrna_de_result_file_choices <- function(project, method = c("pseudobulk", "cell
   stats::setNames(files, labels)
 }
 
+scrna_pathway_result_file_choices <- function(project) {
+  root <- file.path(scrna_output_dir(project), "tables")
+  files <- if (dir.exists(root)) list.files(root, pattern = "^pathway_fgsea_ranked__.*\\.tsv$", full.names = TRUE) else character(0)
+  files <- sort(files[file.exists(files) & vapply(files, file_size_for, numeric(1)) > 0])
+  if (!length(files)) {
+    legacy <- file.path(root, "pathway_fgsea_ranked.tsv")
+    files <- legacy[file.exists(legacy) & file_size_for(legacy) > 0]
+  }
+  if (!length(files)) return(character(0))
+  stems <- sub("^pathway_fgsea_ranked__", "", sub("\\.tsv$", "", basename(files)))
+  labels <- gsub("__", " — ", stems, fixed = TRUE)
+  labels <- gsub("_", " ", labels, fixed = TRUE)
+  labels[basename(files) == "pathway_fgsea_ranked.tsv"] <- "Most recent pathway analysis"
+  stats::setNames(files, labels)
+}
+
+scrna_pathway_plot_for_result <- function(project, path) {
+  if (!nzchar(path) || !file.exists(path)) return("")
+  stem <- sub("^pathway_fgsea_ranked__", "", sub("\\.tsv$", "", basename(path)))
+  candidates <- c(
+    file.path(scrna_output_dir(project), "figures", paste0("pathway_fgsea_top20__", stem, ".png")),
+    file.path(scrna_output_dir(project), "figures", "pathway_fgsea_top20.png")
+  )
+  ready <- candidates[file.exists(candidates) & vapply(candidates, file_size_for, numeric(1)) > 0]
+  if (length(ready)) ready[[1]] else ""
+}
+
 scrna_completed_de_comparison_catalog <- function(project) {
   root <- file.path(scrna_output_dir(project), "differential_expression")
   files <- if (dir.exists(root)) list.files(root, pattern = "^(pseudobulk_DESeq2|cell_level_Wilcoxon)__.*\\.tsv$", recursive = TRUE, full.names = TRUE) else character(0)
@@ -12479,6 +12506,8 @@ scrna_results_explorer_ui <- function() {
       tabPanel("Violins", br(), h3("Expression Violins"), tags$p(class = "muted", "Compare normalized gene expression or stored signature scores across clusters, cell types, or other categorical metadata."), uiOutput("scrna_violin_controls_ui"), plotOutput("scrna_expression_violin", height = "680px"), downloadButton("download_scrna_expression_violin", "Download current violin", class = "btn-default")),
       tabPanel("Marker panels", br(), h3("Marker-list panels"), tags$p(class = "muted", "Use these to assess annotation evidence. Dot size is the fraction of cells expressing a marker and color is relative mean normalized expression within that marker. Heatmaps show the same expression summary without the prevalence encoding. Markers remain grouped by their supplied cell-type program."), uiOutput("scrna_marker_panel_ui")),
       tabPanel("Cluster markers", br(), h3("Top cluster-marker heatmap"), tags$p(class = "muted", "Created only when ‘Also calculate marker genes for every cluster’ was selected during annotation. One heatmap shows up to 10 positive markers for every cluster, ordered by cluster and effect size."), uiOutput("scrna_cluster_marker_heatmap_ui")),
+      tabPanel("Differential expression", br(), h3("Differential expression"), tags$p(class = "muted", "Inspect completed comparisons only. Use pseudobulk DESeq2 for replicated projects and cell-level Wilcoxon for exploratory comparisons within a single sample."), uiOutput("scrna_de_result_controls_ui"), table_output("scrna_de_result_table"), br(), tags$details(tags$summary("Completed comparison manifest"), table_output("scrna_de_manifest"))),
+      tabPanel("Pathway analysis", br(), h3("Ranked pathway analysis"), tags$p(class = "muted", "Inspect completed fgsea results, ranked from the matching differential-expression comparison."), uiOutput("scrna_pathway_result_controls_ui"), uiOutput("scrna_pathway_result_plot_ui"), br(), table_output("scrna_pathway_result_table")),
       tabPanel("QC", br(), h3("Quality Control"), uiOutput("scrna_qc_plot_ui"), br(), h4("QC summary by sample"), table_output("scrna_qc_summary"), br(), h4("Doublet calls by capture"), table_output("scrna_doublet_summary"), br(), tags$details(tags$summary("Individual doublet calls"), table_output("scrna_doublet_calls")))
     ))
   ))
@@ -15494,7 +15523,9 @@ server <- function(input, output, session) {
       files <- if (dir.exists(root)) list.files(root, pattern = "\\.tsv$", recursive = TRUE, full.names = TRUE) else character(0)
       files <- unique(c(
         files,
-        file.path(out_dir, "tables", c("differential_jobs.tsv", "differential_results_manifest.tsv", "cell_level_differential_expression.tsv", "pseudobulk_differential_expression.tsv"))
+        file.path(out_dir, "tables", c("differential_jobs.tsv", "differential_results_manifest.tsv", "cell_level_differential_expression.tsv", "pseudobulk_differential_expression.tsv")),
+        if (dir.exists(file.path(out_dir, "tables"))) list.files(file.path(out_dir, "tables"), pattern = "^pathway_fgsea_ranked.*\\.tsv$", full.names = TRUE) else character(0),
+        if (dir.exists(file.path(out_dir, "figures"))) list.files(file.path(out_dir, "figures"), pattern = "^pathway_fgsea_top20.*\\.png$", full.names = TRUE) else character(0)
       ))
       files <- files[file.exists(files)]
       if (!length(files)) return("")
@@ -17789,16 +17820,16 @@ server <- function(input, output, session) {
         harmony_theta = input$scrna_harmony_theta %||% 2,
         harmony_lambda = input$scrna_harmony_lambda %||% 1,
         harmony_max_iter = input$scrna_harmony_max_iter %||% 20,
-        marker_file = if (identical(annotation_method, "markers")) {
+        marker_file = if (identical(annotation_method, "markers") || nzchar(manual_cluster_mapping)) {
           selected_marker_file <- input$scrna_marker_file %||% ""
           if (pbmc_example && identical(input$scrna_marker_source %||% "server", "server") && !nzchar(trimws(selected_marker_file))) SCRNA_PBMC3K_MARKERS_FILE else selected_marker_file
         } else "",
         celltype_file = if (nzchar(manual_cluster_mapping)) manual_cluster_mapping else if (identical(annotation_method, "mapping")) input$scrna_celltype_file %||% "" else "",
         reference_file = if (use_retained_reference) inspected_reference$reference_file else if (identical(annotation_method, "reference")) input$scrna_reference_file %||% "" else "",
-        marker_upload = if (identical(annotation_method, "markers")) input$scrna_marker_upload else NULL,
+        marker_upload = if (identical(annotation_method, "markers") || nzchar(manual_cluster_mapping)) input$scrna_marker_upload else NULL,
         celltype_upload = if (identical(annotation_method, "mapping")) input$scrna_celltype_upload else NULL,
         reference_upload = if (identical(annotation_method, "reference") && !use_retained_reference) input$scrna_reference_upload else NULL,
-        marker_source = if (identical(annotation_method, "markers")) input$scrna_marker_source %||% (if (pbmc_example) "server" else "manual") else "server",
+        marker_source = if (identical(annotation_method, "markers") || nzchar(manual_cluster_mapping)) input$scrna_marker_source %||% (if (pbmc_example) "server" else "manual") else "server",
         celltype_source = if (identical(annotation_method, "mapping")) input$scrna_celltype_source %||% "server" else "server",
         reference_source = if (use_retained_reference) "server" else if (identical(annotation_method, "reference")) reference_source else "server",
         reference_label_column = if (identical(annotation_method, "reference")) input$scrna_reference_label_column %||% "" else "",
@@ -18410,6 +18441,7 @@ server <- function(input, output, session) {
     safe_read_table(file.path(scrna_output_dir(p), "tables", "cell_level_differential_expression.tsv"), 100000)
   }, page_length = 50, scroll_y = "520px")
   output$scrna_de_result_controls_ui <- renderUI({
+    scrna_de_results_stamp()
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
     method <- input$scrna_de_result_method %||% "pseudobulk"
     choices <- scrna_de_result_file_choices(p, if (identical(method, "cell")) "cell" else "pseudobulk")
@@ -18441,6 +18473,30 @@ server <- function(input, output, session) {
     p <- current_project(); if (!is_scrna_project(p)) return(data.frame())
     safe_read_table(file.path(scrna_output_dir(p), "tables", "pathway_fgsea_ranked.tsv"), 100000)
   }, page_length = 50, scroll_y = "520px")
+  output$scrna_pathway_result_controls_ui <- renderUI({
+    scrna_de_results_stamp()
+    p <- current_project(); if (!is_scrna_project(p)) return(NULL)
+    choices <- scrna_pathway_result_file_choices(p)
+    if (!length(choices)) return(div(class = "empty-box", "No completed pathway analysis is available yet."))
+    selected <- selected_choice(input$scrna_pathway_result_file, choices, unname(choices)[[1]])
+    selectInput("scrna_pathway_result_file", "Comparison and pathway database", choices = choices, selected = selected, selectize = FALSE)
+  })
+  output$scrna_pathway_result_plot_ui <- renderUI({
+    scrna_de_results_stamp()
+    p <- current_project(); if (!is_scrna_project(p)) return(NULL)
+    choices <- scrna_pathway_result_file_choices(p)
+    path <- selected_choice(input$scrna_pathway_result_file, choices, if (length(choices)) unname(choices)[[1]] else "")
+    plot_path <- scrna_pathway_plot_for_result(p, path)
+    if (!nzchar(plot_path)) return(NULL)
+    image_or_file_ui(plot_path, "720px")
+  })
+  output$scrna_pathway_result_table <- render_csl_table({
+    p <- current_project(); if (!is_scrna_project(p)) return(data.frame())
+    choices <- scrna_pathway_result_file_choices(p)
+    path <- selected_choice(input$scrna_pathway_result_file, choices, if (length(choices)) unname(choices)[[1]] else "")
+    if (!nzchar(path)) return(data.frame())
+    safe_read_table(path, 100000)
+  }, page_length = 50, scroll_y = "560px")
   output$scrna_input_processing <- render_csl_table({
     p <- current_project(); if (!is_scrna_project(p)) return(data.frame())
     safe_read_table(file.path(scrna_output_dir(p), "tables", "input_processing_detected.tsv"), 10000)

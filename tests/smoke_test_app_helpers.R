@@ -2493,5 +2493,17 @@ assert(
     grepl("output$download_scrna_processed_object <- downloadHandler", server_source, fixed = TRUE),
   "the three-tab scRNA explorer exposes the processed-object download section and handler"
 )
+assert(
+  grepl('tabPanel("Differential expression"', app_text, fixed = TRUE) &&
+    grepl('uiOutput("scrna_de_result_controls_ui")', app_text, fixed = TRUE) &&
+    grepl('tabPanel("Pathway analysis"', app_text, fixed = TRUE) &&
+    grepl('uiOutput("scrna_pathway_result_controls_ui")', app_text, fixed = TRUE) &&
+    grepl("scrna_pathway_result_file_choices <- function", app_text, fixed = TRUE),
+  "the scRNA results explorer exposes completed differential-expression and ranked-pathway result sections"
+)
+assert(
+  grepl('identical(annotation_method, "markers") || nzchar(manual_cluster_mapping)', app_text, fixed = TRUE),
+  "manual scRNA cell-type assignments retain their marker list for cluster and cell-type evidence panels"
+)
 
 cat("CodeSpringApp fake-data helper smoke tests passed.\n")
