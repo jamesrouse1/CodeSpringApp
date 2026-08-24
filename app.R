@@ -13539,6 +13539,7 @@ server <- function(input, output, session) {
     sample_progress_state(data.frame())
     project_status_state(data.frame())
     submission_holds(list())
+    genome_browser_mode_state("")
     p <- current_project()
     run_cards_refresh(Sys.time())
     updateTextInput(session, "metadata_cols", value = paste(project_metadata_cols(p), collapse = ", "))
@@ -17066,6 +17067,10 @@ server <- function(input, output, session) {
     requested_mode <- if (nzchar(remembered_mode)) remembered_mode else isolate(input$genome_browser_mode)
     mode <- selected_choice(requested_mode, mode_choices, default_mode)
     if (!identical(remembered_mode, mode)) genome_browser_mode_state(mode)
+    # Replacing a dynamic selectInput briefly emits its previous DOM value.
+    # Freeze that programmatic update for this flush so it cannot be mistaken
+    # for a user click and oscillate between browser modes.
+    freezeReactiveValue(input, "genome_browser_mode")
     samples <- unique(as.character(catalog$sample))
     design_order <- project_samples(p)
     samples <- unique(c(design_order[design_order %in% samples], sort(setdiff(samples, design_order))))
@@ -17241,7 +17246,7 @@ server <- function(input, output, session) {
   observeEvent(input$genome_browser_mode, {
     mode <- trimws(as.character(input$genome_browser_mode %||% ""))
     if (nzchar(mode)) genome_browser_mode_state(mode)
-  }, ignoreInit = FALSE, priority = 1000)
+  }, ignoreInit = TRUE, priority = 1000)
   observeEvent(input$genome_browser_gene, {
     gene <- trimws(as.character(input$genome_browser_gene %||% ""))
     if (!nzchar(gene)) return(invisible(NULL))

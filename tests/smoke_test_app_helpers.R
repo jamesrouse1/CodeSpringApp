@@ -132,8 +132,14 @@ browser_controls_source <- sub(
 )
 assert(
   !grepl("progress_refresh()", browser_controls_source, fixed = TRUE) &&
-    grepl("if (nzchar(remembered_mode)) remembered_mode else isolate(input$genome_browser_mode)", browser_controls_source, fixed = TRUE),
-  "the genome-browser controls are not rebuilt by the one-second job timer and preserve the canonical browser mode"
+    grepl("if (nzchar(remembered_mode)) remembered_mode else isolate(input$genome_browser_mode)", browser_controls_source, fixed = TRUE) &&
+    grepl('freezeReactiveValue(input, "genome_browser_mode")', browser_controls_source, fixed = TRUE),
+  "genome-browser controls avoid timer rebuilds and freeze programmatic mode changes"
+)
+assert(
+  grepl('observeEvent(input$genome_browser_mode,', app_text, fixed = TRUE) &&
+    grepl('}, ignoreInit = TRUE, priority = 1000)', app_text, fixed = TRUE),
+  "only deliberate post-initialization browser-mode changes update the saved mode"
 )
 assert(
   grepl("genome_browser_comparison_show_peaks", server_source, fixed = TRUE),
