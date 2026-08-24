@@ -11836,16 +11836,26 @@ scrna_de_result_file_choices <- function(project, method = c("pseudobulk", "cell
 
 scrna_completed_de_comparison_catalog <- function(project) {
   root <- file.path(scrna_output_dir(project), "differential_expression")
-  if (!dir.exists(root)) return(data.frame(label = character(), path = character(), method = character(), stringsAsFactors = FALSE))
-  files <- list.files(root, pattern = "^(pseudobulk_DESeq2|cell_level_Wilcoxon)__.*\\.tsv$", recursive = TRUE, full.names = TRUE)
+  files <- if (dir.exists(root)) list.files(root, pattern = "^(pseudobulk_DESeq2|cell_level_Wilcoxon)__.*\\.tsv$", recursive = TRUE, full.names = TRUE) else character(0)
+  # Older completed runs also wrote one analysis-ready global table.  Keep it
+  # selectable when a structured comparison file is absent, but never show a
+  # duplicate when the newer comparison-specific result is available.
+  structured_cell <- any(grepl("^cell_level_Wilcoxon__", basename(files)))
+  structured_pseudobulk <- any(grepl("^pseudobulk_DESeq2__", basename(files)))
+  legacy <- c(
+    if (!structured_cell) file.path(scrna_output_dir(project), "tables", "cell_level_differential_expression.tsv") else character(0),
+    if (!structured_pseudobulk) file.path(scrna_output_dir(project), "tables", "pseudobulk_differential_expression.tsv") else character(0)
+  )
+  files <- c(files, legacy)
   files <- sort(unique(files[file.exists(files) & vapply(files, file_size_for, numeric(1)) > 0]))
   if (!length(files)) return(data.frame(label = character(), path = character(), method = character(), stringsAsFactors = FALSE))
-  root_norm <- normalizePath(root, winslash = "/", mustWork = FALSE)
+  root_norm <- normalizePath(scrna_output_dir(project), winslash = "/", mustWork = FALSE)
   paths <- normalizePath(files, winslash = "/", mustWork = FALSE)
   relative <- substring(paths, nchar(root_norm) + 2L)
-  method <- ifelse(grepl("cell_level_Wilcoxon", basename(paths)), "Cell-level Wilcoxon", "Pseudobulk DESeq2")
+  method <- ifelse(grepl("cell_level_Wilcoxon|cell_level_differential_expression", basename(paths)), "Cell-level Wilcoxon", "Pseudobulk DESeq2")
   comparison <- sub("^(pseudobulk_DESeq2|cell_level_Wilcoxon)__", "", basename(paths))
   comparison <- sub("\\.tsv$", "", comparison)
+  comparison[comparison %in% c("cell_level_differential_expression", "pseudobulk_differential_expression")] <- "Global comparison"
   comparison <- gsub("__", " — ", comparison, fixed = TRUE)
   comparison <- gsub("_", " ", comparison, fixed = TRUE)
   data.frame(label = paste0(comparison, " (", method, ")"), path = paths, method = method, relative = relative, stringsAsFactors = FALSE)
@@ -15438,6 +15448,28 @@ server <- function(input, output, session) {
     },
     valueFunc = function() TRUE
   )
+  scrna_de_results_stamp <- reactivePoll(
+    intervalMillis = PROGRESS_REFRESH_MS,
+    session = session,
+    checkFunc = function() {
+      p <- isolate(current_project())
+      if (!is_scrna_project(p)) return("")
+      out_dir <- scrna_output_dir(p)
+      root <- file.path(out_dir, "differential_expression")
+      files <- if (dir.exists(root)) list.files(root, pattern = "\\.tsv$", recursive = TRUE, full.names = TRUE) else character(0)
+      files <- unique(c(
+        files,
+        file.path(out_dir, "tables", c("differential_jobs.tsv", "differential_results_manifest.tsv", "cell_level_differential_expression.tsv", "pseudobulk_differential_expression.tsv"))
+      ))
+      files <- files[file.exists(files)]
+      if (!length(files)) return("")
+      paste(vapply(sort(files), function(path) {
+        info <- file.info(path)
+        paste(normalizePath(path, winslash = "/", mustWork = FALSE), info$size[[1]], as.numeric(info$mtime[[1]]), sep = "@")
+      }, character(1)), collapse = ";")
+    },
+    valueFunc = function() TRUE
+  )
   scrna_marker_suggestions_stamp <- reactivePoll(
     intervalMillis = PROGRESS_REFRESH_MS,
     session = session,
@@ -17215,6 +17247,7 @@ server <- function(input, output, session) {
   })
 
   output$scrna_pathway_settings_ui <- renderUI({
+    scrna_de_results_stamp()
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
     comparisons <- scrna_completed_de_comparison_catalog(p)
     if (!NROW(comparisons)) return(div(class = "empty-box", "Run at least one differential-expression comparison first. Completed comparisons will appear here automatically."))

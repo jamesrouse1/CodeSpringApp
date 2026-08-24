@@ -340,8 +340,19 @@ writeLines("gene\tavg_log2FC\tp_val\nCD79A\t1.2\t0.001", file.path(de_dir, "cell
 de_catalog <- app_env$scrna_completed_de_comparison_catalog(pbmc_project)
 assert(
   NROW(de_catalog) == 1L && identical(de_catalog$method[[1]], "Cell-level Wilcoxon") &&
-    grepl('selectInput("scrna_pathway_de_file", "Differential-expression comparison"', app_text, fixed = TRUE),
+    grepl('selectInput("scrna_pathway_de_file", "Differential-expression comparison"', app_text, fixed = TRUE) &&
+    grepl('scrna_de_results_stamp()', app_text, fixed = TRUE),
   "pathway analysis lists every completed cell-level or pseudobulk comparison"
+)
+legacy_de <- file.path(pbmc_manifest_dir, "scrna", "tables", "cell_level_differential_expression.tsv")
+dir.create(dirname(legacy_de), recursive = TRUE, showWarnings = FALSE)
+writeLines("gene\tavg_log2FC\tp_val\nCD79A\t1.2\t0.001", legacy_de)
+assert(NROW(app_env$scrna_completed_de_comparison_catalog(pbmc_project)) == 1L, "the consolidated DE fallback is hidden when a comparison-specific result exists")
+unlink(de_dir, recursive = TRUE)
+legacy_catalog <- app_env$scrna_completed_de_comparison_catalog(pbmc_project)
+assert(
+  NROW(legacy_catalog) == 1L && identical(legacy_catalog$path[[1]], normalizePath(legacy_de, winslash = "/", mustWork = TRUE)),
+  "older consolidated scRNA DE results remain available for pathway analysis"
 )
 unlink(pbmc_manifest_dir, recursive = TRUE)
 assert(
