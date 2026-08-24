@@ -342,13 +342,17 @@ assert(identical(manual_values$cell_type, c("Naive CD4 T", "B cells")), "manual 
 de_dir <- file.path(pbmc_manifest_dir, "scrna", "differential_expression", "B_cells_vs_Naive_CD4_T", "global")
 dir.create(de_dir, recursive = TRUE)
 writeLines("gene\tavg_log2FC\tp_val\nCD79A\t1.2\t0.001", file.path(de_dir, "cell_level_Wilcoxon__B_cells_vs_Naive_CD4_T__global.tsv"))
+writeBin(as.raw(c(137, 80, 78, 71)), file.path(de_dir, "volcano__cell_level_Wilcoxon__B_cells_vs_Naive_CD4_T__global.png"))
+writeBin(as.raw(c(137, 80, 78, 71)), file.path(de_dir, "heatmap__cell_level_Wilcoxon__B_cells_vs_Naive_CD4_T__global.png"))
 de_catalog <- app_env$scrna_completed_de_comparison_catalog(pbmc_project)
+de_plots <- app_env$scrna_de_plot_choices(de_catalog$path[[1]])
 assert(
   NROW(de_catalog) == 1L && identical(de_catalog$method[[1]], "Cell-level Wilcoxon") &&
     identical(unname(app_env$scrna_de_result_method_choices(pbmc_project)), "cell") &&
+    identical(names(de_plots), c("Volcano", "Heatmap")) &&
     grepl('selectInput("scrna_pathway_de_file", "Differential-expression comparison"', app_text, fixed = TRUE) &&
     grepl('scrna_de_results_stamp()', app_text, fixed = TRUE),
-  "completed cell-level differential expression is selected automatically when pseudobulk output is absent"
+  "completed cell-level differential expression and its matching volcano and heatmap are selected automatically"
 )
 legacy_de <- file.path(pbmc_manifest_dir, "scrna", "tables", "cell_level_differential_expression.tsv")
 dir.create(dirname(legacy_de), recursive = TRUE, showWarnings = FALSE)

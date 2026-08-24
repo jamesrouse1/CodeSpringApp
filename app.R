@@ -4062,7 +4062,7 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
     }
     paths <- c(file.path(out_dir, "tables", "input_processing_detected.tsv"), file.path(out_dir, "tables", "qc_summary_by_sample.tsv"), file.path(out_dir, "tables", "pca_variance_explained.tsv"), file.path(out_dir, "checkpoints"), file.path(out_dir, "objects"), file.path(out_dir, "tables", "signature_scores_summary.tsv"), file.path(out_dir, "tables", "pseudobulk_differential_expression.tsv"), file.path(out_dir, "tables", "pathway_fgsea_ranked.tsv"))
     inputs <- c(project$scrna_engine %||% "auto", "", "", "", "", "", "", "")
-    details <- c(source_details, "Scores named gene sets on normalized expression and stores them as cell metadata", "Uses sample-level pseudobulk DESeq2 for primary inference; cell-level Wilcoxon is exploratory", "Runs ranked fgsea for any completed differential-expression comparison")
+    details <- c(source_details, "Scores named gene sets on normalized expression and stores them as cell metadata", "Uses sample-level pseudobulk DESeq2 when replicates are available and cell-level Wilcoxon for cell-population comparisons", "Runs ranked fgsea for any completed differential-expression comparison")
     if (has_fastq) {
       paths <- c(file.path(data_dir, "cellranger"), paths)
       inputs <- c("CellRanger/9.0.1", inputs)
@@ -11406,7 +11406,7 @@ run_step_meta <- function(project = NULL) {
       "Apply optional technical-batch integration, then calculate neighbors, UMAP, and clusters.",
       "Add a named annotation metadata field, calculate cluster markers, and write exact composition tables.",
       "Score named gene signatures on normalized expression and retain the scores in the processed object.",
-      "Run sample-level pseudobulk DESeq2 and optional exploratory cell-level Wilcoxon testing.",
+      "Run sample-level pseudobulk DESeq2 and optional cell-level Wilcoxon testing.",
       "Run ranked fgseaMultilevel for a selected completed differential-expression comparison and pathway database."
     )
     if ("Alignment & counting" %in% steps) descriptions <- c("Align and quantify each 10x FASTQ sample with Cell Ranger and create filtered feature-barcode matrices.", descriptions)
@@ -11836,8 +11836,19 @@ scrna_de_result_file_choices <- function(project, method = c("pseudobulk", "cell
 }
 
 scrna_de_result_method_choices <- function(project) {
-  labels <- c("Pseudobulk DESeq2" = "pseudobulk", "Exploratory cell-level" = "cell")
+  labels <- c("Pseudobulk DESeq2" = "pseudobulk", "Cell-level Wilcoxon" = "cell")
   labels[vapply(unname(labels), function(method) length(scrna_de_result_file_choices(project, method)) > 0L, logical(1))]
+}
+
+scrna_de_plot_choices <- function(result_path) {
+  if (!length(result_path) || is.na(result_path[[1]]) || !nzchar(result_path[[1]]) || !file.exists(result_path[[1]])) return(character(0))
+  result_path <- result_path[[1]]
+  stem <- sub("\\.tsv$", "", basename(result_path))
+  candidates <- c(
+    Volcano = file.path(dirname(result_path), paste0("volcano__", stem, ".png")),
+    Heatmap = file.path(dirname(result_path), paste0("heatmap__", stem, ".png"))
+  )
+  candidates[file.exists(candidates) & vapply(candidates, file_size_for, numeric(1)) > 0]
 }
 
 scrna_pathway_result_file_choices <- function(project) {
@@ -12512,7 +12523,7 @@ scrna_results_explorer_ui <- function() {
       tabPanel("Violins", br(), h3("Expression Violins"), tags$p(class = "muted", "Compare normalized gene expression or stored signature scores across clusters, cell types, or other categorical metadata."), uiOutput("scrna_violin_controls_ui"), plotOutput("scrna_expression_violin", height = "680px"), downloadButton("download_scrna_expression_violin", "Download current violin", class = "btn-default")),
       tabPanel("Marker panels", br(), h3("Marker-list panels"), tags$p(class = "muted", "Use these to assess annotation evidence. Dot size is the fraction of cells expressing a marker and color is relative mean normalized expression within that marker. Heatmaps show the same expression summary without the prevalence encoding. Markers remain grouped by their supplied cell-type program."), uiOutput("scrna_marker_panel_ui")),
       tabPanel("Cluster markers", br(), h3("Top cluster-marker heatmap"), tags$p(class = "muted", "Created only when ‘Also calculate marker genes for every cluster’ was selected during annotation. One heatmap shows up to 10 positive markers for every cluster, ordered by cluster and effect size."), uiOutput("scrna_cluster_marker_heatmap_ui")),
-      tabPanel("Differential expression", br(), h3("Differential expression"), tags$p(class = "muted", "Inspect completed comparisons only. Use pseudobulk DESeq2 for replicated projects and cell-level Wilcoxon for exploratory comparisons within a single sample."), uiOutput("scrna_de_result_controls_ui"), table_output("scrna_de_result_table"), br(), tags$details(tags$summary("Completed comparison manifest"), table_output("scrna_de_manifest"))),
+      tabPanel("Differential expression", br(), h3("Differential expression"), tags$p(class = "muted", "Inspect completed comparisons only. Use pseudobulk DESeq2 for replicated projects and cell-level Wilcoxon for comparisons within a single sample."), uiOutput("scrna_de_result_controls_ui"), uiOutput("scrna_de_result_plots_ui"), table_output("scrna_de_result_table"), br(), tags$details(tags$summary("Completed comparison manifest"), table_output("scrna_de_manifest"))),
       tabPanel("Pathway analysis", br(), h3("Ranked pathway analysis"), tags$p(class = "muted", "Inspect completed fgsea results, ranked from the matching differential-expression comparison."), uiOutput("scrna_pathway_result_controls_ui"), uiOutput("scrna_pathway_result_plot_ui"), br(), table_output("scrna_pathway_result_table")),
       tabPanel("QC", br(), h3("Quality Control"), uiOutput("scrna_qc_plot_ui"), br(), h4("QC summary by sample"), table_output("scrna_qc_summary"), br(), h4("Doublet calls by capture"), table_output("scrna_doublet_summary"), br(), tags$details(tags$summary("Individual doublet calls"), table_output("scrna_doublet_calls")))
     ))
@@ -15526,7 +15537,7 @@ server <- function(input, output, session) {
       if (!is_scrna_project(p)) return("")
       out_dir <- scrna_output_dir(p)
       root <- file.path(out_dir, "differential_expression")
-      files <- if (dir.exists(root)) list.files(root, pattern = "\\.tsv$", recursive = TRUE, full.names = TRUE) else character(0)
+      files <- if (dir.exists(root)) list.files(root, pattern = "\\.(tsv|png)$", recursive = TRUE, full.names = TRUE) else character(0)
       files <- unique(c(
         files,
         file.path(out_dir, "tables", c("differential_jobs.tsv", "differential_results_manifest.tsv", "cell_level_differential_expression.tsv", "pseudobulk_differential_expression.tsv")),
@@ -16399,7 +16410,7 @@ server <- function(input, output, session) {
         if (!reuse_existing || show_rebuild) tool_panel("UMAP & clustering", status, "Compare the uncorrected embedding first. For multiple inputs, optionally correct a technical batch; then calculate neighbors, UMAP, and clusters.", tagList(uiOutput("scrna_preintegration_umap_ui"), uiOutput("scrna_cluster_settings_ui"), uiOutput("scrna_umap_output_ui")), "run_scrna_cluster", "Run UMAP & clustering", show_sample_progress = FALSE) else NULL,
         tool_panel("Annotate & markers", status, "Use the project's saved post-UMAP object to add a named annotation metadata field.", uiOutput("scrna_annotation_settings_ui"), "run_scrna_annotate", "Run annotation", show_sample_progress = FALSE, button_ui = uiOutput("scrna_annotation_run_button_ui")),
         tool_panel("Signature scoring", status, "Score one or more named gene signatures on normalized expression and store every score as reusable cell metadata in the processed object.", tagList(uiOutput("scrna_signature_settings_ui"), uiOutput("scrna_run_signature_umap_ui")), "run_scrna_score", "Run signature scoring", show_sample_progress = FALSE),
-        tool_panel("Differential expression", status, "Use pseudobulk DESeq2 when independent biological samples are available; one-sample projects instead offer exploratory cell-level comparisons between annotated populations.", uiOutput("scrna_differential_settings_ui"), "run_scrna_differential", "Run differential expression", show_sample_progress = FALSE),
+        tool_panel("Differential expression", status, "Use pseudobulk DESeq2 when independent biological samples are available; one-sample projects use cell-level Wilcoxon comparisons between annotated populations.", uiOutput("scrna_differential_settings_ui"), "run_scrna_differential", "Run differential expression", show_sample_progress = FALSE),
         tool_panel("Pathway analysis", status, "Choose any completed differential-expression comparison and run ranked fgsea.", uiOutput("scrna_pathway_settings_ui"), "run_scrna_pathway", "Run pathway analysis", show_sample_progress = FALSE)
       ))
     }
@@ -17292,7 +17303,7 @@ server <- function(input, output, session) {
     )
     if (single_sample) {
       return(tagList(
-        div(class = "read-source-note", tags$strong("One biological sample detected"), tags$p("Compare two cell populations with a cell-level Wilcoxon test. Pseudobulk is not shown because there are no independent biological replicates; this result is exploratory and cells are not treated as replicate samples.")),
+        div(class = "read-source-note", tags$strong("One biological sample detected"), tags$p("Compare two cell populations with a cell-level Wilcoxon test. Pseudobulk is not shown because there are no independent biological replicates; cells are not treated as replicate samples.")),
         selectInput("scrna_de_group_column", "Cell-population annotation", choices = group_choices, selected = group_column, selectize = FALSE),
         comparison_controls,
         tags$p(class = "muted small-note", "The comparison uses normalized expression from all cells carrying either selected label and saves a descriptive cell-level result file.")
@@ -17314,7 +17325,7 @@ server <- function(input, output, session) {
       tags$p(class = "muted small-note", "Select All cells for a global comparison and any number of individual populations in the same run. Every result receives its own descriptive filename and folder."),
       selectInput("scrna_de_covariates", "Optional sample-level covariates", choices = covariate_choices, selected = intersect(as.character(isolate(input$scrna_de_covariates) %||% character(0)), covariate_choices), multiple = TRUE, selectize = TRUE),
       tags$p(class = "muted small-note", "Use this for a paired subject/donor field or a genuine technical batch. The app checks that the design is full-rank and that every covariate is constant within each biological sample."),
-      radioButtons("scrna_de_method", "Outputs", choices = c("Pseudobulk DESeq2 + exploratory cell-level" = "both", "Pseudobulk DESeq2 only (recommended)" = "pseudobulk", "Exploratory cell-level only" = "cell"), selected = isolate(input$scrna_de_method) %||% "both")
+      radioButtons("scrna_de_method", "Outputs", choices = c("Pseudobulk DESeq2 + cell-level Wilcoxon" = "both", "Pseudobulk DESeq2 only (recommended)" = "pseudobulk", "Cell-level Wilcoxon only" = "cell"), selected = isolate(input$scrna_de_method) %||% "both")
     )
   })
 
@@ -18472,6 +18483,20 @@ server <- function(input, output, session) {
     if (!length(path) || is.na(path[[1]]) || !nzchar(path[[1]])) return(data.frame())
     safe_read_table(path, 100000)
   }, page_length = 50, scroll_y = "560px")
+  output$scrna_de_result_plots_ui <- renderUI({
+    scrna_de_results_stamp()
+    p <- current_project(); if (!is_scrna_project(p)) return(NULL)
+    method_choices <- scrna_de_result_method_choices(p)
+    if (!length(method_choices)) return(NULL)
+    method <- selected_choice(input$scrna_de_result_method, method_choices, unname(method_choices)[[1]])
+    choices <- scrna_de_result_file_choices(p, method)
+    path <- selected_choice(input$scrna_de_result_file, choices, if (length(choices)) unname(choices)[[1]] else "")
+    plots <- scrna_de_plot_choices(path)
+    if (!length(plots)) return(div(class = "empty-box", "This completed comparison predates automatic volcano and heatmap output. Rerun only Differential expression to create both figures."))
+    tagList(lapply(seq_along(plots), function(i) {
+      tagList(tags$h4(names(plots)[[i]]), image_or_file_ui(unname(plots)[[i]], "720px"), br())
+    }))
+  })
   output$scrna_de_manifest <- render_csl_table({
     p <- current_project(); if (!is_scrna_project(p)) return(data.frame())
     path <- file.path(scrna_output_dir(p), "tables", "differential_results_manifest.tsv")
