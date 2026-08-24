@@ -10710,10 +10710,11 @@ submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto
   reference_ortholog_file <- if (identical(stage, "annotate") && nzchar(reference_file)) bundled_ortholog else ""
   if (identical(stage, "annotate") && !identical(marker_species, "same") && !nzchar(marker_ortholog_file)) marker_ortholog_file <- bundled_ortholog
   if (identical(stage, "score") && !identical(signature_species, "same") && !nzchar(signature_ortholog_file)) signature_ortholog_file <- bundled_ortholog
-  if (identical(stage, "pathway") && pathway_species %in% c("auto", "mouse") && identical(pathway_ortholog_source, "upload")) {
-    pathway_ortholog_file <- copy_uploaded_project_file(pathway_ortholog_upload, file.path(project$data_dir, "uploads", "orthologs"), "pathway ortholog table", c("tsv", "txt", "csv"))
-  }
-  if (identical(stage, "pathway") && pathway_species %in% c("auto", "mouse") && !nzchar(pathway_ortholog_file)) pathway_ortholog_file <- bundled_ortholog
+  # Pathway conversion is standardized across CodeSpringLab: mouse (or
+  # auto-detected mouse) always uses the maintained bundled MGI table, while
+  # human symbols are passed through unchanged. Users should never need to
+  # locate or upload an ortholog table for this stage.
+  if (identical(stage, "pathway")) pathway_ortholog_file <- if (pathway_species %in% c("auto", "mouse")) bundled_ortholog else ""
   if (identical(stage, "pathway") && identical(pathway_source, "upload")) {
     pathway_gmt_file <- copy_uploaded_project_file(pathway_gmt_upload, file.path(project$data_dir, "uploads", "pathways"), "GMT collection", c("gmt", "txt"))
   }
@@ -14420,9 +14421,6 @@ server <- function(input, output, session) {
   observeEvent(input$browse_scrna_signature_ortholog_file, {
     open_server_browser("scrna_signature_ortholog_file", "file", input$scrna_signature_ortholog_file %||% "")
   })
-  observeEvent(input$browse_scrna_pathway_ortholog_file, {
-    open_server_browser("scrna_pathway_ortholog_file", "file", input$scrna_pathway_ortholog_file %||% "")
-  })
   observeEvent(input$browse_scrna_pathway_gmt_file, {
     open_server_browser("scrna_pathway_gmt_file", "file", input$scrna_pathway_gmt_file %||% "")
   })
@@ -17292,12 +17290,7 @@ server <- function(input, output, session) {
       selectInput("scrna_pathway_de_file", "Differential-expression comparison", choices = stats::setNames(comparisons$path, comparisons$label), selected = selected_choice(isolate(input$scrna_pathway_de_file), comparisons$path, comparisons$path[[1]]), selectize = FALSE),
       selectInput("scrna_pathway_library", "Pathway database", choices = GSEAPY_GENESET_OPTIONS, selected = selected_library, selectize = FALSE),
       selectInput("scrna_pathway_species", "Species of the differential-expression genes", choices = c("Detect from gene symbols" = "auto", "Mouse — convert to human orthologs" = "mouse", "Human — no conversion" = "human"), selected = selected_pathway_species, selectize = FALSE),
-      conditionalPanel("input.scrna_pathway_species != 'human'",
-        radioButtons("scrna_pathway_ortholog_source", "Ortholog table", choices = c("Bundled table or server path" = "server", "Upload from laptop" = "upload"), selected = isolate(input$scrna_pathway_ortholog_source) %||% "server", inline = TRUE),
-        conditionalPanel("input.scrna_pathway_ortholog_source == 'server'", div(class = "new-project-path-control", textInput("scrna_pathway_ortholog_file", "Optional ortholog table path", value = isolate(input$scrna_pathway_ortholog_file) %||% "", placeholder = "Blank uses bundled mouse_human_orthologs_MGI.tsv"), actionButton("browse_scrna_pathway_ortholog_file", "Browse server", class = "btn-default"))),
-        conditionalPanel("input.scrna_pathway_ortholog_source == 'upload'", fileInput("scrna_pathway_ortholog_upload", "Ortholog table from laptop", accept = c(".tsv", ".txt", ".csv")))
-      ),
-      tags$p(class = "muted small-note", "The selected database is downloaded and cached automatically for the job. Mouse gene ranks are converted to human ortholog symbols before testing these pathway collections; the mapping and database source are saved with the results.")
+      tags$p(class = "muted small-note", "The selected database is downloaded and cached automatically for the job. Human symbols are used directly. Mouse symbols are converted automatically with CodeSpringLab's bundled MGI mouse–human ortholog table; the mapping and database source are saved with the results.")
     )
   })
 
@@ -17828,9 +17821,9 @@ server <- function(input, output, session) {
         pathway_library = input$scrna_pathway_library %||% "MSigDB_Hallmark_2020",
         pathway_de_file = input$scrna_pathway_de_file %||% "",
         pathway_species = input$scrna_pathway_species %||% "auto",
-        pathway_ortholog_file = input$scrna_pathway_ortholog_file %||% "",
-        pathway_ortholog_upload = input$scrna_pathway_ortholog_upload,
-        pathway_ortholog_source = input$scrna_pathway_ortholog_source %||% "server",
+        pathway_ortholog_file = "",
+        pathway_ortholog_upload = NULL,
+        pathway_ortholog_source = "server",
         pathway_gmt_file = "",
         pathway_gmt_upload = NULL,
         pathway_source = "server"

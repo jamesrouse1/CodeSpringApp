@@ -330,7 +330,10 @@ assert(
     !grepl('scrna_violin_facet', app_text, fixed = TRUE) &&
     !grepl('facet_wrap(~facet', app_text, fixed = TRUE) &&
     grepl('default_pathway_species <- if (pbmc_example) "human"', app_text, fixed = TRUE) &&
-    grepl('selected_pathway_species <- if (pbmc_example) "human"', app_text, fixed = TRUE),
+    grepl('selected_pathway_species <- if (pbmc_example) "human"', app_text, fixed = TRUE) &&
+    !grepl('textInput("scrna_pathway_ortholog_file"', app_text, fixed = TRUE) &&
+    !grepl('fileInput("scrna_pathway_ortholog_upload"', app_text, fixed = TRUE) &&
+    grepl('pathway_ortholog_file <- if (pathway_species %in% c("auto", "mouse")) bundled_ortholog else ""', app_text, fixed = TRUE),
   "completed annotations feed cell-type differential expression and signature species is detected automatically"
 )
 manual_map <- app_env$write_scrna_manual_cluster_mapping(pbmc_project, "cell_type", c(`0` = "Naive CD4 T", `1` = "B cells"))
