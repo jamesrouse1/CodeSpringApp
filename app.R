@@ -14098,7 +14098,7 @@ server <- function(input, output, session) {
 
   observe({
     invalidateLater(PROGRESS_REFRESH_MS, session)
-    if ((input$web_main_tabs %||% "") %in% c("Progress", "Run Pipeline")) {
+    if ((input$web_main_tabs %||% "") %in% c("Progress", "Run Pipeline", "Results Explorer")) {
       jobs <- isolate(job_history_state())
       if (length(active_job_state_map_from_jobs(jobs))) safe_refresh_progress_now("auto refresh")
     }
@@ -14111,7 +14111,7 @@ server <- function(input, output, session) {
   }, once = TRUE)
 
   observeEvent(input$web_main_tabs, {
-    if ((input$web_main_tabs %||% "") %in% c("Progress", "Run Pipeline")) safe_refresh_progress_now("tab refresh")
+    if ((input$web_main_tabs %||% "") %in% c("Progress", "Run Pipeline", "Results Explorer")) safe_refresh_progress_now("tab refresh")
   }, ignoreInit = TRUE)
 
   # The PBMC example is a teaching workflow: marker discovery is enabled by
@@ -14156,6 +14156,12 @@ server <- function(input, output, session) {
 
   output$sample_progress_matrix_ui <- renderUI({
     if (!isTRUE(existing_project_selected())) return(div(class = "empty-box", "Select or create a project to see sample progress."))
+    sample_progress_matrix_ui(sample_progress_state())
+  })
+
+  output$rna_overview_sample_progress_ui <- renderUI({
+    if (!isTRUE(existing_project_selected()) || !identical(current_project()$analysis_key, "rna")) return(NULL)
+    progress_refresh()
     sample_progress_matrix_ui(sample_progress_state())
   })
 

@@ -209,6 +209,11 @@ assert(
   "raw FASTQ setup exposes a scrollable full-path preview and widens the sidebar only on the Setup tab"
 )
 assert(
+  grepl("rna_overview_sample_progress_ui", server_source, fixed = TRUE) &&
+    grepl('"Results Explorer"', server_source, fixed = TRUE),
+  "RNA-seq Results Explorer reuses the live Progress sample matrix and refreshes it while visible"
+)
+assert(
   grepl("Automatic (Harmony when a technical batch is selected)", app_text, fixed = TRUE) &&
     grepl("RPCA (anchor-based; smaller datasets)", app_text, fixed = TRUE),
   "Seurat automatic integration uses scalable Harmony while retaining explicit anchor methods for smaller datasets"
@@ -770,7 +775,13 @@ assert(inherits(rna_viewer$ui, "shiny.tag") && is.function(rna_viewer$server), "
 rna_ui_text <- as.character(rna_viewer$ui)
 assert(grepl("RNA-seq Results Explorer", rna_ui_text, fixed = TRUE), "RNA Results Explorer uses the canonical analysis label")
 assert(grepl("Overview", rna_ui_text, fixed = TRUE) && grepl("QC", rna_ui_text, fixed = TRUE) && grepl("Files", rna_ui_text, fixed = TRUE), "RNA Results Explorer now follows the shared navigation contract")
-assert(grepl("Pipeline status", rna_ui_text, fixed = TRUE) && grepl("Design matrix", rna_ui_text, fixed = TRUE), "RNA overview exposes the shared pipeline and design summaries")
+assert(
+  grepl("Sample progress", rna_ui_text, fixed = TRUE) &&
+    grepl("rna_overview_sample_progress_ui", rna_ui_text, fixed = TRUE) &&
+    !grepl("Pipeline status", rna_ui_text, fixed = TRUE) &&
+    !grepl("Design matrix", rna_ui_text, fixed = TRUE),
+  "RNA overview exposes the live sample progress matrix without redundant pipeline or design summaries"
+)
 assert(grepl("rna_file_category", rna_ui_text, fixed = TRUE), "RNA Files tab exposes a categorized project file catalog")
 
 fake_jobs <- data.frame(
