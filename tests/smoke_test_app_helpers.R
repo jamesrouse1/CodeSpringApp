@@ -251,7 +251,9 @@ assert(
     identical(pbmc_defaults$doublet_method, "auto") &&
     isTRUE(pbmc_defaults$remove_doublets) &&
     grepl('numericInput("scrna_max_features", "Maximum detected genes per cell (0 = disabled)"', app_text, fixed = TRUE) &&
-    !grepl('tags$summary("Advanced QC setting")', app_text, fixed = TRUE),
+    !grepl('tags$summary("Advanced QC setting")', app_text, fixed = TRUE) &&
+    grepl('qc_preset = if (pbmc_example) "pbmc3k" else ""', app_text, fixed = TRUE) &&
+    grepl('tags$strong("Seurat PBMC 3K tutorial cutoffs")', app_text, fixed = TRUE),
   "the PBMC example exposes its maximum-gene filter directly and removes predicted doublets by default"
 )
 pbmc_manifest_dir <- tempfile("pbmc_example_")

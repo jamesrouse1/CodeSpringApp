@@ -9754,7 +9754,7 @@ submit_scrna_reference_inspection <- function(project, reference_file) {
   list(message = message, output_path = output_path, reference_file = reference_file, job_id = parse_sbatch_job_id(message))
 }
 
-submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto", normalization = "auto", integration = "auto", batch_column = "batch", cluster_resolution = 0.6, min_features = 200, min_counts = 0, max_features = 0, max_percent_mt = 20, min_cells_per_gene = 3, n_pcs = 30, n_neighbors = 15, umap_min_dist = 0.3, umap_spread = 1, umap_metric = "euclidean", umap_init_pos = "spectral", doublet_method = "auto", doublet_rate = 0, remove_doublets = TRUE, seed = 1234, scvi_max_epochs = 400, harmony_theta = 2, harmony_lambda = 1, harmony_max_iter = 20, marker_file = "", celltype_file = "", reference_file = "", marker_upload = NULL, celltype_upload = NULL, reference_upload = NULL, marker_source = "server", celltype_source = "server", reference_source = "server", reference_label_column = "", find_cluster_markers = FALSE, marker_manual = list(), marker_species = "auto", marker_ortholog_file = "", marker_ortholog_upload = NULL, marker_ortholog_source = "server", annotation_name = "cell_type", signature_file = "", signature_upload = NULL, signature_source = "server", signature_manual = list(), signature_species = "same", signature_ortholog_file = "", signature_ortholog_upload = NULL, signature_ortholog_source = "server", de_group_column = "condition", de_reference = "", de_comparison = "", de_annotation_column = "", de_annotation_values = "all", de_method = "both", de_covariates = character(0), pathway_library = "MSigDB_Hallmark_2020", pathway_de_file = "", pathway_species = "auto", pathway_ortholog_file = "", pathway_ortholog_upload = NULL, pathway_ortholog_source = "server", pathway_gmt_file = "", pathway_gmt_upload = NULL, pathway_source = "server") {
+submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto", normalization = "auto", integration = "auto", batch_column = "batch", cluster_resolution = 0.6, min_features = 200, min_counts = 0, max_features = 0, max_percent_mt = 20, qc_preset = "", min_cells_per_gene = 3, n_pcs = 30, n_neighbors = 15, umap_min_dist = 0.3, umap_spread = 1, umap_metric = "euclidean", umap_init_pos = "spectral", doublet_method = "auto", doublet_rate = 0, remove_doublets = TRUE, seed = 1234, scvi_max_epochs = 400, harmony_theta = 2, harmony_lambda = 1, harmony_max_iter = 20, marker_file = "", celltype_file = "", reference_file = "", marker_upload = NULL, celltype_upload = NULL, reference_upload = NULL, marker_source = "server", celltype_source = "server", reference_source = "server", reference_label_column = "", find_cluster_markers = FALSE, marker_manual = list(), marker_species = "auto", marker_ortholog_file = "", marker_ortholog_upload = NULL, marker_ortholog_source = "server", annotation_name = "cell_type", signature_file = "", signature_upload = NULL, signature_source = "server", signature_manual = list(), signature_species = "same", signature_ortholog_file = "", signature_ortholog_upload = NULL, signature_ortholog_source = "server", de_group_column = "condition", de_reference = "", de_comparison = "", de_annotation_column = "", de_annotation_values = "all", de_method = "both", de_covariates = character(0), pathway_library = "MSigDB_Hallmark_2020", pathway_de_file = "", pathway_species = "auto", pathway_ortholog_file = "", pathway_ortholog_upload = NULL, pathway_ortholog_source = "server", pathway_gmt_file = "", pathway_gmt_upload = NULL, pathway_source = "server") {
   if (missing(batch_column)) batch_column <- "sample_id"
   stage <- tolower(trimws(as.character(stage %||% "inspect")))
   step_label <- tryCatch(scrna_stage_step(stage), error = function(e) "")
@@ -9810,6 +9810,8 @@ submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto
   if (checked$max_features > 0 && checked$max_features <= checked$min_features) {
     return(record_preflight_failure(project, step_label, "Maximum detected genes must be greater than minimum detected genes, or set it to 0 to disable the upper feature filter.", "scrna"))
   }
+  qc_preset <- tolower(trimws(as.character(qc_preset %||% "")))
+  if (!qc_preset %in% c("", "pbmc3k")) qc_preset <- ""
   # Keep low-prevalence-gene filtering as a fixed, reproducible internal
   # safeguard instead of exposing another routine tuning control.
   if (identical(resolved_engine, "scanpy")) checked$min_cells_per_gene <- 3L
@@ -9950,8 +9952,8 @@ submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto
     return(record_preflight_failure(project, "scRNA processing", paste0("Doublet method '", doublet_method, "' is not compatible with the ", resolved_engine, " engine. Choose ", paste(allowed_doublet, collapse = ", "), "."), "scrna"))
   }
   params <- data.frame(
-    key = c("normalization", "integration", "batch_column", "cluster_resolution", "min_features", "min_counts", "max_features", "max_percent_mt", "n_pcs", "n_neighbors", "umap_min_dist", "umap_spread", "umap_metric", "umap_init_pos", "min_cells_per_gene", "doublet_method", "doublet_rate", "remove_doublets", "marker_file", "celltype_file", "reference_file", "reference_label_column", "reference_ortholog_file", "find_cluster_markers", "marker_species", "marker_ortholog_file", "annotation_name", "signature_file", "signature_species", "signature_ortholog_file", "de_group_column", "de_reference", "de_comparison", "de_annotation_column", "de_annotation_values", "de_method", "de_covariates", "pathway_library", "pathway_de_file", "pathway_species", "pathway_ortholog_file", "pathway_gmt_file", "seed", "scvi_max_epochs", "harmony_theta", "harmony_lambda", "harmony_max_iter"),
-    value = as.character(c(normalization, integration, batch_column, checked$cluster_resolution, checked$min_features, checked$min_counts, checked$max_features, checked$max_percent_mt, checked$n_pcs, checked$n_neighbors, checked$umap_min_dist, checked$umap_spread, umap_metric, umap_init_pos, checked$min_cells_per_gene, doublet_method, checked$doublet_rate, isTRUE(remove_doublets), marker_file, celltype_file, reference_file, reference_label_column, reference_ortholog_file, isTRUE(find_cluster_markers), marker_species, marker_ortholog_file, annotation_name, signature_file, signature_species, signature_ortholog_file, de_group_column, de_reference, de_comparison, de_annotation_column, paste(unique(as.character(de_annotation_values %||% "all")), collapse = "||"), de_method, paste(unique(as.character(de_covariates %||% character(0))), collapse = ","), pathway_library, pathway_de_file, pathway_species, pathway_ortholog_file, pathway_gmt_file, checked$seed, checked$scvi_max_epochs, checked$harmony_theta, checked$harmony_lambda, checked$harmony_max_iter)),
+    key = c("normalization", "integration", "batch_column", "cluster_resolution", "min_features", "min_counts", "max_features", "max_percent_mt", "qc_preset", "n_pcs", "n_neighbors", "umap_min_dist", "umap_spread", "umap_metric", "umap_init_pos", "min_cells_per_gene", "doublet_method", "doublet_rate", "remove_doublets", "marker_file", "celltype_file", "reference_file", "reference_label_column", "reference_ortholog_file", "find_cluster_markers", "marker_species", "marker_ortholog_file", "annotation_name", "signature_file", "signature_species", "signature_ortholog_file", "de_group_column", "de_reference", "de_comparison", "de_annotation_column", "de_annotation_values", "de_method", "de_covariates", "pathway_library", "pathway_de_file", "pathway_species", "pathway_ortholog_file", "pathway_gmt_file", "seed", "scvi_max_epochs", "harmony_theta", "harmony_lambda", "harmony_max_iter"),
+    value = as.character(c(normalization, integration, batch_column, checked$cluster_resolution, checked$min_features, checked$min_counts, checked$max_features, checked$max_percent_mt, qc_preset, checked$n_pcs, checked$n_neighbors, checked$umap_min_dist, checked$umap_spread, umap_metric, umap_init_pos, checked$min_cells_per_gene, doublet_method, checked$doublet_rate, isTRUE(remove_doublets), marker_file, celltype_file, reference_file, reference_label_column, reference_ortholog_file, isTRUE(find_cluster_markers), marker_species, marker_ortholog_file, annotation_name, signature_file, signature_species, signature_ortholog_file, de_group_column, de_reference, de_comparison, de_annotation_column, paste(unique(as.character(de_annotation_values %||% "all")), collapse = "||"), de_method, paste(unique(as.character(de_covariates %||% character(0))), collapse = ","), pathway_library, pathway_de_file, pathway_species, pathway_ortholog_file, pathway_gmt_file, checked$seed, checked$scvi_max_epochs, checked$harmony_theta, checked$harmony_lambda, checked$harmony_max_iter)),
     stringsAsFactors = FALSE
   )
   # Keep the copied, editable project manifest normalized immediately before
@@ -14930,6 +14932,18 @@ server <- function(input, output, session) {
 
   output$scrna_qc_recommendations_ui <- renderUI({
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
+    if (scrna_is_pbmc3k_example(p)) {
+      return(div(class = "read-source-note",
+        tags$strong("Seurat PBMC 3K tutorial cutoffs"),
+        tags$p("The example uses the published tutorial filters. Dashed lines show these exact values; total counts are displayed but are not filtered."),
+        div(class = "cutrun-metric-grid compact",
+          scrna_metric_card("Minimum detected genes per cell", "200", "Tutorial cutoff", "blue"),
+          scrna_metric_card("Minimum total counts per cell", "Disabled", "No tutorial cutoff", "purple"),
+          scrna_metric_card("Maximum detected genes per cell", "2,500", "Tutorial cutoff", "gold"),
+          scrna_metric_card("Maximum mitochondrial reads per cell", "5%", "Tutorial cutoff", "green")
+        )
+      ))
+    }
     recommendations <- scrna_qc_recommendations(p)
     if (!NROW(recommendations)) {
       return(tags$p(class = "muted small-note", "Run Input inspection first. The unfiltered distributions will be used to suggest editable QC starting values."))
@@ -15907,6 +15921,7 @@ server <- function(input, output, session) {
         min_counts = input$scrna_min_counts %||% 0,
         max_features = input$scrna_max_features %||% 0,
         max_percent_mt = input$scrna_max_percent_mt %||% 20,
+        qc_preset = if (pbmc_example) "pbmc3k" else "",
         min_cells_per_gene = input$scrna_min_cells_per_gene %||% 3,
         n_pcs = tutorial_umap$n_pcs %||% input$scrna_n_pcs %||% 30,
         n_neighbors = tutorial_umap$n_neighbors %||% input$scrna_n_neighbors %||% 15,
@@ -16624,7 +16639,7 @@ server <- function(input, output, session) {
     selected <- selected_choice(input$scrna_pre_qc_plot, files, unname(if (length(violin)) violin else files)[[1]])
     tagList(
       tags$h4("Unfiltered QC overview"),
-      tags$p(class = "muted small-note", "The violin plot appears first. Suggested cutoffs below are auto-filled from these unfiltered distributions and remain fully editable; no cells have been filtered yet."),
+      tags$p(class = "muted small-note", if (scrna_is_pbmc3k_example(p)) "The violin plot appears first. Dashed lines show the fixed Seurat PBMC 3K tutorial cutoffs; no cells have been filtered yet." else "The violin plot appears first. Suggested cutoffs below are auto-filled from these unfiltered distributions and remain fully editable; no cells have been filtered yet."),
       selectInput("scrna_pre_qc_plot", "Unfiltered QC figure", choices = files, selected = selected, selectize = FALSE),
       image_or_file_ui(selected, "760px")
     )
