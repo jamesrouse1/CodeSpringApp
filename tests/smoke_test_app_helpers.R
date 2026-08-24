@@ -790,8 +790,10 @@ assert(
 assert(
   grepl("rna_file_tool", rna_ui_text, fixed = TRUE) &&
     grepl("rna_file_sample_ui", rna_ui_text, fixed = TRUE) &&
+    grepl("download_selected_rna_file", rna_ui_text, fixed = TRUE) &&
+    grepl("rna-trigger-file-download", rna_ui_text, fixed = TRUE) &&
     !grepl("rna_file_category", rna_ui_text, fixed = TRUE),
-  "RNA Files tab filters the readable filename catalog by tool and sample"
+  "RNA Files tab filters the readable filename catalog and exposes secure file actions"
 )
 
 fake_jobs <- data.frame(
