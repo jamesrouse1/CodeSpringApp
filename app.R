@@ -5115,6 +5115,61 @@ atac_files_by_category <- function(project, category = "all") {
   stats::setNames(files, relative_result_labels(project, files))
 }
 
+atac_file_tool_label <- function(folder) {
+  labels <- c(
+    fastqc = "FastQC",
+    fastqc_cutadapt = "FastQC (trimmed)",
+    cutadapt = "Cutadapt",
+    bowtie2 = "Bowtie2",
+    macs2 = "MACS2",
+    diffbind = "DiffBind",
+    peak_annotation = "Peak annotation",
+    manifest = "Manifest",
+    log = "Logs",
+    logs = "Logs",
+    shiny = "App files",
+    project = "Project-level"
+  )
+  folder <- trimws(as.character(folder %||% "project"))
+  label <- unname(labels[folder])
+  ifelse(is.na(label) | !nzchar(label), gsub("_", " ", folder, fixed = TRUE), label)
+}
+
+atac_result_file_catalog <- function(project) {
+  empty <- data.frame(
+    Tool = character(0), Sample = character(0), File = character(0),
+    Size = character(0), Modified = character(0), `Absolute path` = character(0),
+    stringsAsFactors = FALSE, check.names = FALSE
+  )
+  root <- project$data_dir %||% ""
+  if (!nzchar(root) || !dir.exists(root)) return(empty)
+  paths <- list.files(root, recursive = TRUE, full.names = TRUE, all.files = FALSE)
+  paths <- paths[file.exists(paths) & !dir.exists(paths)]
+  if (!length(paths)) return(empty)
+  absolute <- normalizePath(paths, winslash = "/", mustWork = FALSE)
+  root_normalized <- normalizePath(root, winslash = "/", mustWork = FALSE)
+  relative <- substring(absolute, nchar(root_normalized) + 2L)
+  folder <- sub("/.*$", "", relative)
+  folder[!grepl("/", relative, fixed = TRUE)] <- "project"
+  info <- file.info(absolute)
+  samples <- project_samples(project)
+  sample_labels <- vapply(absolute, function(path) {
+    sample <- result_file_sample(project, path, samples)
+    if (nzchar(sample)) sample else "Project-level"
+  }, character(1))
+  catalog <- data.frame(
+    Tool = atac_file_tool_label(folder),
+    Sample = sample_labels,
+    File = basename(absolute),
+    Size = vapply(absolute, human_file_size, character(1)),
+    Modified = format(info$mtime, "%Y-%m-%d %H:%M"),
+    `Absolute path` = absolute,
+    stringsAsFactors = FALSE,
+    check.names = FALSE
+  )
+  catalog[order(catalog$Tool, catalog$Sample, catalog$File), , drop = FALSE]
+}
+
 atac_postprocess_status_table <- function(project) {
   design <- project_design_df(project)
   samples <- if (NROW(design) && "sample" %in% names(design)) as.character(design$sample) else character(0)
@@ -5209,6 +5264,25 @@ atac_overview_contents <- function() {
   )
 }
 
+atac_files_catalog_ui <- function() {
+  sidebarLayout(
+    sidebarPanel(
+      width = 3,
+      uiOutput("atac_file_tool_ui"),
+      uiOutput("atac_file_sample_ui"),
+      downloadButton("download_atac_file_catalog", "Download file catalog"),
+      downloadButton("download_selected_atac_file", "Download selected file", style = "display:none;"),
+      tags$hr(),
+      helpText("Filter by tool and sample. Download or copy a path directly from its row. Delete permanently removes only that one confirmed project file.")
+    ),
+    mainPanel(
+      width = 9,
+      div(class = "atac-files-table-shell", table_output("atac_files_catalog_table")),
+      tags$script(HTML("Shiny.addCustomMessageHandler('atac-trigger-file-download', function(){ var link = document.getElementById('download_selected_atac_file'); if (link) link.click(); });"))
+    )
+  )
+}
+
 atac_results_explorer_ui <- function(initial_tab = "Overview") {
   div(class = "native-results-host cutrun-results-host", div(class = "app-shell cutrun-results-shell",
     results_explorer_hero("ATAC-seq Results Explorer"),
@@ -5253,7 +5327,7 @@ atac_results_explorer_ui <- function(initial_tab = "Overview") {
           tabPanel("Volcano", br(), uiOutput("atac_diffbind_volcano_ui"))
         ))
       )),
-      tabPanel("Files", br(), uiOutput("atac_file_ui"), uiOutput("atac_file_view"))
+      tabPanel("Files", br(), atac_files_catalog_ui())
     ))
   ))
 }
@@ -11665,6 +11739,30 @@ body { background:#eef3f8; color:#17202f; }
   padding: 8px !important;
   margin-bottom: 8px !important;
 }
+.atac-files-table-shell { width:100%; max-width:100%; overflow-x:auto; padding:2px 2px 8px; }
+.atac-files-table-shell .dataTables_wrapper,
+.atac-files-table-shell .dataTables_scroll,
+.atac-files-table-shell .dataTables_scrollBody { width:100%; max-width:100%; overflow-x:auto !important; }
+.atac-files-table-shell table.dataTable { width:100% !important; min-width:1120px; table-layout:auto; }
+.atac-files-table-shell table.dataTable thead th,
+.atac-files-table-shell table.dataTable tbody td { vertical-align:middle; white-space:nowrap; }
+.atac-files-table-shell table.dataTable thead th:nth-child(1),
+.atac-files-table-shell table.dataTable tbody td:nth-child(1) { min-width:125px !important; }
+.atac-files-table-shell table.dataTable thead th:nth-child(2),
+.atac-files-table-shell table.dataTable tbody td:nth-child(2) { min-width:145px !important; }
+.atac-files-table-shell table.dataTable thead th:nth-child(3),
+.atac-files-table-shell table.dataTable tbody td:nth-child(3) {
+  min-width:400px !important;
+  max-width:560px;
+  white-space:normal !important;
+  overflow-wrap:anywhere;
+  word-break:break-word;
+}
+.atac-files-table-shell table.dataTable thead th:nth-child(4),
+.atac-files-table-shell table.dataTable tbody td:nth-child(4) { min-width:80px !important; }
+.atac-files-table-shell table.dataTable thead th:nth-child(5),
+.atac-files-table-shell table.dataTable tbody td:nth-child(5) { min-width:145px !important; }
+.atac-files-table-shell .btn-xs { white-space:nowrap; }
 
 
 /* Executive polish layer */
@@ -12480,6 +12578,9 @@ server <- function(input, output, session) {
   scrna_reference_inspection <- reactiveVal(list(status = "idle", project_id = "", reference_file = "", output_path = "", job_id = "", choices = data.frame(), message = ""))
   cutrun_normalization_choice <- reactiveVal("spikein")
   genome_browser_mode_state <- reactiveVal("")
+  atac_file_catalog_refresh <- reactiveVal(0L)
+  selected_atac_download_path <- reactiveVal("")
+  pending_atac_delete_path <- reactiveVal("")
   path_browser <- reactiveValues(target = "", mode = "dir", path = CURRENT_HOME, selected_file = "", message = "")
   project_selection <- reactiveValues(rna = "", scrna = "", cutrun = "", atac = "", chip = "")
   new_fastq_folders <- reactiveVal(character(0))
@@ -17604,6 +17705,167 @@ server <- function(input, output, session) {
   output$atac_diffbind_table <- render_csl_table({ differential_accessibility_result_table(selected_atac_diffbind_dir(), 20000) }, page_length = 50, scroll_y = "600px")
   output$atac_diffbind_pca_ui <- renderUI({ image_or_file_ui(file.path(selected_atac_diffbind_dir(), "diffbind_pca_byNormCounts.png"), "620px") })
   output$atac_diffbind_volcano_ui <- renderUI({ image_or_file_ui(file.path(selected_atac_diffbind_dir(), "diffbind_volcano_byDiffPeaks.png"), "620px") })
+  observeEvent(input$atac_results_tabs, {
+    if (identical(input$atac_results_tabs %||% "", "Files")) {
+      atac_file_catalog_refresh(isolate(atac_file_catalog_refresh()) + 1L)
+    }
+  }, ignoreInit = TRUE)
+  observeEvent(input$refresh_atac_results, {
+    atac_file_catalog_refresh(isolate(atac_file_catalog_refresh()) + 1L)
+  }, ignoreInit = TRUE)
+  atac_result_files <- reactive({
+    atac_file_catalog_refresh()
+    p <- current_project()
+    if (!is_atac_project(p)) return(atac_result_file_catalog(list(data_dir = "")))
+    atac_result_file_catalog(p)
+  })
+  output$atac_file_tool_ui <- renderUI({
+    tools <- sort(unique(as.character(atac_result_files()$Tool)))
+    tools <- tools[nzchar(tools)]
+    selected <- selected_choice(input$atac_file_tool, c("all", tools), "all")
+    selectInput("atac_file_tool", "Tool", choices = c("All tools" = "all", stats::setNames(tools, tools)), selected = selected, selectize = FALSE)
+  })
+  atac_files_for_tool <- reactive({
+    files <- atac_result_files()
+    tool <- as.character(input$atac_file_tool %||% "all")
+    if (!identical(tool, "all")) files <- files[files$Tool == tool, , drop = FALSE]
+    files
+  })
+  output$atac_file_sample_ui <- renderUI({
+    samples <- sort(unique(as.character(atac_files_for_tool()$Sample)))
+    samples <- samples[nzchar(samples)]
+    selected <- selected_choice(input$atac_file_sample, c("all", samples), "all")
+    selectInput("atac_file_sample", "Sample", choices = c("All samples / project-level" = "all", stats::setNames(samples, samples)), selected = selected, selectize = FALSE)
+  })
+  atac_files_filtered <- reactive({
+    files <- atac_files_for_tool()
+    sample <- as.character(input$atac_file_sample %||% "all")
+    if (!identical(sample, "all")) files <- files[files$Sample == sample, , drop = FALSE]
+    files
+  })
+  atac_files_catalog_display <- reactive({
+    files <- atac_files_filtered()
+    empty <- data.frame(
+      Tool = character(0), Sample = character(0), File = character(0), Size = character(0), Modified = character(0),
+      `Copy path` = character(0), Download = character(0), Delete = character(0),
+      stringsAsFactors = FALSE, check.names = FALSE
+    )
+    if (!NROW(files)) return(empty)
+    display <- files[, c("Tool", "Sample", "File", "Size", "Modified"), drop = FALSE]
+    display[] <- lapply(display, htmltools::htmlEscape)
+    absolute <- as.character(files[["Absolute path"]])
+    display[["Copy path"]] <- vapply(absolute, function(path) sprintf(
+      "<button type=\"button\" class=\"btn btn-default btn-xs copy-atac-result-path\" data-path=\"%s\">Copy path</button>",
+      htmltools::htmlEscape(path, attribute = TRUE)
+    ), character(1))
+    display$Download <- vapply(absolute, function(path) sprintf(
+      "<button type=\"button\" class=\"btn btn-primary btn-xs download-atac-result-file\" data-path=\"%s\">Download</button>",
+      htmltools::htmlEscape(path, attribute = TRUE)
+    ), character(1))
+    display$Delete <- vapply(absolute, function(path) sprintf(
+      "<button type=\"button\" class=\"btn btn-danger btn-xs delete-atac-result-file\" data-path=\"%s\">Delete</button>",
+      htmltools::htmlEscape(path, attribute = TRUE)
+    ), character(1))
+    display
+  })
+  if (DT_AVAILABLE) {
+    output$atac_files_catalog_table <- DT::renderDT(DT::datatable(
+      atac_files_catalog_display(),
+      rownames = FALSE,
+      escape = FALSE,
+      options = list(
+        pageLength = 25,
+        scrollX = TRUE,
+        scrollCollapse = TRUE,
+        autoWidth = TRUE,
+        columnDefs = list(
+          list(width = "125px", targets = 0),
+          list(width = "145px", targets = 1),
+          list(width = "400px", targets = 2),
+          list(width = "80px", targets = 3),
+          list(width = "145px", targets = 4),
+          list(width = "90px", targets = 5:7)
+        )
+      ),
+      callback = DT::JS(
+        "table.on('click', 'button.copy-atac-result-path', function(){",
+        "  var button = this; var path = button.getAttribute('data-path') || '';",
+        "  var done = function(){ var old = button.textContent; button.textContent = 'Copied'; setTimeout(function(){ button.textContent = old; }, 1200); };",
+        "  if (navigator.clipboard && window.isSecureContext) { navigator.clipboard.writeText(path).then(done); }",
+        "  else { var box = document.createElement('textarea'); box.value = path; document.body.appendChild(box); box.select(); document.execCommand('copy'); document.body.removeChild(box); done(); }",
+        "});",
+        "table.on('click', 'button.download-atac-result-file', function(){ Shiny.setInputValue('atac_download_file_request', {path: this.getAttribute('data-path') || '', nonce: Date.now()}, {priority: 'event'}); });",
+        "table.on('click', 'button.delete-atac-result-file', function(){ Shiny.setInputValue('atac_delete_file_request', {path: this.getAttribute('data-path') || '', nonce: Date.now()}, {priority: 'event'}); });"
+      )
+    ))
+  } else {
+    output$atac_files_catalog_table <- renderTable(atac_files_catalog_display())
+  }
+  output$download_atac_file_catalog <- downloadHandler(
+    filename = function() {
+      p <- current_project()
+      paste0(basename(p$project_dir %||% dirname(p$data_dir)), "_atac_file_catalog.csv")
+    },
+    content = function(file) {
+      write.csv(atac_files_filtered()[, c("Tool", "Sample", "File", "Size", "Modified"), drop = FALSE], file, row.names = FALSE, quote = TRUE)
+    }
+  )
+  observeEvent(input$atac_download_file_request, {
+    p <- current_project()
+    path <- if (is_atac_project(p)) validated_project_result_path(p, input$atac_download_file_request$path) else ""
+    if (!nzchar(path)) {
+      showNotification("The selected file is unavailable or outside this ATAC-seq project.", type = "error")
+      return()
+    }
+    selected_atac_download_path(path)
+    session$sendCustomMessage("atac-trigger-file-download", list())
+  }, ignoreInit = TRUE)
+  output$download_selected_atac_file <- downloadHandler(
+    filename = function() {
+      path <- validated_project_result_path(current_project(), selected_atac_download_path())
+      if (nzchar(path)) basename(path) else "atac_result_file"
+    },
+    content = function(file) {
+      path <- validated_project_result_path(current_project(), selected_atac_download_path())
+      req(nzchar(path))
+      if (!file.copy(path, file, overwrite = TRUE)) stop("Could not copy the selected ATAC-seq result file for download.")
+    },
+    contentType = "application/octet-stream"
+  )
+  observeEvent(input$atac_delete_file_request, {
+    p <- current_project()
+    path <- if (is_atac_project(p)) validated_project_result_path(p, input$atac_delete_file_request$path) else ""
+    if (!nzchar(path)) {
+      showNotification("The selected file is unavailable or outside this ATAC-seq project.", type = "error")
+      return()
+    }
+    pending_atac_delete_path(path)
+    showModal(modalDialog(
+      title = "Delete this result file?",
+      tags$p("This permanently deletes one file from the selected ATAC-seq project."),
+      tags$ul(tags$li(tags$strong("File: "), basename(path)), tags$li(tags$strong("Absolute path: "), tags$code(path))),
+      tags$p(tags$strong("This cannot be undone.")),
+      footer = tagList(modalButton("Cancel"), actionButton("confirm_delete_atac_file", "Delete file", class = "btn-danger")),
+      easyClose = TRUE
+    ))
+  }, ignoreInit = TRUE)
+  observeEvent(input$confirm_delete_atac_file, {
+    p <- current_project()
+    path <- if (is_atac_project(p)) validated_project_result_path(p, pending_atac_delete_path()) else ""
+    removeModal()
+    pending_atac_delete_path("")
+    if (!nzchar(path)) {
+      showNotification("The file is no longer available or is outside this ATAC-seq project.", type = "error")
+      return()
+    }
+    if (!file.remove(path)) {
+      showNotification(paste("Could not delete", basename(path)), type = "error")
+      return()
+    }
+    atac_file_catalog_refresh(isolate(atac_file_catalog_refresh()) + 1L)
+    progress_refresh(Sys.time())
+    showNotification(paste("Deleted", basename(path)), type = "message")
+  }, ignoreInit = TRUE)
   output$atac_file_ui <- renderUI({
     progress_refresh()
     p <- current_project()

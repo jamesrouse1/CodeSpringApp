@@ -705,6 +705,13 @@ writeLines(c(
   "chr1\t1\t200\tpeak1\t50\t.\t8\t6\t5\t75",
   "chr1\t300\t500\tpeak2\t40\t.\t7\t5\t4\t60"
 ), legacy_peak)
+atac_file_catalog <- app_env$atac_result_file_catalog(atac_project)
+catalog_peak <- atac_file_catalog[atac_file_catalog[["Absolute path"]] == normalizePath(legacy_peak), , drop = FALSE]
+assert(
+  NROW(catalog_peak) == 1L && identical(catalog_peak$Tool[[1]], "MACS2") &&
+    identical(catalog_peak$Sample[[1]], "A1") && identical(catalog_peak$File[[1]], basename(legacy_peak)),
+  "ATAC file catalog reports RNA-style tool, sample, filename, size, modified time, and protected absolute path metadata"
+)
 atac_peak_catalog <- app_env$genome_browser_track_catalog(atac_project)
 assert(
   NROW(atac_peak_catalog[atac_peak_catalog$kind == "peaks" & atac_peak_catalog$sample == "A1", , drop = FALSE]) >= 1L,
@@ -797,6 +804,16 @@ assert(
     !grepl("Completion state for every ATAC-seq analysis stage", atac_ui_text, fixed = TRUE) &&
     !grepl("save_results_design", atac_ui_text, fixed = TRUE),
   "ATAC overview mirrors the compact RNA summary and live sample-progress layout"
+)
+assert(
+  grepl("atac_file_tool_ui", atac_ui_text, fixed = TRUE) &&
+    grepl("atac_file_sample_ui", atac_ui_text, fixed = TRUE) &&
+    grepl("atac_files_catalog_table", atac_ui_text, fixed = TRUE) &&
+    grepl("download_atac_file_catalog", atac_ui_text, fixed = TRUE) &&
+    grepl("download_selected_atac_file", atac_ui_text, fixed = TRUE) &&
+    grepl("confirm_delete_atac_file", server_source, fixed = TRUE) &&
+    grepl("validated_project_result_path", server_source, fixed = TRUE),
+  "ATAC Files matches the RNA file catalog with tool/sample filters and protected copy, download, and confirmed-delete actions"
 )
 for (ui_check in list(
   ATAC = atac_ui_text,
