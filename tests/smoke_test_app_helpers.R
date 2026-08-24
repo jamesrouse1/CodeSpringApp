@@ -898,6 +898,11 @@ assert(
     grepl("is.null(input$genome_browser_sample_peak_sample)", server_source, fixed = TRUE),
   "ATAC genome-browser track discovery is cached and lightweight sample/file controls render before peak ranking and browser loading"
 )
+assert(
+  grepl("peak_loci <- navigation$peaks", server_source, fixed = TRUE) &&
+    grepl("selected_locus <- unname(navigation$peaks)[[1]]", server_source, fixed = TRUE),
+  "ATAC peak navigation has no blank placeholder and selects the first ranked peak by default"
+)
 atac_signal_position <- regexpr("Signal &amp; Peaks", atac_ui_text, fixed = TRUE)[[1]]
 atac_browser_position <- regexpr("Genome Browser", atac_ui_text, fixed = TRUE)[[1]]
 atac_diff_position <- regexpr("Differential Accessibility", atac_ui_text, fixed = TRUE)[[1]]

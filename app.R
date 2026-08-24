@@ -17436,7 +17436,7 @@ server <- function(input, output, session) {
       locus_flank = 500L
     )
     if (!length(navigation$peaks)) return(div(class = "muted small-note", "This peak file contains no called intervals."))
-    peak_loci <- c("Choose a peak..." = "", navigation$peaks)
+    peak_loci <- navigation$peaks
     selected_locus <- as.character(input$genome_browser_sample_peak_interval %||% "")
     if (!selected_locus %in% unname(peak_loci)) selected_locus <- unname(navigation$peaks)[[1]]
     tagList(
@@ -17444,7 +17444,6 @@ server <- function(input, output, session) {
         "genome_browser_sample_peak_interval", "Peak interval",
         choices = peak_loci, selected = selected_locus,
         options = list(
-          placeholder = "Strongest called peaks first",
           maxOptions = 250L,
           dropdownParent = "body"
         )
