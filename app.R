@@ -4912,7 +4912,7 @@ genome_browser_ui <- function() {
       textInput("genome_browser_locus", "Starting locus", value = "", placeholder = "Gene or chr:start-end"),
       actionButton("load_genome_browser", "Load tracks / go to locus", class = "btn-primary"),
       tags$hr(),
-      helpText("For CUT&RUN, Individual sample peak mode loads a target with its matched IgG on one y-axis scale and shows the selected caller's peak track. Differential comparison and manual modes remain available.")
+      helpText("Choose an individual sample peak view, a completed differential comparison, or manual samples. Available controls are detected from the selected project's saved signal and peak files.")
     ),
     mainPanel(
       width = 9,
@@ -17139,7 +17139,6 @@ server <- function(input, output, session) {
     peak_signal_track_table(current_project())
   }, page_length = 50, scroll_y = "600px")
   output$genome_browser_controls_ui <- renderUI({
-    req(identical(input$web_main_tabs %||% "", "Results Explorer"))
     p <- current_project()
     catalog <- genome_browser_track_catalog(p)
     if (!NROW(catalog)) return(div(class = "empty-box", "No bigWig signal or peak files are available yet."))

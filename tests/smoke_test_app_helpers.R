@@ -828,6 +828,12 @@ assert(all(vapply(list(atac_ui_text, chip_ui_text), function(x) grepl('col-sm-3'
 assert(grepl("Initial QC", chip_ui_text, fixed = TRUE) && grepl("Fragment Size", chip_ui_text, fixed = TRUE), "ChIP Results Explorer includes RNA-style QC navigation")
 assert(grepl("Signal Tracks", atac_ui_text, fixed = TRUE) && grepl("Signal Tracks", chip_ui_text, fixed = TRUE), "ATAC and ChIP Results Explorers expose signal-track navigation")
 assert(all(vapply(list(atac_ui_text, chip_ui_text, cutrun_ui_text), grepl, logical(1), pattern = "Genome Browser", fixed = TRUE)), "ATAC, ChIP, and CUT&RUN Results Explorers expose the embedded genome browser")
+assert(
+  grepl("Available controls are detected from the selected project's saved signal and peak files", atac_ui_text, fixed = TRUE) &&
+    !grepl("For CUT&RUN, Individual sample peak mode", atac_ui_text, fixed = TRUE) &&
+    !grepl('output$genome_browser_controls_ui <- renderUI({\n    req(identical(input$web_main_tabs', server_source, fixed = TRUE),
+  "shared genome browser uses assay-neutral guidance and renders controls in completed-results/read-only layouts"
+)
 atac_signal_position <- regexpr("Signal &amp; Peaks", atac_ui_text, fixed = TRUE)[[1]]
 atac_browser_position <- regexpr("Genome Browser", atac_ui_text, fixed = TRUE)[[1]]
 atac_diff_position <- regexpr("Differential Accessibility", atac_ui_text, fixed = TRUE)[[1]]
