@@ -298,7 +298,9 @@ assert(
   "cell_type" %in% app_env$scrna_all_metadata_columns(pbmc_project) &&
     "cell_type" %in% app_env$scrna_de_population_fields(pbmc_project, app_env$scrna_all_metadata_columns(pbmc_project)) &&
     grepl('signature_species = "auto"', app_text, fixed = TRUE) &&
-    !grepl('selectInput("scrna_signature_species"', app_text, fixed = TRUE),
+    !grepl('selectInput("scrna_signature_species"', app_text, fixed = TRUE) &&
+    grepl('Group marker figures by', app_text, fixed = TRUE) &&
+    grepl('(_panel_[0-9]+)?\\\\.png', app_text, fixed = TRUE),
   "completed annotations feed cell-type differential expression and signature species is detected automatically"
 )
 manual_map <- app_env$write_scrna_manual_cluster_mapping(pbmc_project, "cell_type", c(`0` = "Naive CD4 T", `1` = "B cells"))
