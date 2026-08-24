@@ -388,6 +388,7 @@ utils::write.table(
 embedding_views <- app_env$scrna_embedding_view_choices(embedding_project)
 unintegrated_embedding <- app_env$scrna_embedding_table(embedding_project, columns = c("cluster", "condition", "sample_id", "cell_type"), max_points = Inf, view = "unintegrated")
 assert(identical(unname(embedding_views), c("integrated", "unintegrated")), "interactive UMAP offers integrated and unintegrated coordinates when both tables exist")
+assert(grepl("scrna_embedding_stamp()", app_text, fixed = TRUE), "interactive UMAP watches coordinate outputs independently of scheduler state")
 assert(grepl('itemsizing = "constant"', app_text, fixed = TRUE) && grepl('legend = list(x = 1.02', app_text, fixed = TRUE), "interactive UMAP keeps categorical legend symbols visible and reserves a fixed legend column")
 assert(grepl("After integration / final clustering UMAP", app_text, fixed = TRUE), "run section labels the final post-integration UMAP")
 assert(identical(unintegrated_embedding$UMAP_1, c(-1, -2)) && identical(as.character(unintegrated_embedding$cluster), c("0", "1")), "unintegrated UMAP retains its coordinates and joins final annotations by exact cell ID")
@@ -395,6 +396,16 @@ assert(identical(as.character(unintegrated_embedding$cell_type), c("Monocyte", "
 unlink(file.path(embedding_test_root, "scrna", "tables", "umap_coordinates.tsv"))
 assert(identical(app_env$scrna_selected_embedding_view(embedding_project, ""), "unintegrated"), "interactive UMAP displays the unintegrated coordinates while integration is still running")
 assert("sample_id" %in% app_env$scrna_embedding_color_choices(embedding_project, "unintegrated"), "the running integration UMAP can be colored by sample")
+direct_scrna_parent <- tempfile("scrna_direct_output_")
+direct_scrna_root <- file.path(direct_scrna_parent, "scrna")
+dir.create(file.path(direct_scrna_root, "tables"), recursive = TRUE)
+utils::write.table(
+  data.frame(cell = c("c1", "c2"), UMAP_1 = c(1, 2), UMAP_2 = c(3, 4), cluster = c("0", "1")),
+  file.path(direct_scrna_root, "tables", "umap_coordinates.tsv"), sep = "\t", row.names = FALSE, quote = FALSE
+)
+direct_scrna_project <- list(data_dir = direct_scrna_root, analysis_key = "scrna", analysis = "scRNA-seq")
+assert(NROW(app_env$scrna_embedding_table(direct_scrna_project, max_points = Inf)) == 2L, "completed-results projects whose data_dir is the scRNA output folder expose their UMAP directly")
+unlink(direct_scrna_parent, recursive = TRUE, force = TRUE)
 unlink(embedding_test_root, recursive = TRUE, force = TRUE)
 assert(
   grepl('"Each input sample (recommended default)" = "sample_id"', app_text, fixed = TRUE) &&

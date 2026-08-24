@@ -11916,9 +11916,20 @@ write_scrna_manual_cluster_mapping <- function(project, annotation_name, assignm
   path
 }
 
-scrna_embedding_path <- function(project, view = "integrated") {
+scrna_embedding_candidate_paths <- function(project, view = "integrated") {
   file <- if (identical(tolower(view %||% "integrated"), "unintegrated")) "preintegration_umap_coordinates.tsv" else "umap_coordinates.tsv"
-  file.path(scrna_output_dir(project), "tables", file)
+  unique(c(
+    file.path(scrna_output_dir(project), "tables", file),
+    # Completed-results projects may already use the scRNA output folder as
+    # data_dir. Do not append a second /scrna in that layout.
+    if (identical(tolower(basename(normalizePath(project$data_dir, winslash = "/", mustWork = FALSE))), "scrna")) file.path(project$data_dir, "tables", file) else character(0)
+  ))
+}
+
+scrna_embedding_path <- function(project, view = "integrated") {
+  candidates <- scrna_embedding_candidate_paths(project, view)
+  ready <- candidates[file.exists(candidates) & vapply(candidates, file_size_for, numeric(1)) > 0]
+  if (length(ready)) ready[[1]] else candidates[[1]]
 }
 
 scrna_table_columns <- function(path) {
@@ -15448,6 +15459,26 @@ server <- function(input, output, session) {
     },
     valueFunc = function() TRUE
   )
+  scrna_embedding_stamp <- reactivePoll(
+    intervalMillis = PROGRESS_REFRESH_MS,
+    session = session,
+    checkFunc = function() {
+      p <- isolate(current_project())
+      if (!is_scrna_project(p)) return("")
+      candidates <- unique(c(
+        scrna_embedding_candidate_paths(p, "integrated"),
+        scrna_embedding_candidate_paths(p, "unintegrated")
+      ))
+      tables_dirs <- unique(dirname(candidates))
+      paths <- c(candidates[file.exists(candidates)], tables_dirs[dir.exists(tables_dirs)])
+      if (!length(paths)) return("")
+      paste(vapply(paths, function(path) {
+        info <- file.info(path)
+        paste(normalizePath(path, winslash = "/", mustWork = FALSE), info$size[[1]], as.numeric(info$mtime[[1]]), sep = "@")
+      }, character(1)), collapse = ";")
+    },
+    valueFunc = function() TRUE
+  )
   scrna_de_results_stamp <- reactivePoll(
     intervalMillis = PROGRESS_REFRESH_MS,
     session = session,
@@ -18755,6 +18786,7 @@ server <- function(input, output, session) {
     content = function(file) ggplot2::ggsave(file, scrna_violin_plot_object(), width = 10, height = 6.5, dpi = 220)
   )
   output$scrna_embedding_controls_ui <- renderUI({
+    scrna_embedding_stamp()
     scrna_signature_scores_stamp()
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
     embedding_views <- scrna_embedding_view_choices(p)
