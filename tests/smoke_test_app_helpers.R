@@ -199,6 +199,12 @@ assert(
   "bundled example paths are loaded only by the explicit example-data action"
 )
 assert(
+  grepl("raw-fastq-path-preview", app_text, fixed = TRUE) &&
+    grepl("fastq-path-layout-open", app_text, fixed = TRUE) &&
+    grepl("cslSyncFastqPathUi", app_text, fixed = TRUE),
+  "raw FASTQ setup exposes a scrollable full-path preview and widens only its active sidebar layout"
+)
+assert(
   grepl("Automatic (Harmony when a technical batch is selected)", app_text, fixed = TRUE) &&
     grepl("RPCA (anchor-based; smaller datasets)", app_text, fixed = TRUE),
   "Seurat automatic integration uses scalable Harmony while retaining explicit anchor methods for smaller datasets"

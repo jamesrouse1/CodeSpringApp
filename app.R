@@ -11664,6 +11664,16 @@ body > .container-fluid > .row > .col-sm-10 {
   padding-left: 4px;
   padding-right: 0;
 }
+@media (min-width: 901px) {
+  body.fastq-path-layout-open > .container-fluid > .row > .col-sm-2 {
+    width: 390px;
+    min-width: 390px;
+  }
+  body.fastq-path-layout-open > .container-fluid > .row > .col-sm-10 {
+    width: calc(100% - 402px);
+    max-width: calc(100% - 402px);
+  }
+}
 @media (max-width: 900px) {
   body > .container-fluid > .row {
     display: block;
@@ -12041,6 +12051,33 @@ select.form-control {
   min-height:34px;
   line-height:1.2;
 }
+.raw-fastq-path-preview {
+  margin:0 0 9px 0;
+  padding:7px 9px;
+  overflow-x:auto;
+  overflow-y:hidden;
+  white-space:nowrap;
+  background:#ffffff;
+  border:1px solid #cfd9e6;
+  border-radius:6px;
+  scrollbar-width:thin;
+  cursor:ew-resize;
+}
+.raw-fastq-path-preview code {
+  display:inline-block;
+  min-width:max-content;
+  padding:0;
+  color:#24364d;
+  background:transparent;
+  font-size:11px;
+  white-space:nowrap;
+}
+.raw-fastq-path-hint {
+  display:block;
+  margin:-3px 0 8px 1px;
+  color:#657084;
+  font-size:11px;
+}
 
 "
 
@@ -12069,8 +12106,27 @@ ui <- fluidPage(
           $(this).text(cslFormatElapsed(base + Math.max(0, now - captured)));
         });
       }
+      function cslSyncFastqPathUi() {
+        $('.raw-fastq-path-preview').each(function() {
+          var inputId = String($(this).attr('data-path-source') || '');
+          var input = inputId ? document.getElementById(inputId) : null;
+          var value = input && input.value ? String(input.value) : '';
+          $(this).find('code').text(value || 'No folder selected');
+          $(this).attr('title', value || 'No folder selected');
+          if (input) input.title = value || 'Paste or browse to a server folder';
+        });
+        var showWideSidebar = $('.raw-fastq-path-control:visible').length > 0;
+        $('body').toggleClass('fastq-path-layout-open', showWideSidebar);
+      }
       setInterval(cslTickElapsed, 1000);
       $(document).on('shiny:value.dt', cslTickElapsed);
+      $(document).on('input change', '#new_fastq_dir, #new_fastq_dir_add', cslSyncFastqPathUi);
+      $(document).on('change', '#project_id, #new_project_mode, #new_project_analysis, #new_fastq_location_mode', function() {
+        window.setTimeout(cslSyncFastqPathUi, 25);
+      });
+      $(document).on('shiny:connected shiny:value', function() {
+        window.setTimeout(cslSyncFastqPathUi, 25);
+      });
       $(document).on('dblclick', '#browser_choice', function() {
         $('#browser_open_choice').trigger('click');
       });
@@ -13191,13 +13247,17 @@ server <- function(input, output, session) {
         choices = c("One folder" = "one", "Multiple folders (treat as one input pool)" = "multiple"),
         selected = "one"
       ),
-      conditionalPanel("input.new_fastq_location_mode == 'one'", div(class = "new-project-path-control",
+      conditionalPanel("input.new_fastq_location_mode == 'one'", div(class = "new-project-path-control raw-fastq-path-control",
           textInput("new_fastq_dir", "Raw FASTQ parent folder", value = default_fastq_dir, placeholder = "Choose with Browse or paste a server path"),
+          tags$div(class = "raw-fastq-path-preview", `data-path-source` = "new_fastq_dir", tabindex = "0", tags$code("No folder selected")),
+          tags$span(class = "raw-fastq-path-hint", "Scroll sideways in the path above to view the full server location."),
           actionButton("browse_new_fastq_dir", "Browse server", class = "btn-default"),
           tags$p(class = "muted", "The app searches this folder and all readable subfolders for FASTQ files. Source files remain in place and are never copied or modified.")
       )),
-      conditionalPanel("input.new_fastq_location_mode == 'multiple'", div(class = "new-project-path-control",
+      conditionalPanel("input.new_fastq_location_mode == 'multiple'", div(class = "new-project-path-control raw-fastq-path-control",
           textInput("new_fastq_dir_add", "Add one raw FASTQ parent folder", value = "", placeholder = "Paste one server path, then click Add folder"),
+          tags$div(class = "raw-fastq-path-preview", `data-path-source` = "new_fastq_dir_add", tabindex = "0", tags$code("No folder selected")),
+          tags$span(class = "raw-fastq-path-hint", "Scroll sideways in the path above to view the full server location."),
           div(class = "path-browser-actions",
               actionButton("browse_new_fastq_dirs", "Browse server", class = "btn-default"),
               actionButton("add_new_fastq_dir", "Add folder", class = "btn-primary")
