@@ -201,8 +201,10 @@ assert(
 assert(
   grepl("raw-fastq-path-preview", app_text, fixed = TRUE) &&
     grepl("fastq-path-layout-open", app_text, fixed = TRUE) &&
-    grepl("cslSyncFastqPathUi", app_text, fixed = TRUE),
-  "raw FASTQ setup exposes a scrollable full-path preview and widens only its active sidebar layout"
+    grepl("cslSyncFastqPathUi", app_text, fixed = TRUE) &&
+    grepl("var setupTabActive", app_text, fixed = TRUE) &&
+    grepl("showWideSidebar = setupTabActive", app_text, fixed = TRUE),
+  "raw FASTQ setup exposes a scrollable full-path preview and widens the sidebar only on the Setup tab"
 )
 assert(
   grepl("Automatic (Harmony when a technical batch is selected)", app_text, fixed = TRUE) &&

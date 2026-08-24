@@ -12115,7 +12115,9 @@ ui <- fluidPage(
           $(this).attr('title', value || 'No folder selected');
           if (input) input.title = value || 'Paste or browse to a server folder';
         });
-        var showWideSidebar = $('.raw-fastq-path-control:visible').length > 0;
+        var setupTabActive = $('#web_main_tabs').val() === 'Setup' ||
+          $('a[data-value=\"Setup\"]').closest('li').hasClass('active');
+        var showWideSidebar = setupTabActive && $('.raw-fastq-path-control:visible').length > 0;
         $('body').toggleClass('fastq-path-layout-open', showWideSidebar);
       }
       setInterval(cslTickElapsed, 1000);
@@ -12125,6 +12127,9 @@ ui <- fluidPage(
         window.setTimeout(cslSyncFastqPathUi, 25);
       });
       $(document).on('shiny:connected shiny:value', function() {
+        window.setTimeout(cslSyncFastqPathUi, 25);
+      });
+      $(document).on('shown.bs.tab', 'a[data-toggle=\"tab\"]', function() {
         window.setTimeout(cslSyncFastqPathUi, 25);
       });
       $(document).on('dblclick', '#browser_choice', function() {
