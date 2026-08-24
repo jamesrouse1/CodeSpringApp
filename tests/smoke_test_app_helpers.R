@@ -199,7 +199,9 @@ assert(
   "bundled example paths are loaded only by the explicit example-data action"
 )
 assert(
-  grepl("raw-fastq-path-preview", app_text, fixed = TRUE) &&
+  grepl("setup-path-preview", app_text, fixed = TRUE) &&
+    grepl('`data-path-source` = "new_design_matrix_path"', app_text, fixed = TRUE) &&
+    grepl('`data-path-source` = "new_results_root"', app_text, fixed = TRUE) &&
     grepl("fastq-path-layout-open", app_text, fixed = TRUE) &&
     grepl("cslSyncFastqPathUi", app_text, fixed = TRUE) &&
     grepl("var setupTabActive", app_text, fixed = TRUE) &&

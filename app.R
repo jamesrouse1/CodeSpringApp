@@ -12051,7 +12051,7 @@ select.form-control {
   min-height:34px;
   line-height:1.2;
 }
-.raw-fastq-path-preview {
+.setup-path-preview {
   margin:0 0 9px 0;
   padding:7px 9px;
   overflow-x:auto;
@@ -12063,7 +12063,7 @@ select.form-control {
   scrollbar-width:thin;
   cursor:ew-resize;
 }
-.raw-fastq-path-preview code {
+.setup-path-preview code {
   display:inline-block;
   min-width:max-content;
   padding:0;
@@ -12072,7 +12072,7 @@ select.form-control {
   font-size:11px;
   white-space:nowrap;
 }
-.raw-fastq-path-hint {
+.setup-path-hint {
   display:block;
   margin:-3px 0 8px 1px;
   color:#657084;
@@ -12107,7 +12107,7 @@ ui <- fluidPage(
         });
       }
       function cslSyncFastqPathUi() {
-        $('.raw-fastq-path-preview').each(function() {
+        $('.setup-path-preview').each(function() {
           var inputId = String($(this).attr('data-path-source') || '');
           var input = inputId ? document.getElementById(inputId) : null;
           var value = input && input.value ? String(input.value) : '';
@@ -12122,7 +12122,7 @@ ui <- fluidPage(
       }
       setInterval(cslTickElapsed, 1000);
       $(document).on('shiny:value.dt', cslTickElapsed);
-      $(document).on('input change', '#new_fastq_dir, #new_fastq_dir_add', cslSyncFastqPathUi);
+      $(document).on('input change', '#new_fastq_dir, #new_fastq_dir_add, #new_design_matrix_path, #new_results_root', cslSyncFastqPathUi);
       $(document).on('change', '#project_id, #new_project_mode, #new_project_analysis, #new_fastq_location_mode', function() {
         window.setTimeout(cslSyncFastqPathUi, 25);
       });
@@ -13129,6 +13129,8 @@ server <- function(input, output, session) {
     scrna_results_location_control <- if (identical(new_analysis_key, "scrna")) tagList(
       div(class = "new-project-path-control",
         textInput("new_results_root", "Results output storage location", value = "", placeholder = paste("Optional; defaults to", DEFAULT_RESULTS_ROOT)),
+        tags$div(class = "setup-path-preview", `data-path-source` = "new_results_root", tabindex = "0", tags$code("No folder selected")),
+        tags$span(class = "setup-path-hint", "Scroll sideways in the path above to view the full server location."),
         actionButton("browse_new_results_root", "Browse server", class = "btn-default")
       ),
       checkboxInput("new_clear_existing_results", "Clear existing results if this project folder already exists", value = FALSE)
@@ -13254,15 +13256,15 @@ server <- function(input, output, session) {
       ),
       conditionalPanel("input.new_fastq_location_mode == 'one'", div(class = "new-project-path-control raw-fastq-path-control",
           textInput("new_fastq_dir", "Raw FASTQ parent folder", value = default_fastq_dir, placeholder = "Choose with Browse or paste a server path"),
-          tags$div(class = "raw-fastq-path-preview", `data-path-source` = "new_fastq_dir", tabindex = "0", tags$code("No folder selected")),
-          tags$span(class = "raw-fastq-path-hint", "Scroll sideways in the path above to view the full server location."),
+          tags$div(class = "setup-path-preview raw-fastq-path-preview", `data-path-source` = "new_fastq_dir", tabindex = "0", tags$code("No folder selected")),
+          tags$span(class = "setup-path-hint", "Scroll sideways in the path above to view the full server location."),
           actionButton("browse_new_fastq_dir", "Browse server", class = "btn-default"),
           tags$p(class = "muted", "The app searches this folder and all readable subfolders for FASTQ files. Source files remain in place and are never copied or modified.")
       )),
       conditionalPanel("input.new_fastq_location_mode == 'multiple'", div(class = "new-project-path-control raw-fastq-path-control",
           textInput("new_fastq_dir_add", "Add one raw FASTQ parent folder", value = "", placeholder = "Paste one server path, then click Add folder"),
-          tags$div(class = "raw-fastq-path-preview", `data-path-source` = "new_fastq_dir_add", tabindex = "0", tags$code("No folder selected")),
-          tags$span(class = "raw-fastq-path-hint", "Scroll sideways in the path above to view the full server location."),
+          tags$div(class = "setup-path-preview raw-fastq-path-preview", `data-path-source` = "new_fastq_dir_add", tabindex = "0", tags$code("No folder selected")),
+          tags$span(class = "setup-path-hint", "Scroll sideways in the path above to view the full server location."),
           div(class = "path-browser-actions",
               actionButton("browse_new_fastq_dirs", "Browse server", class = "btn-default"),
               actionButton("add_new_fastq_dir", "Add folder", class = "btn-primary")
@@ -13272,6 +13274,8 @@ server <- function(input, output, session) {
       )),
       div(class = "new-project-path-control",
           textInput("new_design_matrix_path", "Design matrix folder", value = default_design_dir, placeholder = "Optional; folder containing or receiving design_matrix.txt"),
+          tags$div(class = "setup-path-preview", `data-path-source` = "new_design_matrix_path", tabindex = "0", tags$code("No folder selected")),
+          tags$span(class = "setup-path-hint", "Scroll sideways in the path above to view the full server location."),
           actionButton("browse_new_design_matrix_path", "Browse server", class = "btn-default"),
           tags$p(class = "muted", "Leave this blank to create the design matrix in the Samples & Design tab after the project is created.")
       ),
@@ -13314,6 +13318,8 @@ server <- function(input, output, session) {
         "input.new_project_mode != 'existing_results'",
         div(class = "new-project-path-control",
             textInput("new_results_root", "Results root", value = "", placeholder = paste("Optional; defaults to", DEFAULT_RESULTS_ROOT)),
+            tags$div(class = "setup-path-preview", `data-path-source` = "new_results_root", tabindex = "0", tags$code("No folder selected")),
+            tags$span(class = "setup-path-hint", "Scroll sideways in the path above to view the full server location."),
             actionButton("browse_new_results_root", "Browse server", class = "btn-default")
         ),
         checkboxInput("new_clear_existing_results", "Clear existing results if this project folder already exists", value = FALSE)
