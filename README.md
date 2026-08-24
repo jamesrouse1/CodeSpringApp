@@ -1,6 +1,6 @@
 # CodeSpringApp
 
-CodeSpringApp is a Shiny-based control center for running, monitoring, and reviewing CodeSpringLab RNA-seq, ATAC-seq, CUT&RUN, and ChIP-seq projects from one server port. It replaces notebook prompts with a button-driven interface for project setup, design-matrix editing, SLURM submission, progress tracking, logs, methods, and assay-specific Results Explorers.
+CodeSpringApp is a Shiny-based control center for fetching public sequencing data and for running, monitoring, and reviewing CodeSpringLab RNA-seq, ATAC-seq, CUT&RUN, and ChIP-seq projects from one server port. It replaces notebook prompts with a button-driven interface for FetchNGS, project setup, design-matrix editing, SLURM submission, progress tracking, logs, methods, and assay-specific Results Explorers.
 
 It is designed for shared HPC environments where analyses should continue running after the browser or app is closed.
 
@@ -40,6 +40,180 @@ Example FASTQs remain read-only inputs. When the project is created, CodeSpringA
 
 The server folder browser starts from the current user's home directory and hides dotfiles by default. Folders are selectable for navigation, while visible files are listed separately for confirmation. Typed paths are validated before navigation, and empty, hidden-only, missing, and unreadable folders receive distinct messages.
 
+## FetchNGS
+
+Choose **FetchNGS** from the main **Analysis type** dropdown to open its isolated
+workspace. It runs `nf-core/fetchngs` as a standalone SLURM job. Users can
+paste public accessions directly or select a `.txt`, `.csv`, or `.tsv` accession
+file already on the server. The app supports full FASTQ retrieval and a
+metadata-only mode. Every accepted accession list is copied into the run bundle
+as `input/accessions.csv`, matching the filename validation in FetchNGS 1.12.0.
+
+The validated cluster defaults are:
+
+- Nextflow `24.04.4`
+- nf-core/fetchngs `1.12.0`
+- Singularity `3.6.3`
+- Slurm partition `cpuq`
+- FetchNGS download method `sratools`
+
+CodeSpringApp supplies an explicit ENA metadata field list that omits the
+retired `parent_study` field. This is a compatibility workaround for
+nf-core/fetchngs 1.12.0, whose former default request now produces empty
+run-information files against the ENA API. New bundles include the corrected
+field list, and resuming an older CodeSpringApp bundle adds it automatically
+when it is absent.
+
+FTP is not exposed because the tested FetchNGS wget container could not resolve
+DNS under the cluster's Singularity 3.6.3 installation. Aspera is not exposed
+because it has not yet been validated on this cluster.
+
+Each Unix user gets a private FetchNGS results folder inside the same
+`~/csl_results` area used by other CodeSpringApp projects by default:
+
+```text
+~/csl_results/
+└── fetchngs/
+  └── <run-name>/
+    ├── input/
+    ├── logs/
+    ├── results/
+    │   ├── fastq/
+    │   ├── metadata/
+    │   └── samplesheet/
+    ├── job_history.txt
+    ├── job_id.txt
+    ├── params.yml
+    ├── run.sbatch
+    └── run_manifest.tsv
+```
+
+The FetchNGS page also offers **Custom server folder**. The selected path is
+used as the exact runs root, so `/project/public_fetchngs` produces
+`/project/public_fetchngs/<run-name>/results`. Choosing a custom location changes
+run creation, listing, logs, resume, deletion, and output viewing together. The
+folder must be an absolute writable server path. Leaving **Default user folder**
+selected preserves `~/csl_results/fetchngs`.
+
+Custom results roots receive separate private Nextflow work namespaces beneath
+`~/.codespringflow/work/fetchngs/`. This prevents runs with the same name in two
+different results roots from sharing resume state or deleting each other's work
+files. The namespace and exact work directory are recorded in each run manifest.
+
+Nextflow's non-result runtime files are kept separately:
+
+```text
+~/.codespringflow/
+├── cache/singularity/
+├── tmp/
+└── work/fetchngs/<run-name>/
+```
+
+The FetchNGS tab shows the resolved output root, discovered runs, Slurm state,
+FASTQ and metadata counts, output size, and the newest controller log. A failed
+or interrupted run can be selected and resumed with Nextflow's `-resume`
+behavior. **Create bundle only** writes and validates the input, parameter,
+manifest, and Slurm files without submitting a job.
+
+### FetchNGS accession and download safeguards
+
+CodeSpringApp strictly accepts the accession families documented by
+nf-core/fetchngs 1.12.0:
+
+- runs: `SRR`, `ERR`, `DRR`
+- experiments: `SRX`, `ERX`, `DRX`
+- samples: `SRS`, `ERS`, `DRS`, `SAMN`, `SAMEA`, `SAMD`
+- studies: `SRP`, `ERP`, `DRP`
+- submissions: `SRA`, `ERA`, `DRA`
+- BioProjects: `PRJNA`, `PRJEB`, `PRJDB`
+- GEO: `GSM`, `GSE`
+
+Values are converted to uppercase and deduplicated. Any unrecognized format is
+rejected before a run folder or Slurm job is created. Server-side accession
+files receive the same validation as IDs pasted into the app.
+
+Before a real FASTQ submission, the app requests an ENA run-level file report,
+deduplicates overlapping resolved runs, and sums the reported compressed
+`fastq_bytes`. By default, a submission is blocked when it resolves to more
+than 20 unique runs or its known compressed FASTQs exceed 50 GB.
+
+When ENA cannot provide a usable size for one or more accessions, the app does
+not fail the whole request. It pauses before creating or submitting the job and
+opens a prominent decision dialog:
+
+- **Skip unknown-size accessions** converts the request to the resolved run IDs
+  with known sizes, excluding the affected runs or unresolved input accessions.
+  If every requested accession is unknown, the app explains that nothing is
+  left to submit instead of creating an empty job.
+- **Continue with unknown sizes** keeps the original accession list. The user
+  must tick a separate risk acknowledgement before submission. The known
+  portion must still pass the configured size and storage limits, but the total
+  download, temporary-space need, and number of runs behind an unresolved
+  study/project cannot be guaranteed and the workflow may fail.
+
+Metadata-only mode remains available and does not require a size estimate.
+
+The app also checks free space before submission. When results and private
+Nextflow work use the same filesystem, free space must be at least four times
+the estimated compressed FASTQ size. When they use different filesystems, one
+copy is reserved for final results and the remaining allowance is required on
+the runtime/work filesystem. This accounts approximately for the larger
+temporary files created by `sra-tools`; it is a pre-submission safety check,
+not a storage reservation.
+
+The same checks run again before **Resume selected run** submits a non-metadata
+workflow. When Skip is chosen during resume, the app backs up the run's original
+`accessions.csv` and replaces it with the known-size resolved run list before
+calling Nextflow with `-resume`. Therefore, creating a bundle with **Create
+bundle only** cannot bypass the preflight or the explicit unknown-size decision.
+
+FetchNGS status messages are severity-aware. Errors appear in a high-contrast
+red alert with an **Action needed** heading; checks and unresolved-size choices
+appear in amber; successful updates appear in green.
+
+Administrators can change these server-side limits before launching the app:
+
+```bash
+export CSL_FETCHNGS_MAX_RUNS=20
+export CSL_FETCHNGS_MAX_DOWNLOAD_GB=50
+export CSL_FETCHNGS_STORAGE_MULTIPLIER=4
+export CSL_FETCHNGS_ENA_TIMEOUT_SECONDS=30
+```
+
+These limits are displayed to users but have no normal user-interface override.
+
+The **FetchNGS Outputs** tab lists files beneath the selected run's `results/`
+folder. CSV, TSV, and TXT files are shown as capped interactive tables; JSON,
+YAML, Markdown, and log files receive a capped text preview. Large or binary
+files such as compressed FASTQs are listed with their path, type, size, and
+modification time without being loaded into the browser. The inventory is
+limited to the first 2,000 files and six folder levels so opening a large run
+cannot indefinitely block the Shiny session.
+
+The output viewer has its own **Results location to view** selector. It always
+includes the default `~/csl_results/fetchngs` location and remembers readable
+custom locations for the current Unix user. Use **Add an older results folder**
+to select the folder that directly contains older `<run-name>/results/`
+directories. This viewer choice does not change the destination used for new
+FetchNGS runs.
+
+**Delete selected run** asks for confirmation and removes only that run's folder
+beneath the currently selected results root and its matching private Nextflow
+work directory. It refuses to delete a run whose recorded SLURM job is still
+active, and it never removes the shared Singularity cache.
+
+FetchNGS only retrieves data. It does not automatically launch CUT&RUN, Sarek,
+or another analysis workflow. A downloaded FASTQ folder can later be selected
+through the normal CodeSpringApp project setup controls.
+
+To override either location, set the applicable root before starting the app:
+
+```bash
+export CSL_FETCHNGS_RESULTS_ROOT=/path/to/csl_results/fetchngs
+export CSL_FETCHNGS_RUNTIME_ROOT=/path/to/private/fetchngs_runtime
+./run_codespringweb.sh
+```
+
 ## Run On The Server
 
 Use the launcher script. It checks required packages, finds an open server port, starts Shiny, and prints the exact SSH tunnel command to run from your laptop.
@@ -78,6 +252,8 @@ Example launcher output. The port in your terminal may differ if the default por
 ![CodeSpringApp launcher output](docs/assets/launcher_output.png)
 
 ## What It Does
+
+- Retrieves public sequencing data through a standalone nf-core/fetchngs SLURM workflow.
 
 ### Single-cell RNA-seq
 
@@ -206,7 +382,10 @@ For new projects, it creates project-local outputs under:
 
 ## Tabs
 
+- The `Analysis type` dropdown treats `FetchNGS` as a separate data-retrieval workflow. Selecting it hides biological-project controls and analysis tabs; selecting RNA-seq, scRNA-seq, ATAC-seq, CUT&RUN, or ChIP-seq restores the normal project workspace.
 - `Setup`: choose analysis/project, create projects, browse server folders, select genome references, and delete configs/results.
+- `FetchNGS`: shown only when FetchNGS is selected; paste or select public accessions, submit or resume downloads, inspect run status, and read controller logs.
+- `FetchNGS Outputs`: shown only when FetchNGS is selected; choose current or remembered results locations, inventory a selected run's result files, and safely preview supported tables and text outputs.
 - `Design Matrix`: scan FASTQ folders, include/exclude samples, edit metadata, and save a project-local `design_matrix.txt`.
 - `Run Pipeline`: submit SLURM jobs with step-specific settings and safeguards.
 - `Progress`: monitor step and sample progress, including active, cancelled, deleted, and likely failed states.
@@ -230,6 +409,9 @@ Project logs are written under:
 <results_root>/<project_name>/log/
 ```
 
+FetchNGS controller logs and nf-core execution reports are stored under
+`~/csl_results/fetchngs/<run-name>/logs/` by default.
+
 ## Tests
 
 With CodeSpringLab checked out beside this repository, run:
@@ -238,4 +420,8 @@ With CodeSpringLab checked out beside this repository, run:
 bash tests/run_all.sh ../CodeSpringLab
 ```
 
-This validates project setup, example datasets, pipeline step selection, output detection, retry behavior, paired- and single-end STAR/Kallisto/RSEM/featureCounts SLURM arguments, Results Explorer helpers, and launcher path isolation without submitting cluster jobs.
+This first performs a FetchNGS bundle smoke test without Slurm or network
+access. It then validates project setup, example datasets, pipeline step
+selection, output detection, retry behavior, paired- and single-end
+STAR/Kallisto/RSEM/featureCounts SLURM arguments, Results Explorer helpers, and
+launcher path isolation without submitting cluster jobs.
