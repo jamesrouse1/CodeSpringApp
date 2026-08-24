@@ -4184,6 +4184,15 @@ genome_browser_track_catalog <- function(project) {
   catalog
 }
 
+atac_individual_peak_rows <- function(catalog, sample) {
+  rows <- catalog[catalog$kind == "peaks" & catalog$sample == sample, , drop = FALSE]
+  if (!NROW(rows)) return(rows)
+  name <- basename(rows$path)
+  called <- grepl("_peaks\\.(narrowPeak|broadPeak)$", name, ignore.case = TRUE)
+  if (any(called)) rows <- rows[called, , drop = FALSE]
+  rows[order(match(tolower(tools::file_ext(rows$path)), c("narrowpeak", "broadpeak", "bed"), nomatch = 99L), rows$path), , drop = FALSE]
+}
+
 genome_browser_differential_bed <- function(project, result_dir) {
   if (!dir.exists(result_dir)) return("")
   candidates <- if (is_cutrun_project(project)) {
@@ -4632,13 +4641,15 @@ cutrun_overlap_rank_fallback <- function(overlaps, summary_path) {
 # Read a bounded set of intervals for the individual CUT&RUN peak browser.
 # The menu is intentionally bounded so a very large peak set cannot make the
 # Results Explorer unresponsive; selecting an interval only moves the locus.
-cutrun_individual_peak_navigation <- function(path, max_peaks = 250L, scan_limit = 1000L) {
+cutrun_individual_peak_navigation <- function(path, max_peaks = 250L, scan_limit = 1000L, score_preference = c("qValue", "pValue", "signalValue", "score", "V4"), locus_flank = 0L) {
   empty <- list(peaks = setNames(character(0), character(0)), total = 0L, shown = 0L)
   if (!nzchar(path) || !file.exists(path) || file_size_for(path) <= 0) return(empty)
   path <- normalizePath(path, winslash = "/", mustWork = TRUE)
   info <- file.info(path)
   scan_limit <- max(as.integer(max_peaks), as.integer(scan_limit))
-  cache_key <- paste("cutrun_individual", path, max_peaks, scan_limit, sep = "\r")
+  score_preference <- unique(as.character(score_preference))
+  locus_flank <- max(0L, as.integer(locus_flank %||% 0L))
+  cache_key <- paste("cutrun_individual", path, max_peaks, scan_limit, paste(score_preference, collapse = ","), locus_flank, sep = "\r")
   signature <- paste(info$size[[1]], as.numeric(info$mtime[[1]]), sep = "|")
   if (exists(cache_key, envir = GENOME_BROWSER_NAV_CACHE, inherits = FALSE)) {
     cached <- get(cache_key, envir = GENOME_BROWSER_NAV_CACHE, inherits = FALSE)
@@ -4684,7 +4695,7 @@ cutrun_individual_peak_navigation <- function(path, max_peaks = 250L, scan_limit
     score_candidates <- if (ranked_overlap) {
       intersect(c("combined_evidence_rank"), names(peaks))
     } else {
-      intersect(c("qValue", "pValue", "signalValue", "score", "V4"), names(peaks))
+      intersect(score_preference, names(peaks))
     }
     score_column <- score_candidates[vapply(score_candidates, function(column) {
       values <- suppressWarnings(as.numeric(peaks[[column]]))
@@ -4708,6 +4719,13 @@ cutrun_individual_peak_navigation <- function(path, max_peaks = 250L, scan_limit
     }
     ranked <- utils::head(ranked, as.integer(max_peaks))
     interval <- interval[ranked]
+    navigation_interval <- if (locus_flank > 0L) {
+      paste0(
+        as.character(peaks$chrom[ranked]), ":",
+        format(pmax(1, start[ranked] - locus_flank), scientific = FALSE, trim = TRUE), "-",
+        format(end[ranked] + locus_flank, scientific = FALSE, trim = TRUE)
+      )
+    } else interval
     score <- score[ranked]
     label <- paste0(seq_along(interval), ". ", interval)
     if (ranked_overlap && "combined_evidence_rank" %in% names(peaks)) {
@@ -4726,10 +4744,20 @@ cutrun_individual_peak_navigation <- function(path, max_peaks = 250L, scan_limit
       if (is.finite(parsed)) parsed else NROW(peaks)
     }
     value <- list(
-      peaks = stats::setNames(interval, make.unique(label, sep = " — ")),
+      peaks = stats::setNames(navigation_interval, make.unique(label, sep = " — ")),
       total = as.integer(total %||% NROW(peaks)),
       shown = as.integer(length(interval)),
-      ranking = if (ranked_overlap) "combined caller evidence" else "caller signal/evidence"
+      ranking = if (ranked_overlap) {
+        "combined caller evidence"
+      } else if (length(score_column) && identical(score_column, "signalValue")) {
+        "MACS2 signalValue"
+      } else if (length(score_column) && score_column %in% c("qValue", "pValue")) {
+        paste0("MACS2 -log10(", if (identical(score_column, "qValue")) "q" else "p", ")")
+      } else if (length(score_column)) {
+        "caller score"
+      } else {
+        "genomic order (no numeric peak score found)"
+      }
     )
   }
   assign(cache_key, list(signature = signature, value = value), envir = GENOME_BROWSER_NAV_CACHE)
@@ -17284,11 +17312,14 @@ server <- function(input, output, session) {
       peak_samples <- unique(as.character(catalog$sample[catalog$kind == "peaks"]))
       peak_samples <- unique(c(design_order[design_order %in% peak_samples], sort(setdiff(peak_samples, design_order))))
       peak_sample <- selected_choice(input$genome_browser_sample_peak_sample, peak_samples, peak_samples[[1]])
-      peak_rows <- catalog[catalog$kind == "peaks" & catalog$sample == peak_sample, , drop = FALSE]
-      peak_rows <- peak_rows[order(peak_rows$label, peak_rows$path), , drop = FALSE]
+      peak_rows <- atac_individual_peak_rows(catalog, peak_sample)
       peak_choices <- stats::setNames(peak_rows$path, make.unique(basename(peak_rows$path), sep = " — "))
       peak_path <- selected_choice(input$genome_browser_sample_peak_file, peak_choices, peak_rows$path[[1]])
-      navigation <- cutrun_individual_peak_navigation(peak_path, max_peaks = 250L)
+      navigation <- cutrun_individual_peak_navigation(
+        peak_path, max_peaks = 250L,
+        score_preference = c("signalValue", "qValue", "pValue", "score", "V4"),
+        locus_flank = 500L
+      )
       peak_loci <- c("Choose a peak..." = "", navigation$peaks)
       selected_locus <- as.character(input$genome_browser_sample_peak_interval %||% "")
       if (!selected_locus %in% unname(peak_loci)) selected_locus <- if (length(navigation$peaks)) unname(navigation$peaks)[[1]] else ""
@@ -17314,7 +17345,10 @@ server <- function(input, output, session) {
           class = "muted small-note",
           "The browser loads the selected sample's CPM bigWig with this peak file. ",
           format(navigation$total, big.mark = ","), " called peak", if (navigation$total == 1L) "" else "s",
-          if (navigation$shown) paste0("; showing the top ", format(navigation$shown, big.mark = ","), " for navigation.") else "."
+          if (navigation$shown) paste0(
+            "; showing the top ", format(navigation$shown, big.mark = ","),
+            " ranked by ", navigation$ranking %||% "MACS2 signalValue", "."
+          ) else "."
         )
       ))
     } else if (identical(mode, "comparison") && NROW(comparisons)) {
@@ -17501,15 +17535,18 @@ server <- function(input, output, session) {
       design_order <- project_samples(p)
       peak_samples <- unique(c(design_order[design_order %in% peak_samples], sort(setdiff(peak_samples, design_order))))
       peak_sample <- selected_choice(input$genome_browser_sample_peak_sample, peak_samples, peak_samples[[1]])
-      peak_rows <- catalog[catalog$kind == "peaks" & catalog$sample == peak_sample, , drop = FALSE]
-      peak_rows <- peak_rows[order(peak_rows$label, peak_rows$path), , drop = FALSE]
+      peak_rows <- atac_individual_peak_rows(catalog, peak_sample)
       peak_path <- selected_choice(input$genome_browser_sample_peak_file, peak_rows$path, peak_rows$path[[1]])
       selected_samples <- peak_sample
       tracks <- genome_browser_preferred_signal_rows(p, catalog, selected_samples)
       if (NROW(tracks)) tracks$label <- paste(peak_sample, "CPM signal", sep = " — ")
       selected_peak_row <- peak_rows[match(peak_path, peak_rows$path), , drop = FALSE]
       tracks <- rbind(tracks, selected_peak_row)
-      navigation <- cutrun_individual_peak_navigation(peak_path, max_peaks = 250L)
+      navigation <- cutrun_individual_peak_navigation(
+        peak_path, max_peaks = 250L,
+        score_preference = c("signalValue", "qValue", "pValue", "score", "V4"),
+        locus_flank = 500L
+      )
       selected_peak_locus <- trimws(as.character(locus_override %||% input$genome_browser_sample_peak_interval %||% ""))
       if (!nzchar(selected_peak_locus) && length(navigation$peaks)) selected_peak_locus <- unname(navigation$peaks)[[1]]
       comparison_default_locus <- selected_peak_locus

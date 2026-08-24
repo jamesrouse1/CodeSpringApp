@@ -725,6 +725,17 @@ assert(
     !any(grepl("SEACR", names(atac_peak_navigation$peaks), fixed = TRUE)),
   "ATAC sample-peak navigation uses MACS2 evidence labels without CUT&RUN terminology"
 )
+atac_signal_navigation <- app_env$cutrun_individual_peak_navigation(
+  legacy_peak,
+  score_preference = c("signalValue", "qValue", "pValue", "score"),
+  locus_flank = 500L
+)
+assert(
+  grepl("signal 8", names(atac_signal_navigation$peaks)[[1]], fixed = TRUE) &&
+    identical(unname(atac_signal_navigation$peaks)[[1]], "chr1:1-700") &&
+    identical(atac_signal_navigation$ranking, "MACS2 signalValue"),
+  "ATAC peak navigation ranks by MACS2 signalValue and adds flanking baseline around the called interval"
+)
 missing_q_peak <- file.path(sample_dir, "A1_missing_q_peaks.narrowPeak")
 writeLines(c(
   "chr1\t10\t110\tpeak_missing_q\t25\t.\t12.5\t-1\t-1\t50",
@@ -742,6 +753,16 @@ assert(
   file.exists(atac_display_bed) && NCOL(atac_display_rows) == 6L && NROW(atac_display_rows) == 2L &&
     identical(as.character(atac_display_rows[[1]][[1]]), "chr1") && identical(as.numeric(atac_display_rows[[5]][[1]]), 50),
   "ATAC individual peaks are converted to a visible BED6 annotation while quantitative signal remains in the bigWig"
+)
+summits_file <- file.path(sample_dir, "A1_summits.bed")
+writeLines("chr1\t75\t76\tpeak1\t8", summits_file)
+atac_catalog_with_summits <- app_env$genome_browser_track_catalog(atac_project)
+atac_called_peak_rows <- app_env$atac_individual_peak_rows(atac_catalog_with_summits, "A1")
+assert(
+  NROW(atac_called_peak_rows) >= 1L &&
+    all(grepl("_peaks\\.(narrowPeak|broadPeak)$", basename(atac_called_peak_rows$path), ignore.case = TRUE)) &&
+    !any(grepl("summits", basename(atac_called_peak_rows$path), ignore.case = TRUE)),
+  "ATAC individual peak mode excludes coordinate-only MACS2 summit BEDs when scored called-peak files are available"
 )
 completed_selector_samples <- app_env$completed_samples_for_step(atac_project, "MACS2 Peaks", c("A1", "A2"))
 assert("A1" %in% completed_selector_samples && !"A2" %in% completed_selector_samples, "sample selectors identify completed samples without unchecking unfinished samples")
