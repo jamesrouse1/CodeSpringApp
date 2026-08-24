@@ -305,6 +305,14 @@ utils::write.table(
   sep = "\t", row.names = FALSE, quote = FALSE
 )
 signature_choices <- app_env$scrna_signature_score_choices(pbmc_project)
+publication_size <- app_env$scrna_embedding_publication_point_size(2700L)
+signature_umap <- app_env$scrna_continuous_embedding_ggplot(
+  data.frame(UMAP_1 = c(0, 1), UMAP_2 = c(1, 0)),
+  c(0.1, 0.9),
+  "B-cell signature score",
+  "Module score",
+  publication_size
+)
 assert(
   "cell_type" %in% app_env$scrna_all_metadata_columns(pbmc_project) &&
     "cell_type" %in% app_env$scrna_de_population_fields(pbmc_project, app_env$scrna_all_metadata_columns(pbmc_project)) &&
@@ -315,7 +323,12 @@ assert(
     grepl('(_panel_[0-9]+)?\\\\.png', app_text, fixed = TRUE) &&
     grepl('requested_gene <- "CD8A"', app_text, fixed = TRUE) &&
     grepl('default_group <- if ("cell_type" %in% group_choices)', app_text, fixed = TRUE) &&
-    grepl('scrna_run_signature_umap_plot', app_text, fixed = TRUE),
+    grepl('scrna_run_signature_umap_plot', app_text, fixed = TRUE) &&
+    grepl('scrna_continuous_embedding_ggplot(', app_text, fixed = TRUE) &&
+    is.finite(publication_size) && publication_size <= 1.5 &&
+    inherits(signature_umap, "ggplot") &&
+    !grepl('scrna_violin_facet', app_text, fixed = TRUE) &&
+    !grepl('facet_wrap(~facet', app_text, fixed = TRUE),
   "completed annotations feed cell-type differential expression and signature species is detected automatically"
 )
 manual_map <- app_env$write_scrna_manual_cluster_mapping(pbmc_project, "cell_type", c(`0` = "Naive CD4 T", `1` = "B cells"))

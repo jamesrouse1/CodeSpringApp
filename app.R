@@ -12018,6 +12018,38 @@ scrna_embedding_auto_point_size <- function(n_cells) {
   max(1.6, min(6, 2.8 * sqrt(50000 / n_cells)))
 }
 
+# Publication/static UMAPs are physically larger than the interactive canvas,
+# so use the same restrained point scale everywhere they are rendered.  This
+# keeps run-card previews and downloaded visualizer plots visually identical.
+scrna_embedding_publication_point_size <- function(n_cells, requested = 2) {
+  requested <- suppressWarnings(as.numeric(requested))
+  if (!is.finite(requested)) requested <- 2
+  interactive_size <- max(requested, scrna_embedding_auto_point_size(n_cells))
+  max(0.12, min(1.5, interactive_size * 0.25))
+}
+
+scrna_continuous_embedding_ggplot <- function(x, values, title, legend_title, point_size, opacity = 0.72, show_legend = TRUE) {
+  x$.color_value <- suppressWarnings(as.numeric(values))
+  x <- x[is.finite(x$.color_value), , drop = FALSE]
+  if (!NROW(x)) return(NULL)
+  # Low values are drawn first so the biologically strongest cells remain
+  # visible without changing the embedding or separating it into panels.
+  x <- x[order(x$.color_value), , drop = FALSE]
+  ggplot2::ggplot(x, ggplot2::aes(x = .data$UMAP_1, y = .data$UMAP_2, color = .data$.color_value)) +
+    ggplot2::geom_point(size = point_size, alpha = opacity, stroke = 0) +
+    ggplot2::scale_color_viridis_c(name = legend_title, option = "C") +
+    ggplot2::coord_equal() +
+    ggplot2::labs(title = title, x = "UMAP 1", y = "UMAP 2") +
+    ggplot2::theme_classic(base_size = 13) +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(face = "bold", hjust = 0),
+      axis.title = ggplot2::element_text(face = "bold"),
+      legend.position = if (isTRUE(show_legend)) "right" else "none",
+      legend.title = ggplot2::element_text(face = "bold"),
+      legend.key.height = grid::unit(0.42, "cm")
+    )
+}
+
 scrna_embedding_color_column <- function(project, requested = "", view = "integrated") {
   choices <- scrna_embedding_color_choices(project, view)
   if (!length(choices)) return("")
@@ -17118,15 +17150,15 @@ server <- function(input, output, session) {
     x$score <- suppressWarnings(as.numeric(x[[score_column]]))
     x <- x[is.finite(x$score), , drop = FALSE]
     req(NROW(x) > 0L)
-    x <- x[order(x$score), , drop = FALSE]
     label <- names(choices)[match(score_column, unname(choices))] %||% gsub("^signature__", "", score_column)
-    ggplot2::ggplot(x, ggplot2::aes(x = .data$UMAP_1, y = .data$UMAP_2, color = .data$score)) +
-      ggplot2::geom_point(size = scrna_embedding_auto_point_size(NROW(x)), alpha = 0.9, stroke = 0) +
-      ggplot2::scale_color_gradientn(colors = c("#DCE3EC", "#74A9CF", "#2B8CBE", "#7A0177"), name = "Module score") +
-      ggplot2::coord_equal() +
-      ggplot2::labs(title = paste0(label, " signature score"), subtitle = paste(format(NROW(x), big.mark = ","), "cells; higher-scoring cells are drawn last"), x = "UMAP 1", y = "UMAP 2") +
-      ggplot2::theme_classic(base_size = 13) +
-      ggplot2::theme(plot.title = ggplot2::element_text(face = "bold"), legend.position = "right")
+    scrna_continuous_embedding_ggplot(
+      x = x,
+      values = x$score,
+      title = paste0(label, " signature score"),
+      legend_title = "Module score",
+      point_size = scrna_embedding_publication_point_size(NROW(x)),
+      opacity = 0.72
+    )
   }, res = 130)
 
   output$scrna_differential_settings_ui <- renderUI({
@@ -18622,13 +18654,11 @@ server <- function(input, output, session) {
     requested_gene <- trimws(as.character(isolate(input$scrna_violin_gene) %||% ""))
     if (!nzchar(requested_gene)) requested_gene <- "CD8A"
     default_group <- if ("cell_type" %in% group_choices) "cell_type" else if ("cluster" %in% group_choices) "cluster" else group_choices[[1]]
-    facet_choices <- c("No facets" = "", stats::setNames(intersect(c("sample_id", "condition", "batch"), columns), intersect(c("sample_id", "condition", "batch"), columns)))
     tagList(
       fluidRow(
-        column(3, radioButtons("scrna_violin_value_mode", "Show", choices = mode_choices, selected = mode, inline = FALSE)),
-        column(3, conditionalPanel("input.scrna_violin_value_mode == 'gene'", scrna_violin_gene_input(p, requested_gene)), conditionalPanel("input.scrna_violin_value_mode == 'signature'", selectInput("scrna_violin_signature", "Signature", choices = signature_choices, selected = selected_choice(isolate(input$scrna_violin_signature), signature_choices, scrna_default_b_cell_signature(signature_choices)), selectize = FALSE))),
-        column(3, selectInput("scrna_violin_group", "Separate violins by", choices = group_choices, selected = selected_choice(isolate(input$scrna_violin_group), group_choices, default_group), selectize = FALSE)),
-        column(3, selectInput("scrna_violin_facet", "Optional facets", choices = facet_choices, selected = selected_choice(isolate(input$scrna_violin_facet), facet_choices, ""), selectize = FALSE))
+        column(4, radioButtons("scrna_violin_value_mode", "Show", choices = mode_choices, selected = mode, inline = FALSE)),
+        column(4, conditionalPanel("input.scrna_violin_value_mode == 'gene'", scrna_violin_gene_input(p, requested_gene)), conditionalPanel("input.scrna_violin_value_mode == 'signature'", selectInput("scrna_violin_signature", "Signature", choices = signature_choices, selected = selected_choice(isolate(input$scrna_violin_signature), signature_choices, scrna_default_b_cell_signature(signature_choices)), selectize = FALSE))),
+        column(4, selectInput("scrna_violin_group", "Separate violins by", choices = group_choices, selected = selected_choice(isolate(input$scrna_violin_group), group_choices, default_group), selectize = FALSE))
       ),
       tags$p(class = "muted small-note", paste(if (length(signatures)) "Stored signatures are available because signature scoring has been completed. Gene violins use normalized expression from the processed object." else "Run Signature scoring to add reusable signature-score violins. Gene violins use normalized expression from the processed object.", "The y-axis ends at the 98th percentile of the displayed violin with the highest mean so rare extreme cells do not compress the distributions."))
     )
@@ -18637,8 +18667,7 @@ server <- function(input, output, session) {
     p <- current_project(); req(is_scrna_project(p))
     mode <- input$scrna_violin_value_mode %||% "gene"
     group_column <- input$scrna_violin_group %||% "cluster"
-    facet_column <- input$scrna_violin_facet %||% ""
-    metadata_columns <- unique(c(group_column, facet_column))
+    metadata_columns <- group_column
     if (identical(mode, "signature")) {
       value_column <- input$scrna_violin_signature %||% ""
       req(nzchar(value_column))
@@ -18661,9 +18690,8 @@ server <- function(input, output, session) {
     }
     req(group_column %in% names(x))
     result <- data.frame(cell = x$cell, group = as.character(x[[group_column]]), value = value, stringsAsFactors = FALSE)
-    result$facet <- if (nzchar(facet_column) && facet_column %in% names(x)) as.character(x[[facet_column]]) else ""
     result <- result[is.finite(result$value) & !is.na(result$group) & nzchar(result$group), , drop = FALSE]
-    list(data = result, label = label, y_label = y_label, group_label = group_column, facet_label = facet_column)
+    list(data = result, label = label, y_label = y_label, group_label = group_column)
   })
   scrna_violin_plot_object <- reactive({
     info <- scrna_violin_data(); x <- info$data
@@ -18674,8 +18702,7 @@ server <- function(input, output, session) {
     levels <- if (all(is.finite(numeric_groups))) groups[order(numeric_groups)] else sort(groups)
     x$group <- factor(x$group, levels = levels)
     colors <- stats::setNames(scrna_discrete_palette(length(levels)), levels)
-    limit_groups <- if (any(nzchar(x$facet))) interaction(x$group, x$facet, drop = TRUE) else x$group
-    y_upper <- scrna_violin_upper_limit(x$value, limit_groups, 0.98)
+    y_upper <- scrna_violin_upper_limit(x$value, x$group, 0.98)
     plot <- ggplot2::ggplot(x, ggplot2::aes(x = group, y = value, fill = group)) +
       ggplot2::geom_violin(scale = "width", trim = TRUE, linewidth = 0.35, color = "#374151") +
       ggplot2::geom_boxplot(width = 0.12, outlier.shape = NA, fill = "white", alpha = 0.78, linewidth = 0.3) +
@@ -18684,7 +18711,6 @@ server <- function(input, output, session) {
       ggplot2::theme_classic(base_size = 12) +
       ggplot2::theme(plot.title = ggplot2::element_text(face = "bold"), axis.text.x = ggplot2::element_text(angle = if (length(levels) > 6L) 45 else 0, hjust = if (length(levels) > 6L) 1 else 0.5))
     if (is.finite(y_upper) && y_upper > min(x$value, na.rm = TRUE)) plot <- plot + ggplot2::coord_cartesian(ylim = c(NA_real_, y_upper), expand = FALSE)
-    if (nzchar(info$facet_label) && any(nzchar(x$facet))) plot <- plot + ggplot2::facet_wrap(~facet, scales = "free_x")
     plot
   })
   output$scrna_expression_violin <- renderPlot({ scrna_violin_plot_object() }, res = 120)
@@ -18916,10 +18942,7 @@ server <- function(input, output, session) {
     validate(need(NROW(x), "No valid UMAP coordinates are available."))
     point_size <- suppressWarnings(as.numeric(input$scrna_embedding_point_size %||% 2))
     if (!is.finite(point_size)) point_size <- 2
-    point_size <- max(point_size, scrna_embedding_auto_point_size(NROW(x)))
-    # PDF is physically larger than the browser canvas; use a more restrained
-    # point scale so sparse examples remain clean rather than oversized.
-    point_size <- max(0.12, min(1.5, point_size * 0.25))
+    point_size <- scrna_embedding_publication_point_size(NROW(x), point_size)
     opacity <- suppressWarnings(as.numeric(input$scrna_embedding_opacity %||% 0.72))
     if (!is.finite(opacity)) opacity <- 0.72
     opacity <- max(0.1, min(1, opacity))
@@ -18941,16 +18964,12 @@ server <- function(input, output, session) {
       validate(need(!is.null(expression), paste("Marker expression could not be read.", scrna_dashboard_expression_error() %||% "")))
       index <- match(x$cell, expression$cell)
       validate(need(!anyNA(index)), "The marker-expression values do not match this UMAP. Re-run Normalize & PCA and UMAP.")
-      x$.color_value <- expression$expression[index]
-      return(base + ggplot2::geom_point(data = x, ggplot2::aes(color = .data$.color_value), size = point_size, alpha = opacity) +
-        ggplot2::scale_color_gradientn(colours = unname(scrna_expression_colorscale()), name = marker_gene))
+      return(scrna_continuous_embedding_ggplot(x, expression$expression[index], title, marker_gene, point_size, opacity, isTRUE(input$scrna_embedding_legend)))
     }
     value <- x[[color_column]]
     force_discrete <- color_column %in% scrna_discrete_metadata_fields(p)
     if (!force_discrete && (is.numeric(value) || is.integer(value))) {
-      x$.color_value <- value
-      return(base + ggplot2::geom_point(data = x, ggplot2::aes(color = .data$.color_value), size = point_size, alpha = opacity) +
-        ggplot2::scale_color_viridis_c(name = color_column, option = "C"))
+      return(scrna_continuous_embedding_ggplot(x, value, title, color_column, point_size, opacity, isTRUE(input$scrna_embedding_legend)))
     }
     labels <- as.character(value); labels[is.na(labels) | !nzchar(labels)] <- "Unassigned"
     x$.color_value <- labels
