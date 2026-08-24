@@ -345,9 +345,10 @@ writeLines("gene\tavg_log2FC\tp_val\nCD79A\t1.2\t0.001", file.path(de_dir, "cell
 de_catalog <- app_env$scrna_completed_de_comparison_catalog(pbmc_project)
 assert(
   NROW(de_catalog) == 1L && identical(de_catalog$method[[1]], "Cell-level Wilcoxon") &&
+    identical(unname(app_env$scrna_de_result_method_choices(pbmc_project)), "cell") &&
     grepl('selectInput("scrna_pathway_de_file", "Differential-expression comparison"', app_text, fixed = TRUE) &&
     grepl('scrna_de_results_stamp()', app_text, fixed = TRUE),
-  "pathway analysis lists every completed cell-level or pseudobulk comparison"
+  "completed cell-level differential expression is selected automatically when pseudobulk output is absent"
 )
 legacy_de <- file.path(pbmc_manifest_dir, "scrna", "tables", "cell_level_differential_expression.tsv")
 dir.create(dirname(legacy_de), recursive = TRUE, showWarnings = FALSE)

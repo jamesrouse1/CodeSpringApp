@@ -11835,6 +11835,11 @@ scrna_de_result_file_choices <- function(project, method = c("pseudobulk", "cell
   stats::setNames(files, labels)
 }
 
+scrna_de_result_method_choices <- function(project) {
+  labels <- c("Pseudobulk DESeq2" = "pseudobulk", "Exploratory cell-level" = "cell")
+  labels[vapply(unname(labels), function(method) length(scrna_de_result_file_choices(project, method)) > 0L, logical(1))]
+}
+
 scrna_pathway_result_file_choices <- function(project) {
   root <- file.path(scrna_output_dir(project), "tables")
   files <- if (dir.exists(root)) list.files(root, pattern = "^pathway_fgsea_ranked__.*\\.tsv$", full.names = TRUE) else character(0)
@@ -18444,13 +18449,14 @@ server <- function(input, output, session) {
   output$scrna_de_result_controls_ui <- renderUI({
     scrna_de_results_stamp()
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
-    method <- input$scrna_de_result_method %||% "pseudobulk"
-    choices <- scrna_de_result_file_choices(p, if (identical(method, "cell")) "cell" else "pseudobulk")
-    if (!length(choices)) return(div(class = "empty-box", "No completed differential-expression result is available for this method yet."))
+    method_choices <- scrna_de_result_method_choices(p)
+    if (!length(method_choices)) return(div(class = "empty-box", "No completed differential-expression result files were found yet."))
+    method <- selected_choice(input$scrna_de_result_method, method_choices, unname(method_choices)[[1]])
+    choices <- scrna_de_result_file_choices(p, method)
     selected <- selected_choice(input$scrna_de_result_file, choices, unname(choices)[[1]])
     tagList(
       fluidRow(
-        column(4, radioButtons("scrna_de_result_method", "Analysis level", choices = c("Pseudobulk DESeq2" = "pseudobulk", "Exploratory cell-level" = "cell"), selected = method, inline = TRUE)),
+        column(4, radioButtons("scrna_de_result_method", "Analysis level", choices = method_choices, selected = method, inline = TRUE)),
         column(8, selectInput("scrna_de_result_file", "Comparison and population", choices = choices, selected = selected, selectize = FALSE))
       ),
       tags$p(class = "muted small-note", basename(selected))
@@ -18458,8 +18464,10 @@ server <- function(input, output, session) {
   })
   output$scrna_de_result_table <- render_csl_table({
     p <- current_project(); if (!is_scrna_project(p)) return(data.frame())
-    method <- input$scrna_de_result_method %||% "pseudobulk"
-    choices <- scrna_de_result_file_choices(p, if (identical(method, "cell")) "cell" else "pseudobulk")
+    method_choices <- scrna_de_result_method_choices(p)
+    if (!length(method_choices)) return(data.frame())
+    method <- selected_choice(input$scrna_de_result_method, method_choices, unname(method_choices)[[1]])
+    choices <- scrna_de_result_file_choices(p, method)
     path <- selected_choice(input$scrna_de_result_file, choices, if (length(choices)) unname(choices)[[1]] else "")
     if (!length(path) || is.na(path[[1]]) || !nzchar(path[[1]])) return(data.frame())
     safe_read_table(path, 100000)
