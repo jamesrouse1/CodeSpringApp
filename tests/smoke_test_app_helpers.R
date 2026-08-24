@@ -2353,6 +2353,9 @@ assert(
     !grepl('tags$input(type = "hidden", id = "scrna_marker_source"', app_text, fixed = TRUE) &&
     grepl('selected_method <- if (pbmc_example) "markers"', app_text, fixed = TRUE) &&
     grepl('selected_marker_source <- if (pbmc_example) "server"', app_text, fixed = TRUE) &&
+    grepl('scrna_marker_assignment: \'scrna_marker_assignment_intent\'', app_text, fixed = TRUE) &&
+    grepl('marker_assignment = "automatic"', app_text, fixed = TRUE) &&
+    grepl('controls_ready <- all(vapply(suggestions$cluster', app_text, fixed = TRUE) &&
     grepl('default_signature_source <- if (pbmc_example', app_text, fixed = TRUE),
   "annotation method and source persistence is driven by explicit user intent rather than dynamic-control recreation"
 )

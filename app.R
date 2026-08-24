@@ -15378,6 +15378,19 @@ server <- function(input, output, session) {
     },
     valueFunc = function() TRUE
   )
+  scrna_marker_suggestions_stamp <- reactivePoll(
+    intervalMillis = PROGRESS_REFRESH_MS,
+    session = session,
+    checkFunc = function() {
+      p <- isolate(current_project())
+      if (!is_scrna_project(p)) return("")
+      path <- file.path(scrna_output_dir(p), "tables", "marker_annotation_cluster_scores.tsv")
+      if (!file.exists(path)) return("")
+      info <- file.info(path)
+      paste(info$size[[1]], as.numeric(info$mtime[[1]]), sep = "@")
+    },
+    valueFunc = function() TRUE
+  )
 
   existing_project_selected <- reactive({
     if (is_fetchngs_analysis(input$analysis %||% "RNA-seq")) return(FALSE)
@@ -15401,7 +15414,7 @@ server <- function(input, output, session) {
   scrna_annotation_ui_state <- function(project = current_project()) {
     states <- scrna_annotation_ui_settings()
     states[[scrna_manual_project_key(project)]] %||% list(
-      method = "markers", marker_source = "manual", reference_source = "server", celltype_source = "server"
+      method = "markers", marker_source = "manual", marker_assignment = "automatic", reference_source = "server", celltype_source = "server"
     )
   }
   set_scrna_annotation_ui_value <- function(name, value, project = current_project()) {
@@ -15409,7 +15422,7 @@ server <- function(input, output, session) {
     if (!nzchar(value)) return(invisible(NULL))
     states <- isolate(scrna_annotation_ui_settings())
     key <- scrna_manual_project_key(project)
-    state <- states[[key]] %||% list(method = "markers", marker_source = "manual", reference_source = "server", celltype_source = "server")
+    state <- states[[key]] %||% list(method = "markers", marker_source = "manual", marker_assignment = "automatic", reference_source = "server", celltype_source = "server")
     state[[name]] <- value
     states[[key]] <- state
     scrna_annotation_ui_settings(states)
@@ -16826,6 +16839,9 @@ server <- function(input, output, session) {
   observeEvent(input$scrna_marker_source_intent, {
     set_scrna_annotation_ui_value("marker_source", input$scrna_marker_source_intent)
   }, ignoreInit = TRUE)
+  observeEvent(input$scrna_marker_assignment_intent, {
+    set_scrna_annotation_ui_value("marker_assignment", input$scrna_marker_assignment_intent)
+  }, ignoreInit = TRUE)
   observeEvent(input$scrna_reference_source_intent, {
     set_scrna_annotation_ui_value("reference_source", input$scrna_reference_source_intent)
   }, ignoreInit = TRUE)
@@ -16870,6 +16886,7 @@ server <- function(input, output, session) {
         var bindings = {
           scrna_annotation_method: 'scrna_annotation_method_intent',
           scrna_marker_source: 'scrna_marker_source_intent',
+          scrna_marker_assignment: 'scrna_marker_assignment_intent',
           scrna_reference_source: 'scrna_reference_source_intent',
           scrna_celltype_source: 'scrna_celltype_source_intent'
         };
@@ -16904,7 +16921,7 @@ server <- function(input, output, session) {
       conditionalPanel("input.scrna_marker_source == 'upload'", fileInput("scrna_marker_upload", "Marker list from laptop", accept = c(".tsv", ".txt"))),
       conditionalPanel("input.scrna_marker_source != 'manual'", uiOutput("scrna_marker_list_preview_ui")),
       tags$p(class = "muted small-note", "Marker species is detected automatically from gene-symbol capitalization and overlap with the expression matrix; matching is case-insensitive."),
-      radioButtons("scrna_marker_assignment", "How should clusters be labeled?", choices = c("Automatically use the highest normalized average per cluster" = "automatic", "Review suggestions and label clusters manually" = "manual"), selected = isolate(input$scrna_marker_assignment) %||% "automatic"),
+      radioButtons("scrna_marker_assignment", "How should clusters be labeled?", choices = c("Automatically use the highest normalized average per cluster" = "automatic", "Review suggestions and label clusters manually" = "manual"), selected = ui_state$marker_assignment %||% "automatic"),
       conditionalPanel("input.scrna_marker_assignment == 'manual'", uiOutput("scrna_manual_annotation_review_ui")),
       tags$p(class = "muted small-note", "Suggestion rankings use the mean normalized marker score within each cluster. Multi-gene marker labels are generally more robust."),
       ),
@@ -16943,6 +16960,7 @@ server <- function(input, output, session) {
   output$scrna_annotation_run_button_ui <- renderUI({
     p <- current_project()
     if (!is_scrna_project(p)) return(NULL)
+    scrna_marker_suggestions_stamp()
     # Dynamic annotation controls are recreated when the method or source
     # changes. Do not expose a submit action until those controls are mounted.
     pbmc_example <- scrna_is_pbmc3k_example(p)
@@ -16957,16 +16975,20 @@ server <- function(input, output, session) {
     }
     if (identical(method, "markers") && is.null(input$scrna_marker_source)) return(NULL)
     if (identical(method, "mapping") && is.null(input$scrna_celltype_source)) return(NULL)
-    if (pbmc_example && identical(method, "markers") && identical(input$scrna_marker_assignment %||% "automatic", "manual")) {
+    assignment_mode <- scrna_annotation_ui_state(p)$marker_assignment %||% input$scrna_marker_assignment %||% "automatic"
+    if (pbmc_example && identical(method, "markers") && identical(assignment_mode, "manual")) {
       suggestions <- scrna_marker_suggestion_table(p, input$scrna_annotation_name %||% "cell_type")
-      label <- if (NROW(suggestions)) "Apply manual cluster labels" else "Generate marker suggestions"
-      return(actionButton("run_scrna_annotate", label, class = "btn-primary"))
+      if (!NROW(suggestions)) return(actionButton("run_scrna_annotate", "Generate marker suggestions", class = "btn-primary"))
+      controls_ready <- all(vapply(suggestions$cluster, function(cluster) !is.null(input[[scrna_manual_cluster_input_id(cluster)]]), logical(1)))
+      if (!controls_ready) return(div(class = "empty-box", "Loading the cluster-review table below…"))
+      return(actionButton("run_scrna_annotate", "Apply manual cluster labels", class = "btn-primary"))
     }
     actionButton("run_scrna_annotate", if (pbmc_example && identical(method, "markers")) "Run automatic annotation" else "Run annotation", class = "btn-primary")
   })
 
   output$scrna_manual_annotation_review_ui <- renderUI({
     p <- current_project(); if (!is_scrna_project(p) || !scrna_is_pbmc3k_example(p)) return(NULL)
+    scrna_marker_suggestions_stamp()
     suggestions <- scrna_marker_suggestion_table(p, input$scrna_annotation_name %||% "cell_type")
     if (!NROW(suggestions)) return(div(class = "empty-box", "Run Generate marker suggestions first. The app will calculate the marker dot plot and ranked normalized-average suggestions without locking in the labels."))
     rankings <- attr(suggestions, "rankings")
@@ -17543,8 +17565,9 @@ server <- function(input, output, session) {
     integration_choice <- if (!multiple_inputs || isTRUE(input$scrna_cluster_without_integration)) "none" else input$scrna_integration %||% "auto"
     annotation_ui <- isolate(scrna_annotation_ui_state(p))
     annotation_method <- annotation_ui$method %||% input$scrna_annotation_method %||% "markers"
+    marker_assignment <- annotation_ui$marker_assignment %||% input$scrna_marker_assignment %||% "automatic"
     manual_cluster_mapping <- ""
-    if (identical(stage, "annotate") && pbmc_example && identical(annotation_method, "markers") && identical(input$scrna_marker_assignment %||% "automatic", "manual")) {
+    if (identical(stage, "annotate") && pbmc_example && identical(annotation_method, "markers") && identical(marker_assignment, "manual")) {
       suggestions <- scrna_marker_suggestion_table(p, input$scrna_annotation_name %||% "cell_type")
       if (NROW(suggestions)) {
         assignments <- stats::setNames(vapply(suggestions$cluster, function(cluster) trimws(as.character(input[[scrna_manual_cluster_input_id(cluster)]] %||% "")), character(1)), suggestions$cluster)
