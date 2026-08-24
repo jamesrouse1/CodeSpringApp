@@ -759,6 +759,16 @@ assert(inherits(app_env$chip_results_explorer_ui(), "shiny.tag"), "ChIP Results 
 atac_ui_text <- as.character(app_env$atac_results_explorer_ui())
 chip_ui_text <- as.character(app_env$chip_results_explorer_ui())
 cutrun_ui_text <- as.character(app_env$cutrun_results_explorer_ui())
+atac_summary_text <- as.character(app_env$atac_summary_cards_ui(atac_project))
+assert(
+  grepl("Disk space", atac_summary_text, fixed = TRUE) &&
+    grepl("Peak files", atac_summary_text, fixed = TRUE) &&
+    grepl("Result files", atac_summary_text, fixed = TRUE) &&
+    grepl("atac_overview_sample_progress_ui", atac_ui_text, fixed = TRUE) &&
+    !grepl("Completion state for every ATAC-seq analysis stage", atac_ui_text, fixed = TRUE) &&
+    !grepl("save_results_design", atac_ui_text, fixed = TRUE),
+  "ATAC overview mirrors the compact RNA summary and live sample-progress layout"
+)
 for (ui_check in list(
   ATAC = atac_ui_text,
   ChIP = chip_ui_text,

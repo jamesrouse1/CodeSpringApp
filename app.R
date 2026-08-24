@@ -4098,12 +4098,15 @@ cutrun_fragment_plot_files <- function(project) {
   unname(files[!duplicated(samples)])
 }
 
-human_file_size <- function(path) {
-  bytes <- file_size_for(path)
+human_byte_count <- function(bytes) {
   if (!is.finite(bytes) || bytes <= 0) return("0 B")
   units <- c("B", "KB", "MB", "GB", "TB")
   power <- min(floor(log(bytes, 1024)), length(units) - 1L)
   paste0(format(round(bytes / (1024^power), if (power == 0) 0 else 1), nsmall = if (power == 0) 0 else 1, trim = TRUE), " ", units[[power + 1L]])
+}
+
+human_file_size <- function(path) {
+  human_byte_count(file_size_for(path))
 }
 
 cutrun_signal_track_table <- function(project) {
@@ -5073,13 +5076,17 @@ atac_summary_cards_ui <- function(project) {
       cutrun_metric_card("Differential comparisons", format_metric_value(length(comparisons)), "Completed DiffBind folders", "green")
     ))
   }
+  project_files <- if (dir.exists(project$data_dir)) {
+    list.files(project$data_dir, recursive = TRUE, full.names = TRUE, all.files = TRUE, no.. = TRUE)
+  } else character(0)
+  project_files <- project_files[file.exists(project_files) & !dir.exists(project_files)]
+  project_bytes <- if (length(project_files)) sum(vapply(project_files, file_size_for, numeric(1)), na.rm = TRUE) else 0
+  result_files <- atac_files_by_category(project, "all")
   div(class = "cutrun-metric-grid",
-    cutrun_metric_card("Samples", format_metric_value(sample_count), sample_note, "blue"),
-    cutrun_metric_card("Alignment summaries", format_metric_value(NROW(alignment)), paste(assay, "Bowtie2 outputs"), "green"),
-    cutrun_metric_card("Median mapped reads", if (length(mapped)) format_metric_value(stats::median(mapped)) else "—", paste(length(mapped), "completed summaries"), "gold"),
-    cutrun_metric_card("Post-alignment complete", format_metric_value(completed_postprocess), "Validated sample output sets", "purple"),
-    cutrun_metric_card("MACS2 peak files", format_metric_value(length(peak_files)), "Completed peak calls", "blue"),
-    cutrun_metric_card("Differential comparisons", format_metric_value(length(comparisons)), "Completed DiffBind folders", "green")
+    cutrun_metric_card("Disk space", human_byte_count(project_bytes), "Total size of project result files", "blue"),
+    cutrun_metric_card("Samples", format_metric_value(sample_count), sample_note, "green"),
+    cutrun_metric_card("Peak files", format_metric_value(length(peak_files)), "Completed MACS2 peak calls", "gold"),
+    cutrun_metric_card("Result files", format_metric_value(length(result_files)), "Recognized ATAC-seq outputs", "purple")
   )
 }
 
@@ -5174,15 +5181,29 @@ results_overview_contents <- function(refresh_id, note, status_description, desi
   )
 }
 
+atac_overview_contents <- function() {
+  tagList(
+    br(),
+    div(
+      class = "cutrun-results-actions",
+      span(class = "cutrun-updated-note", "Live summary of saved pipeline outputs"),
+      actionButton("refresh_atac_results", "Refresh results", class = "btn-primary")
+    ),
+    uiOutput("atac_summary_cards"),
+    div(
+      class = "cutrun-section-heading",
+      tags$h4("Sample progress"),
+      tags$p("The same live sample-by-step visualization shown on the Progress page.")
+    ),
+    uiOutput("atac_overview_sample_progress_ui")
+  )
+}
+
 atac_results_explorer_ui <- function(initial_tab = "Overview") {
   div(class = "native-results-host cutrun-results-host", div(class = "app-shell cutrun-results-shell",
     results_explorer_hero("ATAC-seq Results Explorer"),
     div(class = "main-tabs", tabsetPanel(id = "atac_results_tabs", selected = initial_tab,
-      tabPanel("Overview", results_overview_contents(
-        "refresh_atac_results", "Live summary of saved pipeline outputs",
-        "Completion state for every ATAC-seq analysis stage.",
-        "Samples, conditions, cell types, and replicates used by ATAC-seq peak and differential-accessibility analyses."
-      )),
+      tabPanel("Overview", atac_overview_contents()),
       tabPanel("QC", br(), tabsetPanel(id = "atac_qc_tabs",
         tabPanel("Initial QC", br(), sidebarLayout(
           sidebarPanel(width = 3, uiOutput("atac_qc_sample_control"), uiOutput("atac_qc_mode_control"), tags$hr(), helpText("FastQC and FastQ Screen reports for raw or cutadapt-trimmed reads.")),
@@ -14163,6 +14184,12 @@ server <- function(input, output, session) {
 
   output$rna_overview_sample_progress_ui <- renderUI({
     if (!isTRUE(existing_project_selected()) || !identical(current_project()$analysis_key, "rna")) return(NULL)
+    progress_refresh()
+    sample_progress_matrix_ui(sample_progress_state())
+  })
+
+  output$atac_overview_sample_progress_ui <- renderUI({
+    if (!isTRUE(existing_project_selected()) || !is_atac_project(current_project())) return(NULL)
     progress_refresh()
     sample_progress_matrix_ui(sample_progress_state())
   })
