@@ -11852,7 +11852,8 @@ scrna_pathway_result_file_choices <- function(project) {
 }
 
 scrna_pathway_plot_for_result <- function(project, path) {
-  if (!nzchar(path) || !file.exists(path)) return("")
+  if (!length(path) || is.na(path[[1]]) || !nzchar(path[[1]]) || !file.exists(path[[1]])) return("")
+  path <- path[[1]]
   stem <- sub("^pathway_fgsea_ranked__", "", sub("\\.tsv$", "", basename(path)))
   candidates <- c(
     file.path(scrna_output_dir(project), "figures", paste0("pathway_fgsea_top20__", stem, ".png")),
@@ -18460,7 +18461,7 @@ server <- function(input, output, session) {
     method <- input$scrna_de_result_method %||% "pseudobulk"
     choices <- scrna_de_result_file_choices(p, if (identical(method, "cell")) "cell" else "pseudobulk")
     path <- selected_choice(input$scrna_de_result_file, choices, if (length(choices)) unname(choices)[[1]] else "")
-    if (!nzchar(path)) return(data.frame())
+    if (!length(path) || is.na(path[[1]]) || !nzchar(path[[1]])) return(data.frame())
     safe_read_table(path, 100000)
   }, page_length = 50, scroll_y = "560px")
   output$scrna_de_manifest <- render_csl_table({
@@ -18494,7 +18495,7 @@ server <- function(input, output, session) {
     p <- current_project(); if (!is_scrna_project(p)) return(data.frame())
     choices <- scrna_pathway_result_file_choices(p)
     path <- selected_choice(input$scrna_pathway_result_file, choices, if (length(choices)) unname(choices)[[1]] else "")
-    if (!nzchar(path)) return(data.frame())
+    if (!length(path) || is.na(path[[1]]) || !nzchar(path[[1]])) return(data.frame())
     safe_read_table(path, 100000)
   }, page_length = 50, scroll_y = "560px")
   output$scrna_input_processing <- render_csl_table({
