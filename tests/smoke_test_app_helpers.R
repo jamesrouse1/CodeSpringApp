@@ -126,6 +126,12 @@ assert(
     any(grepl("signature = browser_signature", runtime_text, fixed = TRUE)),
   "genome browser reuses an unchanged IGV instance instead of repeatedly reloading the same large peak tracks"
 )
+igv_clear_position <- regexpr("if (previous && window.codespringIgvBrowser === previous)", app_text, fixed = TRUE)[[1]]
+igv_stale_position <- regexpr("if (requestId !== window.codespringIgvLoadRequestId) return null;", substring(app_text, igv_clear_position), fixed = TRUE)[[1]]
+assert(
+  igv_clear_position > 0L && igv_stale_position > 0L,
+  "superseded IGV reloads clear the removed browser before the next queued request, preventing a grey double-removal state"
+)
 browser_controls_source <- sub(
   "^[\\s\\S]*output\\$genome_browser_controls_ui <- renderUI\\(\\{",
   "",
@@ -148,6 +154,8 @@ assert(
     grepl('mode_override = "comparison"', server_source, fixed = TRUE) &&
     grepl('send_genome_browser(mode_override = mode)', server_source, fixed = TRUE) &&
     grepl('}, ignoreInit = TRUE, priority = -100)', server_source, fixed = TRUE) &&
+    grepl('isolate(tryCatch({', server_source, fixed = TRUE) &&
+    grepl('Could not switch genome-browser tracks:', server_source, fixed = TRUE) &&
     grepl('if (is.null(input$genome_browser_show_differential_peaks)) TRUE', server_source, fixed = TRUE),
   "every browser-mode change explicitly replaces IGV tracks and comparison mode defaults to its differential BED"
 )

@@ -12454,9 +12454,11 @@ ui <- fluidPage(
           var previous = window.codespringIgvBrowser;
           var removal = previous ? Promise.resolve(window.igv.removeBrowser(previous)) : Promise.resolve();
           return removal.then(function() {
+            if (previous && window.codespringIgvBrowser === previous) {
+              window.codespringIgvBrowser = null;
+              window.codespringIgvSignature = '';
+            }
             if (requestId !== window.codespringIgvLoadRequestId) return null;
-            window.codespringIgvBrowser = null;
-            window.codespringIgvSignature = '';
             container.innerHTML = '';
             return window.igv.createBrowser(container, message.config).then(function(browser) {
               if (requestId !== window.codespringIgvLoadRequestId) {
@@ -17732,24 +17734,32 @@ server <- function(input, output, session) {
     mode <- trimws(as.character(input$genome_browser_mode %||% ""))
     if (!nzchar(mode)) return(invisible(NULL))
     session$onFlushed(function() {
-      p <- current_project()
-      if (!is_atac_project(p) && !is_chip_project(p) && !is_cutrun_project(p)) return(invisible(NULL))
-      if (identical(mode, "comparison")) {
-        comparisons <- genome_browser_comparison_catalog(p)
-        if (!NROW(comparisons)) return(send_genome_browser(mode_override = "manual"))
-        comparison_id <- selected_choice(isolate(input$genome_browser_comparison), comparisons$id, comparisons$id[[1]])
-        comparison <- comparisons[match(comparison_id, comparisons$id), , drop = FALSE]
-        catalog <- genome_browser_catalog()
-        available <- comparison$samples[[1]]
-        available <- available[available %in% unique(as.character(catalog$sample))]
-        send_genome_browser(
-          comparison_override = comparison_id,
-          samples_override = available,
-          mode_override = "comparison"
-        )
-      } else {
-        send_genome_browser(mode_override = mode)
-      }
+      isolate(tryCatch({
+        p <- current_project()
+        if (!is_atac_project(p) && !is_chip_project(p) && !is_cutrun_project(p)) return(invisible(NULL))
+        if (identical(mode, "comparison")) {
+          comparisons <- genome_browser_comparison_catalog(p)
+          if (!NROW(comparisons)) {
+            send_genome_browser(mode_override = "manual")
+          } else {
+            comparison_id <- selected_choice(input$genome_browser_comparison, comparisons$id, comparisons$id[[1]])
+            comparison <- comparisons[match(comparison_id, comparisons$id), , drop = FALSE]
+            catalog <- genome_browser_catalog()
+            available <- comparison$samples[[1]]
+            available <- available[available %in% unique(as.character(catalog$sample))]
+            send_genome_browser(
+              comparison_override = comparison_id,
+              samples_override = available,
+              mode_override = "comparison"
+            )
+          }
+        } else {
+          send_genome_browser(mode_override = mode)
+        }
+      }, error = function(e) {
+        run_message(paste("Genome browser mode reload failed:", conditionMessage(e)))
+        showNotification(paste("Could not switch genome-browser tracks:", conditionMessage(e)), type = "error")
+      }))
     }, once = TRUE)
   }, ignoreInit = TRUE, priority = -100)
   observeEvent(input$genome_browser_cutrun_peak, {
