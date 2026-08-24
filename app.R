@@ -16862,9 +16862,9 @@ server <- function(input, output, session) {
     inspection_state <- isolate(scrna_reference_inspection())
     retained_reference <- identical(as.character(inspection_state$project_id %||% ""), as.character(p$id %||% p$name)) &&
       nzchar(inspection_state$reference_file %||% "") && file.exists(inspection_state$reference_file %||% "")
-    if (pbmc_example) annotation_methods <- c("Marker-list scoring" = "markers")
     selected_method <- if (pbmc_example) "markers" else ui_state$method %||% isolate(input$scrna_annotation_method) %||% "markers"
     if (!selected_method %in% unname(annotation_methods)) selected_method <- "markers"
+    selected_marker_source <- if (pbmc_example) "server" else ui_state$marker_source %||% default_marker_source
     tagList(
       tags$script(HTML("(function(){
         var bindings = {
@@ -16888,10 +16888,10 @@ server <- function(input, output, session) {
       ),
       textInput("scrna_annotation_name", "Annotation metadata name", value = isolate(input$scrna_annotation_name) %||% "cell_type", placeholder = "For example: cell_type_bone_marrow"),
       tags$p(class = "muted small-note", "Use a new name for each marker system (for example cell_type_broad and cell_type_fine). Existing annotation and signature metadata are retained in the processed object."),
-      if (pbmc_example) tags$p(class = "muted small-note", "The example uses marker-list scoring with the bundled canonical PBMC genes below.") else radioButtons("scrna_annotation_method", "Annotation method", choices = annotation_methods, selected = selected_method, inline = TRUE),
-      if (pbmc_example) tags$input(type = "hidden", id = "scrna_annotation_method", value = "markers") else NULL,
+      if (pbmc_example) tags$p(class = "muted small-note", "Marker-list scoring is preselected for the example and uses the bundled canonical PBMC genes. The other annotation methods remain available below.") else NULL,
+      radioButtons("scrna_annotation_method", "Annotation method", choices = annotation_methods, selected = selected_method, inline = TRUE),
       conditionalPanel("input.scrna_annotation_method == 'markers'",
-      if (pbmc_example) tags$input(type = "hidden", id = "scrna_marker_source", value = "server") else radioButtons("scrna_marker_source", "How do you want to provide marker genes?", choices = c("Enter cell types here" = "manual", "Browse or paste a server path" = "server", "Upload from laptop" = "upload"), selected = ui_state$marker_source %||% default_marker_source, inline = TRUE),
+      radioButtons("scrna_marker_source", "How do you want to provide marker genes?", choices = c("Enter cell types here" = "manual", "Browse or paste a server path" = "server", "Upload from laptop" = "upload"), selected = selected_marker_source, inline = TRUE),
       conditionalPanel("input.scrna_marker_source == 'manual'", div(class = "read-source-note",
         tags$strong("Add one cell type at a time"),
         tags$p("Give the cell type a clear name, enter one marker gene per line, and add it to the collection. Re-entering the same cell-type name replaces that entry."),
@@ -16946,7 +16946,7 @@ server <- function(input, output, session) {
     # Dynamic annotation controls are recreated when the method or source
     # changes. Do not expose a submit action until those controls are mounted.
     pbmc_example <- scrna_is_pbmc3k_example(p)
-    method <- if (pbmc_example) "markers" else input$scrna_annotation_method %||% ""
+    method <- input$scrna_annotation_method %||% ""
     if (!nzchar(method)) return(NULL)
     if (identical(method, "reference")) {
       state <- scrna_reference_inspection()
@@ -16955,14 +16955,14 @@ server <- function(input, output, session) {
       if (!ready || is.null(input$scrna_reference_label_column)) return(NULL)
       return(actionButton("run_scrna_annotate", "Run reference annotation", class = "btn-primary"))
     }
-    if (identical(method, "markers") && !pbmc_example && is.null(input$scrna_marker_source)) return(NULL)
+    if (identical(method, "markers") && is.null(input$scrna_marker_source)) return(NULL)
     if (identical(method, "mapping") && is.null(input$scrna_celltype_source)) return(NULL)
-    if (pbmc_example && identical(input$scrna_marker_assignment %||% "automatic", "manual")) {
+    if (pbmc_example && identical(method, "markers") && identical(input$scrna_marker_assignment %||% "automatic", "manual")) {
       suggestions <- scrna_marker_suggestion_table(p, input$scrna_annotation_name %||% "cell_type")
       label <- if (NROW(suggestions)) "Apply manual cluster labels" else "Generate marker suggestions"
       return(actionButton("run_scrna_annotate", label, class = "btn-primary"))
     }
-    actionButton("run_scrna_annotate", if (pbmc_example) "Run automatic annotation" else "Run annotation", class = "btn-primary")
+    actionButton("run_scrna_annotate", if (pbmc_example && identical(method, "markers")) "Run automatic annotation" else "Run annotation", class = "btn-primary")
   })
 
   output$scrna_manual_annotation_review_ui <- renderUI({
@@ -17004,7 +17004,8 @@ server <- function(input, output, session) {
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
     pbmc_example <- scrna_is_pbmc3k_example(p)
     saved_signature_path <- isolate(input$scrna_signature_file) %||% ""
-    default_signature_source <- if (pbmc_example && is.null(isolate(input$scrna_signature_source))) "server" else isolate(input$scrna_signature_source) %||% "manual"
+    current_signature_source <- isolate(input$scrna_signature_source) %||% ""
+    default_signature_source <- if (pbmc_example && !current_signature_source %in% c("manual", "server", "upload")) "server" else if (current_signature_source %in% c("manual", "server", "upload")) current_signature_source else "manual"
     default_signature_path <- if (pbmc_example && !nzchar(trimws(saved_signature_path))) SCRNA_PBMC3K_SIGNATURES_FILE else saved_signature_path
     tagList(
       tags$p(class = "muted small-note", if (pbmc_example) "The PBMC 3K example starts with a bundled set of canonical cell-population signatures. You can replace it or add your own signatures." else "Add every signature you want to calculate, review the collection, and then click Run signature scoring once. All signatures are scored in the same submitted job using normalized expression, never scaled PCA values."),
@@ -17541,9 +17542,9 @@ server <- function(input, output, session) {
     single_biological_sample <- length(scrna_biological_sample_ids(p)) <= 1L
     integration_choice <- if (!multiple_inputs || isTRUE(input$scrna_cluster_without_integration)) "none" else input$scrna_integration %||% "auto"
     annotation_ui <- isolate(scrna_annotation_ui_state(p))
-    annotation_method <- if (pbmc_example) "markers" else annotation_ui$method %||% input$scrna_annotation_method %||% "markers"
+    annotation_method <- annotation_ui$method %||% input$scrna_annotation_method %||% "markers"
     manual_cluster_mapping <- ""
-    if (identical(stage, "annotate") && pbmc_example && identical(input$scrna_marker_assignment %||% "automatic", "manual")) {
+    if (identical(stage, "annotate") && pbmc_example && identical(annotation_method, "markers") && identical(input$scrna_marker_assignment %||% "automatic", "manual")) {
       suggestions <- scrna_marker_suggestion_table(p, input$scrna_annotation_name %||% "cell_type")
       if (NROW(suggestions)) {
         assignments <- stats::setNames(vapply(suggestions$cluster, function(cluster) trimws(as.character(input[[scrna_manual_cluster_input_id(cluster)]] %||% "")), character(1)), suggestions$cluster)
@@ -17591,13 +17592,16 @@ server <- function(input, output, session) {
         harmony_theta = input$scrna_harmony_theta %||% 2,
         harmony_lambda = input$scrna_harmony_lambda %||% 1,
         harmony_max_iter = input$scrna_harmony_max_iter %||% 20,
-        marker_file = if (identical(annotation_method, "markers")) if (pbmc_example) SCRNA_PBMC3K_MARKERS_FILE else input$scrna_marker_file %||% "" else "",
+        marker_file = if (identical(annotation_method, "markers")) {
+          selected_marker_file <- input$scrna_marker_file %||% ""
+          if (pbmc_example && identical(input$scrna_marker_source %||% "server", "server") && !nzchar(trimws(selected_marker_file))) SCRNA_PBMC3K_MARKERS_FILE else selected_marker_file
+        } else "",
         celltype_file = if (nzchar(manual_cluster_mapping)) manual_cluster_mapping else if (identical(annotation_method, "mapping")) input$scrna_celltype_file %||% "" else "",
         reference_file = if (use_retained_reference) inspected_reference$reference_file else if (identical(annotation_method, "reference")) input$scrna_reference_file %||% "" else "",
         marker_upload = if (identical(annotation_method, "markers")) input$scrna_marker_upload else NULL,
         celltype_upload = if (identical(annotation_method, "mapping")) input$scrna_celltype_upload else NULL,
         reference_upload = if (identical(annotation_method, "reference") && !use_retained_reference) input$scrna_reference_upload else NULL,
-        marker_source = if (identical(annotation_method, "markers")) if (pbmc_example) "server" else input$scrna_marker_source %||% "manual" else "server",
+        marker_source = if (identical(annotation_method, "markers")) input$scrna_marker_source %||% (if (pbmc_example) "server" else "manual") else "server",
         celltype_source = if (identical(annotation_method, "mapping")) input$scrna_celltype_source %||% "server" else "server",
         reference_source = if (use_retained_reference) "server" else if (identical(annotation_method, "reference")) reference_source else "server",
         reference_label_column = if (identical(annotation_method, "reference")) input$scrna_reference_label_column %||% "" else "",

@@ -2348,7 +2348,12 @@ assert(
 assert(
   grepl("scrna_annotation_method_intent", app_text, fixed = TRUE) &&
     grepl("click.cslAnnotationIntent_", app_text, fixed = TRUE) &&
-    grepl('annotation_method <- if (pbmc_example) "markers" else annotation_ui$method %||% input$scrna_annotation_method', app_text, fixed = TRUE),
+    grepl('annotation_method <- annotation_ui$method %||% input$scrna_annotation_method', app_text, fixed = TRUE) &&
+    !grepl('tags$input(type = "hidden", id = "scrna_annotation_method"', app_text, fixed = TRUE) &&
+    !grepl('tags$input(type = "hidden", id = "scrna_marker_source"', app_text, fixed = TRUE) &&
+    grepl('selected_method <- if (pbmc_example) "markers"', app_text, fixed = TRUE) &&
+    grepl('selected_marker_source <- if (pbmc_example) "server"', app_text, fixed = TRUE) &&
+    grepl('default_signature_source <- if (pbmc_example', app_text, fixed = TRUE),
   "annotation method and source persistence is driven by explicit user intent rather than dynamic-control recreation"
 )
 assert(
