@@ -437,6 +437,14 @@ assert(identical(app_env$step_data_paths(chip_project, "Peak Annotation"), file.
 
 blank_editor <- app_env$blank_design_matrix_rows(c("condition", "replicate"), rows = 3)
 assert(NROW(blank_editor) == 3L && all(!blank_editor$include), "blank design setup provides editable excluded rows")
+assert(
+  grepl('actionButton("add_design_rows", "Add 1 blank row"', app_text, fixed = TRUE) &&
+    grepl('actionButton("add_design_rows", "Add 1 sample row"', app_text, fixed = TRUE) &&
+    !grepl("Add 5 blank rows", app_text, fixed = TRUE) &&
+    !grepl("Add 5 sample rows", app_text, fixed = TRUE) &&
+    grepl("blank_design_matrix_rows(metadata, rows = 1)", server_source, fixed = TRUE),
+  "each design-row action adds exactly one editable row"
+)
 blank_form <- as.character(app_env$design_form_table_ui(blank_editor))
 assert(grepl("design_form_1_sample", blank_form, fixed = TRUE) && grepl("design_form_1_filename", blank_form, fixed = TRUE), "blank design setup renders visible text inputs")
 provided_editor <- app_env$design_editor_from_project(chip_project)

@@ -13659,7 +13659,7 @@ server <- function(input, output, session) {
       return(div(
         class = "button-row",
         actionButton("add_metadata_col", "Update metadata columns", class = "btn-primary"),
-        actionButton("add_design_rows", "Add 5 sample rows", class = "btn-default")
+        actionButton("add_design_rows", "Add 1 sample row", class = "btn-default")
       ))
     }
     if (isTRUE(current_project()$counts_only)) {
@@ -13672,7 +13672,7 @@ server <- function(input, output, session) {
       class = "button-row",
       actionButton("scan_fastqs", "Find FASTQs & detect samples", class = "btn-primary"),
       actionButton("add_metadata_col", "Update metadata columns", class = "btn-default"),
-      actionButton("add_design_rows", "Add 5 blank rows", class = "btn-default")
+      actionButton("add_design_rows", "Add 1 blank row", class = "btn-default")
     )
   })
 
@@ -13939,14 +13939,14 @@ server <- function(input, output, session) {
     if (is_scrna_project(current_project())) {
       df <- apply_design_form_values(scrna_manifest_state(), reactiveValuesToList(input), "scrna_manifest_form")
       if (!NROW(df)) df <- data.frame(sample_id = character(0), input_path = character(0), stringsAsFactors = FALSE, check.names = FALSE)
-      extra <- as.data.frame(lapply(df, function(x) rep("", 5L)), stringsAsFactors = FALSE, check.names = FALSE)
-      if (!NCOL(extra)) extra <- data.frame(sample_id = rep("", 5L), input_path = rep("", 5L), stringsAsFactors = FALSE, check.names = FALSE)
+      extra <- as.data.frame(lapply(df, function(x) ""), stringsAsFactors = FALSE, check.names = FALSE)
+      if (!NCOL(extra)) extra <- data.frame(sample_id = "", input_path = "", stringsAsFactors = FALSE, check.names = FALSE)
       scrna_manifest_state(rbind(df, extra[, names(df), drop = FALSE]))
       return()
     }
     df <- apply_design_form_values(design_state(), reactiveValuesToList(input))
     metadata <- unique(c(metadata_cols_from_input(), setdiff(names(df), c("include", "sample", "filename", "status"))))
-    extra <- blank_design_matrix_rows(metadata, rows = 5)
+    extra <- blank_design_matrix_rows(metadata, rows = 1)
     df <- ensure_design_metadata_columns(df, metadata)
     design_state(rbind(df, extra[, names(df), drop = FALSE]))
   })
