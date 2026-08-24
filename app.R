@@ -4681,12 +4681,22 @@ cutrun_individual_peak_navigation <- function(path, max_peaks = 250L, scan_limit
       as.character(peaks$chrom), ":", format(start, scientific = FALSE, trim = TRUE), "-",
       format(end, scientific = FALSE, trim = TRUE)
     )
-    score_column <- if (ranked_overlap) {
+    score_candidates <- if (ranked_overlap) {
       intersect(c("combined_evidence_rank"), names(peaks))
     } else {
       intersect(c("qValue", "pValue", "signalValue", "score", "V4"), names(peaks))
     }
-    score <- if (length(score_column)) suppressWarnings(as.numeric(peaks[[score_column[[1]]]])) else rep(NA_real_, NROW(peaks))
+    score_column <- score_candidates[vapply(score_candidates, function(column) {
+      values <- suppressWarnings(as.numeric(peaks[[column]]))
+      if (column %in% c("qValue", "pValue")) values[values < 0] <- NA_real_
+      any(is.finite(values))
+    }, logical(1))]
+    if (length(score_column)) score_column <- score_column[[1]]
+    score <- if (length(score_column)) {
+      values <- suppressWarnings(as.numeric(peaks[[score_column]]))
+      if (score_column %in% c("qValue", "pValue")) values[values < 0] <- NA_real_
+      values
+    } else rep(NA_real_, NROW(peaks))
     rank_ascending <- ranked_overlap
     # MACS2 stores -log10 p/q values (larger is stronger); SEACR has no
     # p-value and is ranked by its caller signal. Shared sets are ranked by a
@@ -4705,8 +4715,9 @@ cutrun_individual_peak_navigation <- function(path, max_peaks = 250L, scan_limit
       b_rank <- if ("source_b_rank" %in% names(peaks)) as.character(peaks$source_b_rank[ranked]) else ""
       label <- paste0(label, " — combined rank ", format(signif(score, 4), trim = TRUE), " (", a_rank, " + ", b_rank, ")")
     } else if (length(score_column)) {
-      evidence_label <- if (identical(score_column[[1]], "qValue")) "MACS2 -log10(q)" else if (identical(score_column[[1]], "pValue")) "MACS2 -log10(p)" else if (score_column[[1]] %in% c("signalValue", "score")) "signal" else if (is_seacr) "SEACR signal" else "signal"
-      label <- paste0(label, " — ", evidence_label, " ", format(signif(score, 4), trim = TRUE))
+      evidence_label <- if (identical(score_column, "qValue")) "MACS2 -log10(q)" else if (identical(score_column, "pValue")) "MACS2 -log10(p)" else if (score_column %in% c("signalValue", "score")) "signal" else if (is_seacr) "SEACR signal" else "signal"
+      evidence <- ifelse(is.finite(score), paste0(" — ", evidence_label, " ", format(signif(score, 4), trim = TRUE)), "")
+      label <- paste0(label, evidence)
     }
     total <- if (ext == "bed") cutrun_browser_peak_total(path) else {
       summaries <- list.files(dirname(path), pattern = "_macs2_summary\\.txt$", full.names = TRUE)
@@ -4885,6 +4896,43 @@ genome_browser_range_response <- function(data, req) {
     `Content-Length` = as.character(chunk_length)
   )
   shiny:::httpResponse(206, data$content_type, content, headers)
+}
+
+genome_browser_atac_peak_bed6 <- function(path) {
+  path <- trimws(as.character(path %||% ""))
+  if (!nzchar(path) || !file.exists(path) || file_size_for(path) <= 0) return("")
+  path <- normalizePath(path, winslash = "/", mustWork = TRUE)
+  info <- file.info(path)
+  signature <- paste(info$size[[1]], as.numeric(info$mtime[[1]]), sep = "|")
+  cache_key <- paste("atac_peak_bed6", path, sep = "\r")
+  if (exists(cache_key, envir = GENOME_BROWSER_NAV_CACHE, inherits = FALSE)) {
+    cached <- get(cache_key, envir = GENOME_BROWSER_NAV_CACHE, inherits = FALSE)
+    if (identical(cached$signature, signature) && file.exists(cached$path)) return(cached$path)
+  }
+  peaks <- tryCatch(
+    utils::read.table(path, sep = "\t", header = FALSE, quote = "", comment.char = "", fill = TRUE, check.names = FALSE),
+    error = function(e) data.frame()
+  )
+  if (!NROW(peaks) || NCOL(peaks) < 3L) return("")
+  start <- suppressWarnings(as.numeric(peaks[[2]]))
+  end <- suppressWarnings(as.numeric(peaks[[3]]))
+  keep <- nzchar(as.character(peaks[[1]])) & is.finite(start) & is.finite(end) & start >= 0 & end > start
+  if (!any(keep)) return("")
+  peaks <- peaks[keep, , drop = FALSE]
+  start <- start[keep]
+  end <- end[keep]
+  name <- if (NCOL(peaks) >= 4L) trimws(as.character(peaks[[4]])) else rep("", NROW(peaks))
+  name[is.na(name) | !nzchar(name) | name == "."] <- paste0("peak_", which(is.na(name) | !nzchar(name) | name == "."))
+  score <- if (NCOL(peaks) >= 5L) suppressWarnings(as.numeric(peaks[[5]])) else rep(0, NROW(peaks))
+  score[!is.finite(score)] <- 0
+  score <- pmax(0, pmin(1000, round(score)))
+  strand <- if (NCOL(peaks) >= 6L) as.character(peaks[[6]]) else rep(".", NROW(peaks))
+  strand[is.na(strand) | !strand %in% c("+", "-", ".")] <- "."
+  bed6 <- data.frame(as.character(peaks[[1]]), start, end, name, score, strand, stringsAsFactors = FALSE, check.names = FALSE)
+  destination <- tempfile(paste0(clean_name(basename(path), "atac_peaks"), "_"), fileext = ".bed")
+  utils::write.table(bed6, destination, sep = "\t", quote = FALSE, row.names = FALSE, col.names = FALSE)
+  assign(cache_key, list(signature = signature, path = destination), envir = GENOME_BROWSER_NAV_CACHE)
+  destination
 }
 
 register_genome_browser_track <- function(session, project, path, index = 1L, generated = FALSE) {
@@ -17535,15 +17583,26 @@ server <- function(input, output, session) {
     if (!"generated" %in% names(tracks)) tracks$generated <- FALSE
     configs <- lapply(seq_len(NROW(tracks)), function(i) {
       row <- tracks[i, , drop = FALSE]
-      url <- register_genome_browser_track(session, p, row$path[[1]], i, generated = isTRUE(row$generated[[1]]))
-      color <- if (identical(row$kind[[1]], "differential")) "#6d28d9" else unname(sample_colors[[row$sample[[1]]]])
-      base <- list(name = row$label[[1]], url = url, format = row$format[[1]], color = color)
+      track_path <- row$path[[1]]
+      track_format <- row$format[[1]]
+      track_generated <- isTRUE(row$generated[[1]])
+      if (is_atac_project(p) && identical(row$kind[[1]], "peaks")) {
+        display_bed <- genome_browser_atac_peak_bed6(track_path)
+        if (nzchar(display_bed)) {
+          track_path <- display_bed
+          track_format <- "bed"
+          track_generated <- TRUE
+        }
+      }
+      url <- register_genome_browser_track(session, p, track_path, i, generated = track_generated)
+      color <- if (identical(row$kind[[1]], "differential")) "#6d28d9" else if (identical(row$kind[[1]], "peaks")) "#f97316" else unname(sample_colors[[row$sample[[1]]]])
+      base <- list(name = row$label[[1]], url = url, format = track_format, color = color)
       if (identical(row$kind[[1]], "signal")) {
         c(base, genome_browser_signal_display_config(comparison_mode || cutrun_peak_mode, shared_signal_scale))
       } else if (identical(row$kind[[1]], "differential")) {
         c(base, list(type = "annotation", displayMode = "EXPANDED", indexed = FALSE, height = 120L))
       } else {
-        c(base, list(type = "annotation", displayMode = "EXPANDED", indexed = FALSE, height = 90L))
+        c(base, list(type = "annotation", displayMode = "COLLAPSED", indexed = FALSE, visibilityWindow = -1L, height = 80L))
       }
     })
     locus <- trimws(as.character(locus_override %||% ""))

@@ -725,6 +725,24 @@ assert(
     !any(grepl("SEACR", names(atac_peak_navigation$peaks), fixed = TRUE)),
   "ATAC sample-peak navigation uses MACS2 evidence labels without CUT&RUN terminology"
 )
+missing_q_peak <- file.path(sample_dir, "A1_missing_q_peaks.narrowPeak")
+writeLines(c(
+  "chr1\t10\t110\tpeak_missing_q\t25\t.\t12.5\t-1\t-1\t50",
+  "chr1\t210\t310\tpeak_partial\t20\t.\t.\t-1\t-1\t45"
+), missing_q_peak)
+missing_q_navigation <- app_env$cutrun_individual_peak_navigation(missing_q_peak)
+assert(
+  grepl("signal 12.5", names(missing_q_navigation$peaks)[[1]], fixed = TRUE) &&
+    !any(grepl(" NA", names(missing_q_navigation$peaks), fixed = TRUE)),
+  "ATAC peak navigation falls back from unavailable MACS2 q/p values to finite signal and never prints signal NA"
+)
+atac_display_bed <- app_env$genome_browser_atac_peak_bed6(legacy_peak)
+atac_display_rows <- utils::read.table(atac_display_bed, sep = "\t", header = FALSE, quote = "", comment.char = "")
+assert(
+  file.exists(atac_display_bed) && NCOL(atac_display_rows) == 6L && NROW(atac_display_rows) == 2L &&
+    identical(as.character(atac_display_rows[[1]][[1]]), "chr1") && identical(as.numeric(atac_display_rows[[5]][[1]]), 50),
+  "ATAC individual peaks are converted to a visible BED6 annotation while quantitative signal remains in the bigWig"
+)
 completed_selector_samples <- app_env$completed_samples_for_step(atac_project, "MACS2 Peaks", c("A1", "A2"))
 assert("A1" %in% completed_selector_samples && !"A2" %in% completed_selector_samples, "sample selectors identify completed samples without unchecking unfinished samples")
 failed_macs_job <- data.frame(step = "MACS2 Peaks", sample = "A1", slurm_state = "FAILED", elapsed = "00:01:00", stderr = "", stringsAsFactors = FALSE)
