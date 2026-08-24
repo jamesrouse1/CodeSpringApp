@@ -214,6 +214,11 @@ assert(
   "RNA-seq Results Explorer reuses the live Progress sample matrix and refreshes it while visible"
 )
 assert(
+  grepl("observeEvent(input$refresh_rna_results", server_source, fixed = TRUE) &&
+    grepl('native_registered_id("")', server_source, fixed = TRUE),
+  "RNA-seq Results Explorer can rescan newly completed DESeq2 outputs without restarting the app"
+)
+assert(
   grepl("Automatic (Harmony when a technical batch is selected)", app_text, fixed = TRUE) &&
     grepl("RPCA (anchor-based; smaller datasets)", app_text, fixed = TRUE),
   "Seurat automatic integration uses scalable Harmony while retaining explicit anchor methods for smaller datasets"

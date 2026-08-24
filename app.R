@@ -16060,6 +16060,13 @@ server <- function(input, output, session) {
     load_native_results_once()
   }, ignoreInit = TRUE)
 
+  observeEvent(input$refresh_rna_results, {
+    if (!isTRUE(existing_project_selected()) || !identical(current_project()$analysis_key, "rna")) return()
+    safe_refresh_progress_now("RNA results refresh")
+    native_registered_id("")
+    native_results_refresh(isolate(native_results_refresh()) + 1L)
+  }, ignoreInit = TRUE)
+
   output$native_results_ui <- renderUI({
     if (!isTRUE(existing_project_selected())) {
       return(div(class = "empty-box", "Create or select a project to open its Results Explorer."))
