@@ -17617,7 +17617,8 @@ server <- function(input, output, session) {
         sample_peaks <- sample_peaks[order(match(sample_peaks$sample, selected_samples), sample_peaks$label), , drop = FALSE]
         tracks <- rbind(tracks, sample_peaks)
       }
-      if (isTRUE(input$genome_browser_show_differential_peaks)) {
+      show_differential_peaks <- if (is.null(input$genome_browser_show_differential_peaks)) TRUE else isTRUE(input$genome_browser_show_differential_peaks)
+      if (show_differential_peaks) {
         differential_path <- genome_browser_filtered_differential_bed(
           comparison$differential_bed[[1]], differential_direction
         )
@@ -17727,6 +17728,30 @@ server <- function(input, output, session) {
     ))
     invisible(NULL)
   }
+  observeEvent(input$genome_browser_mode, {
+    mode <- trimws(as.character(input$genome_browser_mode %||% ""))
+    if (!nzchar(mode)) return(invisible(NULL))
+    session$onFlushed(function() {
+      p <- current_project()
+      if (!is_atac_project(p) && !is_chip_project(p) && !is_cutrun_project(p)) return(invisible(NULL))
+      if (identical(mode, "comparison")) {
+        comparisons <- genome_browser_comparison_catalog(p)
+        if (!NROW(comparisons)) return(send_genome_browser(mode_override = "manual"))
+        comparison_id <- selected_choice(isolate(input$genome_browser_comparison), comparisons$id, comparisons$id[[1]])
+        comparison <- comparisons[match(comparison_id, comparisons$id), , drop = FALSE]
+        catalog <- genome_browser_catalog()
+        available <- comparison$samples[[1]]
+        available <- available[available %in% unique(as.character(catalog$sample))]
+        send_genome_browser(
+          comparison_override = comparison_id,
+          samples_override = available,
+          mode_override = "comparison"
+        )
+      } else {
+        send_genome_browser(mode_override = mode)
+      }
+    }, once = TRUE)
+  }, ignoreInit = TRUE, priority = -100)
   observeEvent(input$genome_browser_cutrun_peak, {
     p <- current_project()
     if (!is_cutrun_project(p)) return(invisible(NULL))

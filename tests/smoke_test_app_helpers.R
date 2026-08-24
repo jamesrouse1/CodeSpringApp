@@ -144,6 +144,14 @@ assert(
   "only deliberate post-initialization browser-mode changes update the saved mode"
 )
 assert(
+  grepl('send_genome_browser(', server_source, fixed = TRUE) &&
+    grepl('mode_override = "comparison"', server_source, fixed = TRUE) &&
+    grepl('send_genome_browser(mode_override = mode)', server_source, fixed = TRUE) &&
+    grepl('}, ignoreInit = TRUE, priority = -100)', server_source, fixed = TRUE) &&
+    grepl('if (is.null(input$genome_browser_show_differential_peaks)) TRUE', server_source, fixed = TRUE),
+  "every browser-mode change explicitly replaces IGV tracks and comparison mode defaults to its differential BED"
+)
+assert(
   grepl("genome_browser_comparison_show_peaks", server_source, fixed = TRUE),
   "comparison views use a separate opt-in for potentially large individual sample peak tracks"
 )
