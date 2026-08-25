@@ -13892,7 +13892,6 @@ server <- function(input, output, session) {
   scrna_dashboard_expression_error <- reactiveVal("")
   scrna_embedding_selection_reset <- reactiveVal(0L)
   scrna_embedding_manual_selection <- reactiveVal(character(0))
-  scrna_pbmc_marker_results_shown <- reactiveVal(character(0))
   # Named manual marker/signature collections are stored per project for the
   # browser session. A separate immutable TSV snapshot is written on submit.
   scrna_manual_annotation_sets <- reactiveVal(list())
@@ -16279,25 +16278,6 @@ server <- function(input, output, session) {
 
   observeEvent(input$web_main_tabs, {
     if ((input$web_main_tabs %||% "") %in% c("Progress", "Run Pipeline", "Results Explorer")) safe_refresh_progress_now("tab refresh")
-  }, ignoreInit = TRUE)
-
-  # The PBMC example is a teaching workflow: marker discovery is enabled by
-  # default and, once annotation completes, take the user directly to the
-  # resulting top-marker heatmaps instead of leaving that result buried in a
-  # later tab.
-  observeEvent(progress_refresh(), {
-    p <- current_project()
-    if (!is_scrna_project(p) || !scrna_is_pbmc3k_example(p)) return()
-    figures <- file.path(scrna_output_dir(p), "figures")
-    heatmaps <- if (dir.exists(figures)) list.files(figures, pattern = "^08_cluster_marker_heatmap\\.png$", full.names = TRUE) else character(0)
-    if (!length(heatmaps)) return()
-    key <- paste(p$id %||% p$name, paste(file.info(heatmaps)$mtime, collapse = "|"), sep = "::")
-    if (identical(isolate(scrna_pbmc_marker_results_shown()), key)) return()
-    scrna_pbmc_marker_results_shown(key)
-    session$onFlushed(function() {
-      updateTabsetPanel(session, "web_main_tabs", selected = "Results Explorer")
-      updateTabsetPanel(session, "scrna_results_tabs", selected = "Cluster markers")
-    }, once = TRUE)
   }, ignoreInit = TRUE)
 
   output$progress_updated <- renderText({

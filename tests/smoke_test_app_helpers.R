@@ -371,6 +371,10 @@ assert(
   "RNA-seq Results Explorer reuses the live Progress sample matrix and refreshes it while visible"
 )
 assert(
+  !grepl("scrna_pbmc_marker_results_shown", app_text, fixed = TRUE),
+  "scRNA pipeline completion preserves the active Run Pipeline tab instead of opening Results Explorer"
+)
+assert(
   grepl("observeEvent(input$refresh_rna_results", server_source, fixed = TRUE) &&
     grepl('native_registered_id("")', server_source, fixed = TRUE),
   "RNA-seq Results Explorer can rescan newly completed DESeq2 outputs without restarting the app"
