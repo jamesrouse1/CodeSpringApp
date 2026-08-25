@@ -421,6 +421,15 @@ utils::write.table(
 direct_scrna_project <- list(data_dir = direct_scrna_root, analysis_key = "scrna", analysis = "scRNA-seq")
 assert(NROW(app_env$scrna_embedding_table(direct_scrna_project, max_points = Inf)) == 2L, "completed-results projects whose data_dir is the scRNA output folder expose their UMAP directly")
 unlink(direct_scrna_parent, recursive = TRUE, force = TRUE)
+project_root_layout <- tempfile("scrna_project_root_layout_")
+dir.create(file.path(project_root_layout, "data", "scrna", "tables"), recursive = TRUE)
+utils::write.table(
+  data.frame(cell = c("c1", "c2"), UMAP_1 = c(1, 2), UMAP_2 = c(3, 4), cluster = c("0", "1")),
+  file.path(project_root_layout, "data", "scrna", "tables", "umap_coordinates.tsv"), sep = "\t", row.names = FALSE, quote = FALSE
+)
+project_root_config <- list(data_dir = project_root_layout, analysis_key = "scrna", analysis = "scRNA-seq")
+assert(NROW(app_env$scrna_embedding_table(project_root_config, max_points = Inf)) == 2L, "interactive UMAP finds coordinates when a saved config points at the project root")
+unlink(project_root_layout, recursive = TRUE, force = TRUE)
 stale_config_root <- tempfile("scrna_stale_config_")
 canonical_results_root <- tempfile("scrna_canonical_results_")
 canonical_project_name <- "example_pbmc3k"

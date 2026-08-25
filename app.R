@@ -11963,6 +11963,7 @@ write_scrna_manual_cluster_mapping <- function(project, annotation_name, assignm
 
 scrna_embedding_candidate_paths <- function(project, view = "integrated") {
   file <- if (identical(tolower(view %||% "integrated"), "unintegrated")) "preintegration_umap_coordinates.tsv" else "umap_coordinates.tsv"
+  data_dir <- normalizePath(project$data_dir %||% "", winslash = "/", mustWork = FALSE)
   configured_root <- scrna_output_dir(project)
   canonical_root <- file.path(project$results_root %||% DEFAULT_RESULTS_ROOT, project$name %||% project$label, "data", "scrna")
   default_root <- file.path(DEFAULT_RESULTS_ROOT, project$name %||% project$label, "data", "scrna")
@@ -11970,9 +11971,14 @@ scrna_embedding_candidate_paths <- function(project, view = "integrated") {
     configured_root,
     canonical_root,
     default_root,
-    # Completed-results projects may already use the scRNA output folder as
-    # data_dir. Do not append a second /scrna in that layout.
-    if (identical(tolower(basename(normalizePath(project$data_dir, winslash = "/", mustWork = FALSE))), "scrna")) project$data_dir else character(0)
+    # Saved and completed-results projects have historically stored
+    # visualizer_data_dir at three different levels: the project root, its
+    # data folder, or the scRNA output folder itself. Check each deterministic
+    # layout so an existing coordinate table is never hidden by stale config.
+    data_dir,
+    file.path(data_dir, "data", "scrna"),
+    file.path(dirname(data_dir), "data", "scrna"),
+    file.path(dirname(data_dir), "scrna")
   ))
   file.path(output_roots, "tables", file)
 }
