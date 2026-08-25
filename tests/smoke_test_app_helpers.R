@@ -396,7 +396,7 @@ embedding_test_root <- tempfile("scrna_embedding_views_")
 dir.create(file.path(embedding_test_root, "scrna", "tables"), recursive = TRUE)
 embedding_project <- list(data_dir = embedding_test_root, analysis_key = "scrna", analysis = "scRNA-seq")
 utils::write.table(
-  data.frame(cell = c("c1", "c2"), UMAP_1 = c(10, 20), UMAP_2 = c(30, 40), cluster = c("0", "1"), condition = c("control", "treated")),
+  data.frame(cell = c("c1", "c2"), UMAP_1 = c(10, 20), UMAP_2 = c(30, 40), cluster = c("0", "1"), condition = c("control", "treated"), `RNA_snn_res.0.5` = c("0", "1"), check.names = FALSE),
   file.path(embedding_test_root, "scrna", "tables", "umap_coordinates.tsv"), sep = "\t", row.names = FALSE, quote = FALSE
 )
 utils::write.table(
@@ -422,10 +422,14 @@ treated_embedding <- app_env$scrna_embedding_table(embedding_project, columns = 
 empty_embedding_filter <- app_env$scrna_embedding_table(embedding_project, columns = "condition", max_points = Inf, view = "integrated", filters = list(condition = character(0)))
 assert(
   all(c("cell_type", "cluster", "condition") %in% embedding_filter_fields) &&
+    !"RNA_snn_res.0.5" %in% app_env$scrna_embedding_color_choices(embedding_project, "integrated") &&
+    !"RNA_snn_res.0.5" %in% embedding_filter_fields &&
     identical(unname(embedding_filter_values), c("control", "treated")) &&
     NROW(treated_embedding) == 1L && identical(as.character(treated_embedding$cell), "c2") &&
     NROW(empty_embedding_filter) == 0L &&
-    grepl("Select all displayed cells", app_text, fixed = TRUE) &&
+    !grepl("Select all displayed cells", app_text, fixed = TRUE) &&
+    !grepl('selectInput("scrna_embedding_color"', app_text, fixed = TRUE) &&
+    grepl("Color and filter cells by metadata", app_text, fixed = TRUE) &&
     grepl("Deselect all values", app_text, fixed = TRUE),
   "interactive UMAP supports CELLxGENE-style metadata value filters and explicit displayed-cell selection"
 )
