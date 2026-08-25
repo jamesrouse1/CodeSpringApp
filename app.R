@@ -19039,11 +19039,11 @@ server <- function(input, output, session) {
         radioButtons(
           "scrna_embedding_coordinate_mode",
           "Layout after filtering",
-          choices = c("Keep the global UMAP frame" = "global", "Selected-cell UMAP view (automatic)" = "selected"),
+          choices = c("Keep whole grid" = "global", "Zoom to selected cells" = "selected"),
           selected = selected_choice(isolate(input$scrna_embedding_coordinate_mode), c("global", "selected"), "global"),
           inline = TRUE
         ),
-        tags$p(class = "muted small-note", "Both options use the original UMAP coordinates. Global keeps the full-dataset frame; Selected-cell view automatically zooms the axes around the currently included cells without submitting a job.")
+        tags$p(class = "muted small-note", "Keep whole grid preserves the full-dataset axes. Zoom to selected cells automatically fits the axes around the currently included cells. Both use the original UMAP coordinates and update instantly.")
       )
     )
   })

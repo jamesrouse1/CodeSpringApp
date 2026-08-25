@@ -432,9 +432,10 @@ assert(
     !grepl('selectInput("scrna_embedding_color"', app_text, fixed = TRUE) &&
     grepl("Color and filter cells by metadata", app_text, fixed = TRUE) &&
     grepl("Deselect all values", app_text, fixed = TRUE) &&
-    grepl("Keep the global UMAP frame", app_text, fixed = TRUE) &&
-    grepl("Selected-cell UMAP view (automatic)", app_text, fixed = TRUE) &&
-    grepl("without submitting a job", app_text, fixed = TRUE) &&
+    grepl("Keep whole grid", app_text, fixed = TRUE) &&
+    grepl("Zoom to selected cells", app_text, fixed = TRUE) &&
+    grepl("Both use the original UMAP coordinates and update instantly", app_text, fixed = TRUE) &&
+    !grepl("scrna_recalculate_embedding", app_text, fixed = TRUE) &&
     global_ranges$x[[1]] < 10 && global_ranges$x[[2]] > 20,
   "interactive UMAP supports CELLxGENE-style metadata value filters and explicit displayed-cell selection"
 )
