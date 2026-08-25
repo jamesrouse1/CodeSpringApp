@@ -9,4 +9,5 @@ runs/
 # Local editor and operating-system files.
 .DS_Store
 *.swp
-
+__pycache__/
+*.pyc

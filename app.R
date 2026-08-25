@@ -12215,6 +12215,59 @@ scrna_embedding_filters <- function(field = "", values = character(0)) {
   stats::setNames(list(unique(as.character(values %||% character(0)))), field)
 }
 
+scrna_embedding_filter_signature <- function(project, view = "integrated", filters = list()) {
+  if (is.null(filters) || !is.list(filters)) filters <- list()
+  filters <- filters[nzchar(names(filters))]
+  normalized <- paste(vapply(sort(names(filters)), function(column) {
+    paste(column, paste(sort(unique(as.character(filters[[column]]))), collapse = "\r"), sep = "=")
+  }, character(1)), collapse = "\n")
+  embedding_path <- scrna_embedding_path(project, view)
+  embedding_info <- if (file.exists(embedding_path)) file.info(embedding_path) else NULL
+  embedding_stamp <- if (is.null(embedding_info)) "missing" else paste(embedding_info$size[[1]], as.numeric(embedding_info$mtime[[1]]), sep = "@")
+  key <- paste(project$id %||% project$name %||% "scrna", view %||% "integrated", embedding_stamp, normalized, sep = "|")
+  bytes <- utf8ToInt(enc2utf8(key))
+  hash <- 0
+  if (length(bytes)) for (byte in bytes) hash <- (hash * 131 + byte) %% 2147483647
+  sprintf("%08x", as.integer(hash))
+}
+
+scrna_recalculated_umap_path <- function(project, signature) {
+  file.path(scrna_output_dir(project), "dashboard_cache", "recalculated_umap", clean_name(signature, "selection"), "umap_coordinates.tsv")
+}
+
+scrna_read_recalculated_umap <- function(path) {
+  x <- safe_read_table(path, Inf)
+  if (!NROW(x) || !all(c("cell", "UMAP_1", "UMAP_2") %in% names(x))) return(data.frame())
+  x$cell <- as.character(x$cell)
+  x$UMAP_1 <- suppressWarnings(as.numeric(x$UMAP_1))
+  x$UMAP_2 <- suppressWarnings(as.numeric(x$UMAP_2))
+  x[!duplicated(x$cell) & is.finite(x$UMAP_1) & is.finite(x$UMAP_2), c("cell", "UMAP_1", "UMAP_2"), drop = FALSE]
+}
+
+scrna_apply_recalculated_umap <- function(x, coordinates) {
+  if (!NROW(x) || !NROW(coordinates)) return(x)
+  index <- match(as.character(x$cell), as.character(coordinates$cell))
+  keep <- !is.na(index)
+  x <- x[keep, , drop = FALSE]
+  index <- index[keep]
+  x$UMAP_1 <- coordinates$UMAP_1[index]
+  x$UMAP_2 <- coordinates$UMAP_2[index]
+  x
+}
+
+scrna_embedding_global_ranges <- function(project, view = "integrated") {
+  x <- scrna_embedding_table(project, max_points = Inf, view = view)
+  if (!NROW(x)) return(list(x = NULL, y = NULL))
+  padded <- function(values) {
+    limits <- range(values, finite = TRUE)
+    if (!all(is.finite(limits))) return(NULL)
+    span <- diff(limits)
+    padding <- if (span > 0) span * 0.035 else 0.5
+    c(limits[[1]] - padding, limits[[2]] + padding)
+  }
+  list(x = padded(x$UMAP_1), y = padded(x$UMAP_2))
+}
+
 scrna_dashboard_gene_list_path <- function(project) {
   full_path <- file.path(scrna_output_dir(project), "tables", "dashboard_all_genes.tsv")
   fallback_path <- file.path(scrna_output_dir(project), "tables", "dashboard_gene_expression_genes.tsv")
@@ -12471,6 +12524,21 @@ scrna_processed_object_info <- function(project) {
     size = human_file_size(path),
     modified = info$mtime[[1]]
   )
+}
+
+scrna_recalculation_object_info <- function(project) {
+  processed <- scrna_processed_object_info(project)
+  if (!is.null(processed)) return(processed)
+  root <- file.path(scrna_output_dir(project), "checkpoints")
+  candidates <- c(
+    scanpy = file.path(root, "04_clustered_scanpy.h5ad"),
+    seurat = file.path(root, "04_clustered_seurat.rds")
+  )
+  available <- candidates[file.exists(candidates) & vapply(candidates, file_size_for, numeric(1)) > 0]
+  if (!length(available)) return(NULL)
+  preferred <- tolower(as.character(project$scrna_engine %||% "auto")[[1]])
+  engine <- if (preferred %in% names(available)) preferred else names(available)[[which.max(file.info(available)$mtime)]]
+  list(path = unname(available[[engine]]), engine = engine)
 }
 
 scrna_composition_fields <- function(project) {
@@ -12872,6 +12940,9 @@ body { background:#eef3f8; color:#17202f; }
 .scrna-metadata-filter-heading span { color:#657084; font-size:12px; }
 .scrna-metadata-filter .checkbox-inline { margin:0 14px 7px 0; padding:5px 10px 5px 30px; border:1px solid #cbdced; border-radius:999px; background:white; }
 .scrna-metadata-filter .shiny-options-group { max-height:180px; overflow:auto; padding-top:2px; }
+.scrna-embedding-layout-choice { margin:8px 0 6px; padding-top:10px; border-top:1px solid #d9e6f2; }
+.scrna-embedding-layout-choice .shiny-input-radiogroup { margin-bottom:4px; }
+.scrna-embedding-layout-choice .shiny-html-output { display:inline-block; margin-left:10px; vertical-align:middle; }
 .scrna-selection-status { display:inline-flex; align-items:center; margin:8px 0 2px; padding:6px 10px; border:1px solid #cbdced; border-radius:999px; background:#f7f9fc; color:#526070; font-size:12px; font-weight:800; }
 .scrna-selection-status.active { border-color:#78b99a; background:#eaf8f0; color:#16613d; }
 .project-step-summary { margin:12px 0; border:1px solid #d8dde8; border-radius:8px; background:#f8fafc; padding:12px; }
@@ -14002,6 +14073,7 @@ server <- function(input, output, session) {
   scrna_dashboard_expression_error <- reactiveVal("")
   scrna_embedding_selection_reset <- reactiveVal(0L)
   scrna_embedding_manual_selection <- reactiveVal(character(0))
+  scrna_recalculated_umap_job <- reactiveVal(list(signature = "", job_id = "", output = "", message = ""))
   # Named manual marker/signature collections are stored per project for the
   # browser session. A separate immutable TSV snapshot is written on submit.
   scrna_manual_annotation_sets <- reactiveVal(list())
@@ -19018,6 +19090,22 @@ server <- function(input, output, session) {
       fluidRow(
         column(4, selectInput("scrna_embedding_filter_field", "Metadata column", choices = field_choices, selected = field, selectize = FALSE)),
         column(8, uiOutput("scrna_embedding_filter_values_ui"))
+      ),
+      div(
+        class = "scrna-embedding-layout-choice",
+        radioButtons(
+          "scrna_embedding_coordinate_mode",
+          "Layout after filtering",
+          choices = c("Keep the global UMAP coordinates" = "global", "Recalculate UMAP for the included cells" = "recalculate"),
+          selected = selected_choice(isolate(input$scrna_embedding_coordinate_mode), c("global", "recalculate"), "global"),
+          inline = TRUE
+        ),
+        conditionalPanel(
+          "input.scrna_embedding_coordinate_mode == 'recalculate'",
+          tags$p(class = "muted small-note", "Recalculation uses the selected cells' saved PCA or integrated representation. It creates a cached viewing layout and never changes the processed object or original UMAP."),
+          actionButton("scrna_recalculate_embedding", "Recalculate selected-cell UMAP", class = "btn-primary btn-sm"),
+          uiOutput("scrna_recalculated_embedding_status_ui")
+        )
       )
     )
   })
@@ -19050,6 +19138,71 @@ server <- function(input, output, session) {
     choices <- scrna_embedding_filter_value_choices(p, input$scrna_embedding_filter_field %||% "", embedding_view)
     updateCheckboxGroupInput(session, "scrna_embedding_filter_values", choices = choices, selected = character(0), inline = TRUE)
   }, ignoreInit = TRUE)
+  observeEvent(input$scrna_recalculate_embedding, {
+    p <- current_project()
+    req(is_scrna_project(p))
+    embedding_view <- scrna_selected_embedding_view(p, input$scrna_embedding_view %||% "")
+    filters <- scrna_active_embedding_filters()
+    if (length(filters) && !length(filters[[1]])) {
+      showNotification("Select one or more metadata values before recalculating UMAP.", type = "warning")
+      return()
+    }
+    selected <- scrna_embedding_table(p, max_points = Inf, view = embedding_view, filters = filters)
+    if (NROW(selected) < 10L) {
+      showNotification("At least 10 included cells are required to recalculate UMAP.", type = "warning")
+      return()
+    }
+    object <- scrna_recalculation_object_info(p)
+    if (is.null(object) || !file.exists(object$path)) {
+      showNotification("The saved processed Seurat or Scanpy object is required for a true selected-cell UMAP recalculation.", type = "error", duration = NULL)
+      return()
+    }
+    signature <- scrna_embedding_filter_signature(p, embedding_view, filters)
+    output_path <- scrna_recalculated_umap_path(p, signature)
+    cache_dir <- dirname(output_path)
+    dir.create(cache_dir, recursive = TRUE, showWarnings = FALSE)
+    cells_path <- file.path(cache_dir, "included_cells.tsv")
+    utils::write.table(data.frame(cell = unique(as.character(selected$cell))), cells_path, sep = "\t", row.names = FALSE, quote = FALSE)
+    if (file.exists(output_path)) unlink(output_path)
+    wrapper <- file.path(APP_ROOT, "scripts", "scrna_recalculate_umap.sh")
+    if (!file.exists(wrapper)) {
+      showNotification("The selected-cell UMAP runner is missing from this CodeSpringApp installation.", type = "error", duration = NULL)
+      return()
+    }
+    container <- if (identical(object$engine, "scanpy")) scanpy_container_check()$path %||% "" else ""
+    message <- tryCatch(
+      submit_sbatch(
+        p, "Recalculate UMAP", wrapper,
+        c(object$engine, object$path, cells_path, output_path, "15", "0.3", "1234", container),
+        "scrna_recalculate_umap", paste0(format(NROW(selected), big.mark = ","), " selected cells"),
+        target = output_path, reference = object$engine,
+        sbatch_options = c("--cpus-per-task=8", "--mem=64G", "--time=04:00:00")
+      ),
+      error = function(e) paste("ERROR:", conditionMessage(e))
+    )
+    job_id <- parse_sbatch_job_id(message)
+    scrna_recalculated_umap_job(list(signature = signature, job_id = job_id, output = output_path, message = message))
+    if (!nzchar(job_id)) showNotification(message, type = "error", duration = NULL) else showNotification(paste("Selected-cell UMAP submitted as job", job_id, ". The global layout remains visible until it finishes."), type = "message")
+  }, ignoreInit = TRUE)
+  output$scrna_recalculated_embedding_status_ui <- renderUI({
+    p <- current_project(); if (!is_scrna_project(p)) return(NULL)
+    embedding_view <- scrna_selected_embedding_view(p, input$scrna_embedding_view %||% "")
+    filters <- scrna_active_embedding_filters()
+    signature <- scrna_embedding_filter_signature(p, embedding_view, filters)
+    output_path <- scrna_recalculated_umap_path(p, signature)
+    coordinates <- scrna_read_recalculated_umap(output_path)
+    if (NROW(coordinates)) return(tags$span(class = "scrna-selection-status active", paste(format(NROW(coordinates), big.mark = ","), "cells · recalculated layout ready")))
+    state <- scrna_recalculated_umap_job()
+    if (!identical(state$signature %||% "", signature)) return(tags$span(class = "scrna-selection-status", "Using global coordinates until this selection is recalculated"))
+    progress_refresh()
+    scheduler <- if (nzchar(state$job_id %||% "")) fetchngs_scheduler_state(state$job_id) else ""
+    active <- toupper(scheduler) %in% c("PENDING", "RUNNING", "CONFIGURING", "COMPLETING")
+    if (active || (!nzchar(scheduler) && nzchar(state$job_id %||% ""))) {
+      label <- if (nzchar(scheduler)) tools::toTitleCase(tolower(scheduler)) else "Submitted"
+      return(tags$span(class = "scrna-selection-status active", paste0(label, " · job ", state$job_id)))
+    }
+    tags$span(class = "scrna-selection-status", if (nzchar(scheduler)) paste("Recalculation did not create a layout (", scheduler, "). Check the job log.", sep = "") else "Using global coordinates until recalculation completes")
+  })
   output$scrna_embedding_marker_gene_ui <- renderUI({
     # Reading a legacy processed object to recreate its gene list can take
     # noticeable time. Do it only when marker coloring is explicitly chosen,
@@ -19170,6 +19323,19 @@ server <- function(input, output, session) {
     if (length(filters)) validate(need(length(filters[[1]]), "No metadata values are selected. Select one or more values to display cells."))
     x <- scrna_embedding_table(p, columns = c(color_column, names(filters), "sample_id", "condition", "batch", "cluster", "cell_type", "annotation_source"), max_points = max_points, view = embedding_view, filters = filters)
     validate(need(NROW(x), "No cells match the active metadata filter."))
+    coordinate_mode <- input$scrna_embedding_coordinate_mode %||% "global"
+    global_ranges <- scrna_embedding_global_ranges(p, embedding_view)
+    if (identical(coordinate_mode, "recalculate")) {
+      signature <- scrna_embedding_filter_signature(p, embedding_view, filters)
+      recalculated_path <- scrna_recalculated_umap_path(p, signature)
+      if (!file.exists(recalculated_path)) progress_refresh()
+      recalculated <- scrna_read_recalculated_umap(recalculated_path)
+      if (NROW(recalculated)) {
+        x <- scrna_apply_recalculated_umap(x, recalculated)
+        global_ranges <- list(x = NULL, y = NULL)
+      }
+      validate(need(NROW(x), "The recalculated layout does not contain the currently displayed cells. Recalculate it again for this selection."))
+    }
     point_size <- max(point_size, scrna_embedding_auto_point_size(NROW(x)))
     marker_gene <- ""
     if (identical(color_mode, "marker")) {
@@ -19213,8 +19379,8 @@ server <- function(input, output, session) {
     }
     plot <- plotly::event_register(plot, "plotly_selected")
     plotly::layout(plot,
-      xaxis = list(title = "UMAP 1", zeroline = FALSE),
-      yaxis = list(title = "UMAP 2", zeroline = FALSE, scaleanchor = "x", scaleratio = 1),
+      xaxis = list(title = "UMAP 1", zeroline = FALSE, range = global_ranges$x),
+      yaxis = list(title = "UMAP 2", zeroline = FALSE, scaleanchor = "x", scaleratio = 1, range = global_ranges$y),
       showlegend = isTRUE(input$scrna_embedding_legend),
       legend = list(x = 1.02, xanchor = "left", y = 1, yanchor = "top", itemsizing = "constant", font = list(size = 13)),
       hovermode = "closest",
@@ -19237,6 +19403,17 @@ server <- function(input, output, session) {
     if (length(filters)) validate(need(length(filters[[1]]), "No metadata values are selected. Select one or more values before downloading the UMAP."))
     x <- scrna_embedding_table(p, columns = c(color_column, names(filters)), max_points = max_points, view = embedding_view, filters = filters)
     validate(need(NROW(x), "No cells match the active metadata filter."))
+    coordinate_mode <- input$scrna_embedding_coordinate_mode %||% "global"
+    global_ranges <- scrna_embedding_global_ranges(p, embedding_view)
+    if (identical(coordinate_mode, "recalculate")) {
+      signature <- scrna_embedding_filter_signature(p, embedding_view, filters)
+      recalculated <- scrna_read_recalculated_umap(scrna_recalculated_umap_path(p, signature))
+      if (NROW(recalculated)) {
+        x <- scrna_apply_recalculated_umap(x, recalculated)
+        global_ranges <- list(x = NULL, y = NULL)
+      }
+      validate(need(NROW(x), "The recalculated layout does not contain the currently displayed cells. Recalculate it again for this selection."))
+    }
     point_size <- suppressWarnings(as.numeric(input$scrna_embedding_point_size %||% 2))
     if (!is.finite(point_size)) point_size <- 2
     point_size <- scrna_embedding_publication_point_size(NROW(x), point_size)
@@ -19245,7 +19422,7 @@ server <- function(input, output, session) {
     opacity <- max(0.1, min(1, opacity))
     title <- if (identical(embedding_view, "unintegrated")) "UMAP before integration" else "UMAP"
     base <- ggplot2::ggplot(x, ggplot2::aes(x = .data$UMAP_1, y = .data$UMAP_2)) +
-      ggplot2::coord_equal() +
+      ggplot2::coord_fixed(xlim = global_ranges$x, ylim = global_ranges$y, ratio = 1) +
       ggplot2::labs(title = title, x = "UMAP 1", y = "UMAP 2") +
       ggplot2::theme_classic(base_size = 13) +
       ggplot2::theme(
