@@ -12187,6 +12187,39 @@ scrna_embedding_color_column <- function(project, requested = "", view = "integr
   selected_choice(requested, choices, choices[[1]])
 }
 
+scrna_embedding_filter_fields <- function(project, view = "integrated") {
+  candidates <- scrna_embedding_color_choices(project, view)
+  candidates <- setdiff(candidates, grep("^signature__", candidates, value = TRUE))
+  if (!length(candidates)) return(character(0))
+  values <- scrna_embedding_table(project, columns = candidates, max_points = 75000L, view = view)
+  eligible <- candidates[vapply(candidates, function(column) {
+    if (!column %in% names(values)) return(FALSE)
+    labels <- trimws(as.character(values[[column]]))
+    labels[is.na(labels) | !nzchar(labels)] <- "Unassigned"
+    count <- length(unique(labels))
+    count >= 2L && count <= 80L
+  }, logical(1))]
+  preferred <- intersect(c("cell_type", "cluster", "sample_id", "condition", "batch", "annotation_source"), eligible)
+  unique(c(preferred, sort(setdiff(eligible, preferred))))
+}
+
+scrna_embedding_filter_value_choices <- function(project, field, view = "integrated") {
+  field <- trimws(as.character(field %||% ""))
+  if (!nzchar(field)) return(character(0))
+  values <- scrna_embedding_table(project, columns = field, max_points = Inf, view = view)
+  if (!NROW(values) || !field %in% names(values)) return(character(0))
+  labels <- trimws(as.character(values[[field]]))
+  labels[is.na(labels) | !nzchar(labels)] <- "Unassigned"
+  counts <- sort(table(labels), decreasing = TRUE)
+  stats::setNames(names(counts), paste0(names(counts), " (", format(as.integer(counts), big.mark = ","), ")"))
+}
+
+scrna_embedding_filters <- function(field = "", values = character(0)) {
+  field <- trimws(as.character(field %||% ""))
+  if (!nzchar(field)) return(list())
+  stats::setNames(list(unique(as.character(values %||% character(0)))), field)
+}
+
 scrna_dashboard_gene_list_path <- function(project) {
   full_path <- file.path(scrna_output_dir(project), "tables", "dashboard_all_genes.tsv")
   fallback_path <- file.path(scrna_output_dir(project), "tables", "dashboard_gene_expression_genes.tsv")
@@ -12275,13 +12308,16 @@ scrna_violin_gene_input <- function(project, selected = "") {
   scrna_gene_select_input(project, "scrna_violin_gene", "Gene", selected)
 }
 
-scrna_embedding_table <- function(project, columns = character(0), max_points = 30000L, cells = character(0), view = "integrated") {
+scrna_embedding_table <- function(project, columns = character(0), max_points = 30000L, cells = character(0), view = "integrated", filters = list()) {
   view <- if (identical(tolower(view %||% "integrated"), "unintegrated")) "unintegrated" else "integrated"
   path <- scrna_embedding_path(project, view)
   headers <- scrna_embedding_columns(project, view)
   required <- c("cell", "UMAP_1", "UMAP_2")
   if (!file.exists(path) || !all(required %in% headers)) return(data.frame())
   requested_columns <- as.character(columns %||% character(0))
+  if (is.null(filters) || !is.list(filters)) filters <- list()
+  filters <- filters[nzchar(names(filters))]
+  requested_columns <- unique(c(requested_columns, names(filters)))
   final_headers <- if (identical(view, "unintegrated")) scrna_embedding_columns(project, "integrated") else character(0)
   auxiliary_paths <- scrna_auxiliary_metadata_paths(project)
   auxiliary_headers <- unique(unlist(lapply(auxiliary_paths, scrna_table_columns), use.names = FALSE))
@@ -12303,7 +12339,8 @@ scrna_embedding_table <- function(project, columns = character(0), max_points = 
     aux_info <- file.info(aux_path)
     paste(normalizePath(aux_path, winslash = "/", mustWork = TRUE), aux_info$size[[1]], as.numeric(aux_info$mtime[[1]]), sep = "@")
   }, character(1)), collapse = ";")
-  signature <- paste(normalizePath(path, winslash = "/", mustWork = TRUE), info$size[[1]], as.numeric(info$mtime[[1]]), view, final_signature, auxiliary_signature, display_scope, paste(keep, collapse = "\r"), sep = "|")
+  filter_signature <- paste(vapply(names(filters), function(column) paste(column, paste(sort(unique(as.character(filters[[column]]))), collapse = "\r"), sep = "="), character(1)), collapse = "\n")
+  signature <- paste(normalizePath(path, winslash = "/", mustWork = TRUE), info$size[[1]], as.numeric(info$mtime[[1]]), view, final_signature, auxiliary_signature, display_scope, paste(keep, collapse = "\r"), filter_signature, sep = "|")
   if (use_cache && exists(signature, envir = SCRNA_EMBEDDING_CACHE, inherits = FALSE)) return(get(signature, envir = SCRNA_EMBEDDING_CACHE, inherits = FALSE))
   classes <- stats::setNames(rep("NULL", length(headers)), headers)
   classes[path_keep] <- NA_character_
@@ -12324,6 +12361,18 @@ scrna_embedding_table <- function(project, columns = character(0), max_points = 
   x$UMAP_1 <- suppressWarnings(as.numeric(x$UMAP_1)); x$UMAP_2 <- suppressWarnings(as.numeric(x$UMAP_2))
   x <- x[is.finite(x$UMAP_1) & is.finite(x$UMAP_2), , drop = FALSE]
   if (length(requested_cells)) x <- x[x$cell %in% requested_cells, , drop = FALSE]
+  if (length(filters)) {
+    for (column in names(filters)) {
+      selected <- unique(as.character(filters[[column]] %||% character(0)))
+      if (!column %in% names(x) || !length(selected)) {
+        x <- x[FALSE, , drop = FALSE]
+        break
+      }
+      labels <- trimws(as.character(x[[column]]))
+      labels[is.na(labels) | !nzchar(labels)] <- "Unassigned"
+      x <- x[labels %in% selected, , drop = FALSE]
+    }
+  }
   if (!length(requested_cells) && NROW(x) > max_points) {
     set.seed(1234L)
     x <- x[sample.int(NROW(x), as.integer(max_points)), , drop = FALSE]
@@ -12823,6 +12872,13 @@ body { background:#eef3f8; color:#17202f; }
 .sample-retry-heading span { font-size:12px; color:#657084; }
 .sample-retry-chip-wrap { display:flex; flex-wrap:wrap; gap:7px; margin-bottom:10px; max-height:180px; overflow:auto; }
 .sample-retry-chip { border-radius:999px; border:1px solid #e3b34f; background:white; padding:5px 9px; font-size:12px; font-weight:800; color:#6f4200; overflow-wrap:anywhere; }
+.scrna-metadata-filter { margin:14px 0 6px; padding:14px 16px 6px; border:1px solid #cbdced; border-left:5px solid #3977a8; border-radius:9px; background:#f6faff; }
+.scrna-metadata-filter-heading { display:flex; align-items:baseline; gap:9px; flex-wrap:wrap; margin-bottom:8px; color:#244c70; }
+.scrna-metadata-filter-heading span { color:#657084; font-size:12px; }
+.scrna-metadata-filter .checkbox-inline { margin:0 14px 7px 0; padding:5px 10px 5px 30px; border:1px solid #cbdced; border-radius:999px; background:white; }
+.scrna-metadata-filter .shiny-options-group { max-height:180px; overflow:auto; padding-top:2px; }
+.scrna-selection-status { display:inline-flex; align-items:center; margin:8px 0 2px; padding:6px 10px; border:1px solid #cbdced; border-radius:999px; background:#f7f9fc; color:#526070; font-size:12px; font-weight:800; }
+.scrna-selection-status.active { border-color:#78b99a; background:#eaf8f0; color:#16613d; }
 .project-step-summary { margin:12px 0; border:1px solid #d8dde8; border-radius:8px; background:#f8fafc; padding:12px; }
 .project-step-summary-title { font-size:12px; font-weight:800; color:#304a66; text-transform:uppercase; letter-spacing:.04em; margin-bottom:8px; }
 .project-step-summary-row { display:flex; align-items:flex-start; gap:10px; margin-top:8px; }
@@ -18941,13 +18997,63 @@ server <- function(input, output, session) {
         column(5, conditionalPanel("input.scrna_embedding_color_mode == 'metadata'", selectInput("scrna_embedding_color", "Metadata field", choices = choices, selected = selected_choice(isolate(input$scrna_embedding_color), choices, choices[[1]]), selectize = FALSE)), conditionalPanel("input.scrna_embedding_color_mode == 'marker'", uiOutput("scrna_embedding_marker_gene_ui"))),
         column(2,
           checkboxInput("scrna_embedding_legend", "Show legend", value = if (is.null(isolate(input$scrna_embedding_legend))) TRUE else isTRUE(isolate(input$scrna_embedding_legend))),
-          div(class = "button-row", actionButton("scrna_embedding_select_all", "Select all cells", class = "btn-default btn-sm"), actionButton("scrna_embedding_clear_selection", "Unselect all cells", class = "btn-default btn-sm")),
+          div(class = "button-row", actionButton("scrna_embedding_select_all", "Select all displayed cells", class = "btn-default btn-sm"), actionButton("scrna_embedding_clear_selection", "Clear cell selection", class = "btn-default btn-sm")),
           downloadButton("download_scrna_embedding_pdf", "Download publication PDF", class = "btn-default btn-sm"),
           tags$details(tags$summary("Display"), selectInput("scrna_embedding_display_cells", "Cells rendered", choices = c("Representative 75,000 (faster)" = "75000", "Representative 125,000" = "125000", "All cells" = "all"), selected = selected_choice(isolate(input$scrna_embedding_display_cells), c("75000", "125000", "all"), "75000"), selectize = FALSE), sliderInput("scrna_embedding_point_size", "Point size (auto-adjusted)", min = 1, max = 8, value = isolate(input$scrna_embedding_point_size) %||% 2, step = 0.5), sliderInput("scrna_embedding_opacity", "Opacity", min = 0.1, max = 1, value = isolate(input$scrna_embedding_opacity) %||% 0.72, step = 0.05)))
       ),
+      uiOutput("scrna_embedding_filter_ui"),
+      uiOutput("scrna_embedding_selection_status_ui"),
       uiOutput("scrna_embedding_display_note")
     )
   })
+  output$scrna_embedding_filter_ui <- renderUI({
+    p <- current_project(); if (!is_scrna_project(p)) return(NULL)
+    embedding_view <- scrna_selected_embedding_view(p, input$scrna_embedding_view %||% "")
+    fields <- scrna_embedding_filter_fields(p, embedding_view)
+    if (!length(fields)) return(NULL)
+    field_choices <- c("No metadata filter" = "", stats::setNames(fields, gsub("_", " ", fields, fixed = TRUE)))
+    requested_field <- trimws(as.character(input$scrna_embedding_filter_field %||% ""))
+    field <- if (requested_field %in% fields) requested_field else ""
+    div(
+      class = "scrna-metadata-filter",
+      div(class = "scrna-metadata-filter-heading",
+          tags$strong("Filter displayed cells by metadata"),
+          tags$span("Choose a metadata column, then include or exclude any of its values.")),
+      fluidRow(
+        column(4, selectInput("scrna_embedding_filter_field", "Metadata column", choices = field_choices, selected = field, selectize = FALSE)),
+        column(8, uiOutput("scrna_embedding_filter_values_ui"))
+      )
+    )
+  })
+  output$scrna_embedding_filter_values_ui <- renderUI({
+    p <- current_project(); if (!is_scrna_project(p)) return(NULL)
+    embedding_view <- scrna_selected_embedding_view(p, input$scrna_embedding_view %||% "")
+    field <- trimws(as.character(input$scrna_embedding_filter_field %||% ""))
+    if (!nzchar(field)) return(tags$p(class = "muted small-note", "No metadata filter is active; all cells are displayed."))
+    choices <- scrna_embedding_filter_value_choices(p, field, embedding_view)
+    if (!length(choices)) return(tags$p(class = "muted small-note", "This metadata column has no populated values."))
+    tagList(
+      checkboxGroupInput("scrna_embedding_filter_values", "Included values", choices = choices, selected = unname(choices), inline = TRUE),
+      div(class = "button-row",
+          actionButton("scrna_embedding_filter_select_all", "Select all values", class = "btn-default btn-sm"),
+          actionButton("scrna_embedding_filter_clear_all", "Deselect all values", class = "btn-default btn-sm"))
+    )
+  })
+  scrna_active_embedding_filters <- reactive({
+    scrna_embedding_filters(input$scrna_embedding_filter_field %||% "", input$scrna_embedding_filter_values %||% character(0))
+  })
+  observeEvent(input$scrna_embedding_filter_select_all, {
+    p <- current_project(); if (!is_scrna_project(p)) return()
+    embedding_view <- scrna_selected_embedding_view(p, input$scrna_embedding_view %||% "")
+    choices <- scrna_embedding_filter_value_choices(p, input$scrna_embedding_filter_field %||% "", embedding_view)
+    updateCheckboxGroupInput(session, "scrna_embedding_filter_values", choices = choices, selected = unname(choices), inline = TRUE)
+  }, ignoreInit = TRUE)
+  observeEvent(input$scrna_embedding_filter_clear_all, {
+    p <- current_project(); if (!is_scrna_project(p)) return()
+    embedding_view <- scrna_selected_embedding_view(p, input$scrna_embedding_view %||% "")
+    choices <- scrna_embedding_filter_value_choices(p, input$scrna_embedding_filter_field %||% "", embedding_view)
+    updateCheckboxGroupInput(session, "scrna_embedding_filter_values", choices = choices, selected = character(0), inline = TRUE)
+  }, ignoreInit = TRUE)
   output$scrna_embedding_marker_gene_ui <- renderUI({
     # Reading a legacy processed object to recreate its gene list can take
     # noticeable time. Do it only when marker coloring is explicitly chosen,
@@ -19016,9 +19122,9 @@ server <- function(input, output, session) {
   })
   observeEvent(input$scrna_embedding_select_all, {
     p <- current_project(); if (!is_scrna_project(p)) return()
-    # A sentinel represents the full embedding without loading and storing
-    # every barcode in Shiny's reactive state.
-    scrna_embedding_manual_selection("__ALL_CELLS__")
+    # A sentinel represents the currently displayed metadata subset without
+    # loading and storing every barcode in Shiny's reactive state.
+    scrna_embedding_manual_selection("__ALL_DISPLAYED_CELLS__")
   }, ignoreInit = TRUE)
   observeEvent(input$scrna_embedding_clear_selection, {
     scrna_embedding_manual_selection(character(0))
@@ -19034,17 +19140,33 @@ server <- function(input, output, session) {
       scrna_embedding_manual_selection(unique(as.character(selected$key)))
     }
   }, ignoreInit = TRUE)
+  observeEvent(list(input$scrna_embedding_filter_field, input$scrna_embedding_filter_values, input$scrna_embedding_view), {
+    scrna_embedding_manual_selection(character(0))
+    scrna_embedding_selection_reset(scrna_embedding_selection_reset() + 1L)
+    session$sendCustomMessage("codespring-clear-plotly-selection", list(
+      id = "scrna_embedding_plot",
+      source = "scrna_embedding"
+    ))
+  }, ignoreInit = TRUE)
+  output$scrna_embedding_selection_status_ui <- renderUI({
+    p <- current_project(); if (!is_scrna_project(p)) return(NULL)
+    cells <- scrna_embedding_manual_selection()
+    if (identical(cells, "__ALL_DISPLAYED_CELLS__")) {
+      return(tags$span(class = "scrna-selection-status active", "All displayed cells selected"))
+    }
+    cells <- unique(cells[nzchar(cells)])
+    if (length(cells)) {
+      return(tags$span(class = "scrna-selection-status active", paste(format(length(cells), big.mark = ","), "cells selected")))
+    }
+    tags$span(class = "scrna-selection-status", "No cells selected")
+  })
   if (PLOTLY_AVAILABLE) output$scrna_selected_cells_ui <- renderUI({
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
     scrna_embedding_selection_reset()
     cells <- scrna_embedding_manual_selection()
-    all_cells <- identical(cells, "__ALL_CELLS__")
+    all_cells <- identical(cells, "__ALL_DISPLAYED_CELLS__")
     if (all_cells) {
-      return(tagList(br(), h4("All cells selected"), tags$p(class = "muted small-note", "The table shows a representative 2,000-cell preview. Unselect all cells clears this state immediately."), table_output("scrna_selected_cells")))
-    }
-    if (!length(cells)) {
-      selected <- plotly::event_data("plotly_selected", source = "scrna_embedding")
-      cells <- if (!is.null(selected) && NROW(selected) && "key" %in% names(selected)) unique(as.character(selected$key)) else character(0)
+      return(tagList(br(), h4("All displayed cells selected"), tags$p(class = "muted small-note", "The table shows a representative 2,000-cell preview from the active metadata filter. Clear cell selection removes this state immediately."), table_output("scrna_selected_cells")))
     }
     cells <- cells[nzchar(cells)]
     if (!length(cells)) {
@@ -19069,8 +19191,10 @@ server <- function(input, output, session) {
     display_choice <- input$scrna_embedding_display_cells %||% "75000"
     max_points <- if (identical(display_choice, "all")) Inf else suppressWarnings(as.numeric(display_choice))
     if (!is.finite(max_points) || max_points < 1L) max_points <- 75000L
-    x <- scrna_embedding_table(p, columns = c(color_column, "sample_id", "condition", "batch", "cluster", "cell_type", "annotation_source"), max_points = max_points, view = embedding_view)
-    validate(need(NROW(x), "No valid UMAP coordinates are available for this selection."))
+    filters <- scrna_active_embedding_filters()
+    if (length(filters)) validate(need(length(filters[[1]]), "No metadata values are selected. Select one or more values to display cells."))
+    x <- scrna_embedding_table(p, columns = c(color_column, names(filters), "sample_id", "condition", "batch", "cluster", "cell_type", "annotation_source"), max_points = max_points, view = embedding_view, filters = filters)
+    validate(need(NROW(x), "No cells match the active metadata filter."))
     point_size <- max(point_size, scrna_embedding_auto_point_size(NROW(x)))
     marker_gene <- ""
     if (identical(color_mode, "marker")) {
@@ -19134,8 +19258,10 @@ server <- function(input, output, session) {
     display_choice <- input$scrna_embedding_display_cells %||% "75000"
     max_points <- if (identical(display_choice, "all")) Inf else suppressWarnings(as.numeric(display_choice))
     if (!is.finite(max_points) || max_points < 1L) max_points <- 75000L
-    x <- scrna_embedding_table(p, columns = color_column, max_points = max_points, view = embedding_view)
-    validate(need(NROW(x), "No valid UMAP coordinates are available."))
+    filters <- scrna_active_embedding_filters()
+    if (length(filters)) validate(need(length(filters[[1]]), "No metadata values are selected. Select one or more values before downloading the UMAP."))
+    x <- scrna_embedding_table(p, columns = c(color_column, names(filters)), max_points = max_points, view = embedding_view, filters = filters)
+    validate(need(NROW(x), "No cells match the active metadata filter."))
     point_size <- suppressWarnings(as.numeric(input$scrna_embedding_point_size %||% 2))
     if (!is.finite(point_size)) point_size <- 2
     point_size <- scrna_embedding_publication_point_size(NROW(x), point_size)
@@ -19185,23 +19311,21 @@ server <- function(input, output, session) {
     p <- current_project(); if (!is_scrna_project(p)) return(data.frame())
     scrna_embedding_selection_reset()
     cells <- scrna_embedding_manual_selection()
-    all_cells <- identical(cells, "__ALL_CELLS__")
+    all_cells <- identical(cells, "__ALL_DISPLAYED_CELLS__")
+    filters <- scrna_active_embedding_filters()
+    filter_columns <- names(filters)
     if (all_cells) {
       embedding_view <- scrna_selected_embedding_view(p, input$scrna_embedding_view %||% "")
-      x <- scrna_embedding_table(p, columns = c("sample_id", "condition", "batch", "cluster", "cell_type", "annotation_source"), max_points = 2000L, view = embedding_view)
-      preferred <- intersect(c("cell", "sample_id", "condition", "batch", "cluster", "cell_type", "annotation_source", "UMAP_1", "UMAP_2"), names(x))
+      x <- scrna_embedding_table(p, columns = c(filter_columns, "sample_id", "condition", "batch", "cluster", "cell_type", "annotation_source"), max_points = 2000L, view = embedding_view, filters = filters)
+      preferred <- intersect(c("cell", filter_columns, "sample_id", "condition", "batch", "cluster", "cell_type", "annotation_source", "UMAP_1", "UMAP_2"), names(x))
       return(x[, preferred, drop = FALSE])
-    }
-    if (!length(cells)) {
-      selected <- plotly::event_data("plotly_selected", source = "scrna_embedding")
-      cells <- if (!is.null(selected) && NROW(selected) && "key" %in% names(selected)) unique(as.character(selected$key)) else character(0)
     }
     cells <- cells[nzchar(cells)]
     if (!length(cells)) return(data.frame())
     cells <- utils::head(cells, 2000L)
     embedding_view <- scrna_selected_embedding_view(p, input$scrna_embedding_view %||% "")
-    x <- scrna_embedding_table(p, columns = c("sample_id", "condition", "batch", "cluster", "cell_type", "annotation_source"), cells = cells, view = embedding_view)
-    preferred <- intersect(c("cell", "sample_id", "condition", "batch", "cluster", "cell_type", "annotation_source", "UMAP_1", "UMAP_2"), names(x))
+    x <- scrna_embedding_table(p, columns = c(filter_columns, "sample_id", "condition", "batch", "cluster", "cell_type", "annotation_source"), cells = cells, view = embedding_view, filters = filters)
+    preferred <- intersect(c("cell", filter_columns, "sample_id", "condition", "batch", "cluster", "cell_type", "annotation_source", "UMAP_1", "UMAP_2"), names(x))
     x[, preferred, drop = FALSE]
   }, page_length = 50, scroll_y = "360px")
   output$scrna_top_markers_ui <- renderUI({

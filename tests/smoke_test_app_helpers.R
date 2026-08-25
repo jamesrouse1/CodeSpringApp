@@ -416,6 +416,19 @@ assert(grepl('itemsizing = "constant"', app_text, fixed = TRUE) && grepl('legend
 assert(grepl("After integration / final clustering UMAP", app_text, fixed = TRUE), "run section labels the final post-integration UMAP")
 assert(identical(unintegrated_embedding$UMAP_1, c(-1, -2)) && identical(as.character(unintegrated_embedding$cluster), c("0", "1")), "unintegrated UMAP retains its coordinates and joins final annotations by exact cell ID")
 assert(identical(as.character(unintegrated_embedding$cell_type), c("Monocyte", "HSC")) && "cell_type" %in% app_env$scrna_embedding_color_choices(embedding_project, "unintegrated"), "interactive UMAP discovers completed reference-transfer labels without requiring annotation to be rerun")
+embedding_filter_fields <- app_env$scrna_embedding_filter_fields(embedding_project, "integrated")
+embedding_filter_values <- app_env$scrna_embedding_filter_value_choices(embedding_project, "condition", "integrated")
+treated_embedding <- app_env$scrna_embedding_table(embedding_project, columns = c("condition", "cell_type"), max_points = Inf, view = "integrated", filters = list(condition = "treated"))
+empty_embedding_filter <- app_env$scrna_embedding_table(embedding_project, columns = "condition", max_points = Inf, view = "integrated", filters = list(condition = character(0)))
+assert(
+  all(c("cell_type", "cluster", "condition") %in% embedding_filter_fields) &&
+    identical(unname(embedding_filter_values), c("control", "treated")) &&
+    NROW(treated_embedding) == 1L && identical(as.character(treated_embedding$cell), "c2") &&
+    NROW(empty_embedding_filter) == 0L &&
+    grepl("Select all displayed cells", app_text, fixed = TRUE) &&
+    grepl("Deselect all values", app_text, fixed = TRUE),
+  "interactive UMAP supports CELLxGENE-style metadata value filters and explicit displayed-cell selection"
+)
 unlink(file.path(embedding_test_root, "scrna", "tables", "umap_coordinates.tsv"))
 assert(identical(app_env$scrna_selected_embedding_view(embedding_project, ""), "unintegrated"), "interactive UMAP displays the unintegrated coordinates while integration is still running")
 assert("sample_id" %in% app_env$scrna_embedding_color_choices(embedding_project, "unintegrated"), "the running integration UMAP can be colored by sample")
