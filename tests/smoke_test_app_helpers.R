@@ -421,10 +421,6 @@ embedding_filter_values <- app_env$scrna_embedding_filter_value_choices(embeddin
 treated_embedding <- app_env$scrna_embedding_table(embedding_project, columns = c("condition", "cell_type"), max_points = Inf, view = "integrated", filters = list(condition = "treated"))
 empty_embedding_filter <- app_env$scrna_embedding_table(embedding_project, columns = "condition", max_points = Inf, view = "integrated", filters = list(condition = character(0)))
 global_ranges <- app_env$scrna_embedding_global_ranges(embedding_project, "integrated")
-recalculated_test <- app_env$scrna_apply_recalculated_umap(
-  treated_embedding,
-  data.frame(cell = "c2", UMAP_1 = -7, UMAP_2 = 9)
-)
 assert(
   all(c("cell_type", "cluster", "condition") %in% embedding_filter_fields) &&
     !"RNA_snn_res.0.5" %in% app_env$scrna_embedding_color_choices(embedding_project, "integrated") &&
@@ -436,9 +432,9 @@ assert(
     !grepl('selectInput("scrna_embedding_color"', app_text, fixed = TRUE) &&
     grepl("Color and filter cells by metadata", app_text, fixed = TRUE) &&
     grepl("Deselect all values", app_text, fixed = TRUE) &&
-    grepl("Keep the global UMAP coordinates", app_text, fixed = TRUE) &&
-    grepl("Recalculate selected-cell UMAP", app_text, fixed = TRUE) &&
-    identical(recalculated_test$UMAP_1, -7) && identical(recalculated_test$UMAP_2, 9) &&
+    grepl("Keep the global UMAP frame", app_text, fixed = TRUE) &&
+    grepl("Selected-cell UMAP view (automatic)", app_text, fixed = TRUE) &&
+    grepl("without submitting a job", app_text, fixed = TRUE) &&
     global_ranges$x[[1]] < 10 && global_ranges$x[[2]] > 20,
   "interactive UMAP supports CELLxGENE-style metadata value filters and explicit displayed-cell selection"
 )
