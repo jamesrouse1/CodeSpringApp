@@ -3560,6 +3560,20 @@ read_run_manifest <- function(project) {
 }
 
 project_methods_summary <- function(project) {
+  if (is_scrna_project(project)) {
+    object_info <- scrna_processed_object_info(project)
+    engine <- object_info$engine_label %||% {
+      configured <- tolower(project$scrna_engine %||% "auto")
+      if (identical(configured, "seurat")) "Seurat" else if (identical(configured, "scanpy")) "Scanpy" else "Automatic (Seurat for matrices/RDS; Scanpy for H5AD)"
+    }
+    reference <- if (tryCatch(NROW(scrna_fastq_manifest(project)) > 0L, error = function(e) FALSE)) project_reference_label(project) else "Inherited from the supplied matrix or processed object"
+    return(data.frame(
+      Field = c("Project", "Analysis", "Species", "Expression reference", "Processing engine", "Input manifest"),
+      Value = c(project$label, project$analysis, genome_species(project), reference, engine, if (file.exists(project$design_matrix_path)) project$design_matrix_path else "Not created yet"),
+      check.names = FALSE,
+      stringsAsFactors = FALSE
+    ))
+  }
   data.frame(
     Field = c(
       "Project",
@@ -3620,6 +3634,36 @@ tool_reference_summary <- function(project) {
     file.path(SCRIPTS_DIR, "Kallisto", "kallisto_PE.sh"),
     file.path(SCRIPTS_DIR, "Kallisto", "kallisto_SE.sh")
   ))
+  if (is_scrna_project(project)) {
+    object_info <- scrna_processed_object_info(project)
+    engine <- object_info$engine %||% tolower(project$scrna_engine %||% "auto")
+    has_fastq <- tryCatch(NROW(scrna_fastq_manifest(project)) > 0L, error = function(e) FALSE)
+    reference_label <- if (has_fastq) project_reference_label(project) else "Inherited from supplied feature matrix/object"
+    rows <- list(
+      c("Reference", "Expression feature reference", reference_label, "Gene identities and expression matrix", "10x filtered matrix, Seurat RDS, or AnnData H5AD", if (has_fastq) "Raw FASTQs are quantified against the selected Cell Ranger transcriptome." else "The app does not realign a supplied matrix or processed object; its original feature reference is retained."),
+      c("Tool", "CodeSpringLab scRNA workflow", "Engine-neutral staged workflow", "Input inspection, QC, normalization, integration, clustering, annotation, signatures, differential testing, and pathways", "Per-cell count matrix and sample manifest", "Each stage resumes from a saved checkpoint and preserves raw counts for downstream inference.")
+    )
+    if (has_fastq) rows <- c(rows, list(
+      c("Tool", "10x Genomics Cell Ranger", "Cell Ranger 9.0.1; 10x Genomics software reference", "Alignment and gene-level UMI counting", project_reference_label(project), "Each sample is processed independently into a filtered feature-barcode matrix; BAM generation is disabled after counting.")
+    ))
+    if (engine %in% c("auto", "seurat")) rows <- c(rows, list(
+      c("Tool", "Seurat", "Seurat 5.4.0 / R 4.4.2; Hao et al., Nature Biotechnology (2024), doi:10.1038/s41587-023-01767-y", "Normalization, PCA, graph construction, UMAP, clustering, marker testing, label transfer, and module scoring", "Filtered counts or Seurat object", "Supports LogNormalize or SCTransform, Harmony/RPCA/CCA integration, Seurat anchor-based reference transfer, and cell-level Wilcoxon testing."),
+      c("Method", "SCTransform", "Hafemeister and Satija, Genome Biology (2019), doi:10.1186/s13059-019-1874-1", "Variance-stabilizing normalization when selected", "Raw UMI counts", "Applied separately before SCT-based integration; LogNormalize remains available."),
+      c("Tool", "scDblFinder", "Germain et al., F1000Research (2021), doi:10.12688/f1000research.73600.2", "Doublet detection for Seurat projects", "Raw counts by capture", "Run independently by capture/sample; predicted doublets are removed only when requested.")
+    ))
+    if (engine %in% c("auto", "scanpy")) rows <- c(rows, list(
+      c("Tool", "Scanpy", "Scanpy 1.10.2; Wolf et al., Genome Biology (2018), doi:10.1186/s13059-017-1382-0", "Log normalization, PCA, neighbors, UMAP, Leiden clustering, markers, and module scoring", "Filtered counts or AnnData H5AD", "Runs in the shared versioned Scanpy container and preserves AnnData layers and metadata."),
+      c("Tool", "Scrublet", "Scrublet 0.2.3; Wolock et al., Cell Systems (2019), doi:10.1016/j.cels.2018.11.005", "Doublet detection for Scanpy projects", "Raw counts by capture", "Run independently by capture/sample; predicted doublets are removed only when requested.")
+    ))
+    rows <- c(rows, list(
+      c("Method", "Harmony", "Korsunsky et al., Nature Methods (2019), doi:10.1038/s41592-019-0619-0", "Optional multi-sample integration", "PCA representation and selected technical batch/sample field", "Automatic multi-sample integration uses Harmony when a valid grouping field contains more than one level; unintegrated coordinates are retained."),
+      c("Method", "Differential expression", "Seurat Wilcoxon rank-sum test and DESeq2 pseudobulk; Love et al., Genome Biology (2014), doi:10.1186/s13059-014-0550-8", "Cell-population or sample-group comparisons", "Observed normalized expression for cell-level tests; summed raw counts for pseudobulk", "Pseudobulk requires independent biological replicates. Cell-level comparisons are reported separately."),
+      c("Tool", "fgsea", "Korotkevich et al. (2021), doi:10.1101/060012", "Ranked pathway enrichment", "Completed differential-expression ranking and selected gene-set collection", "Runs fgseaMultilevel and records pathway direction, normalized enrichment score, P value, and adjusted P value.")
+    ))
+    out <- as.data.frame(do.call(rbind, rows), stringsAsFactors = FALSE)
+    colnames(out) <- c("Type", "Name", "Version/reference", "Used for", "Input/reference", "Parameters/settings")
+    return(out)
+  }
   if (is_chip_project(project)) {
     ref <- chip_reference_resources(project)
     bowtie2_modules <- module_versions_from_scripts(c(
@@ -3715,6 +3759,14 @@ methods_sentence_for_step <- function(step, manifest_rows, project) {
   mode_text <- if (length(modes)) paste0(" Inputs/settings: ", paste(modes, collapse = "; "), ".") else ""
   switch(
     step,
+    "Input inspection" = paste0("The supplied single-cell matrix or processed object was inspected for raw counts, normalized data, reductions, clusters, and annotations.", mode_text),
+    "QC & doublets" = paste0("Cells and genes were filtered using the recorded thresholds, mitochondrial content was calculated, and doublets were detected independently by capture with scDblFinder (Seurat) or Scrublet (Scanpy).", mode_text),
+    "Normalize & PCA" = paste0("Counts were normalized with the selected Seurat or Scanpy method, highly variable genes were selected, and principal-component analysis was calculated.", mode_text),
+    "UMAP & clustering" = paste0("Optional technical-batch integration was applied before nearest-neighbor graph construction, UMAP, and graph-based clustering; unintegrated coordinates were retained.", mode_text),
+    "Annotate & markers" = paste0("Cell annotations were assigned using marker-list scoring, a direct per-cell mapping, or Seurat reference transfer, and requested cluster markers were calculated.", mode_text),
+    "Signature scoring" = paste0("Named gene signatures were scored on normalized expression and stored as per-cell metadata.", mode_text),
+    "Differential expression" = paste0("Differential expression used sample-level pseudobulk DESeq2 where biological replicates were available and/or a separately reported cell-level Wilcoxon comparison.", mode_text),
+    "Pathway analysis" = paste0("Ranked pathway enrichment was performed with fgseaMultilevel using the selected completed differential-expression comparison and gene-set database.", mode_text),
     "FastQC" = paste0("Read quality control was performed with FastQC.", mode_text),
     "Cutadapt" = paste0("Adapter trimming was performed with cutadapt.", mode_text),
     "Bowtie2" = paste0(if (is_atac_project(project)) "ATAC-seq fragments were aligned with Bowtie2 and duplicate-removed CPM bigWigs scaled to one million mapped reads were generated." else if (is_chip_project(project)) "ChIP-seq target and input reads were aligned with Bowtie2; PCR duplicates were removed and CPM bigWigs were generated." else "CUT&RUN fragments were aligned with Bowtie2.", ref_text, mode_text),
@@ -11787,12 +11839,13 @@ peak_signal_track_table <- function(project) {
   out
 }
 
-image_or_file_ui <- function(path, height = "900px") {
+image_or_file_ui <- function(path, height = "900px", fill_width = FALSE) {
   if (!file.exists(path)) return(tags$div(class = "empty-box", "File not found."))
   ext <- tolower(tools::file_ext(path))
   if (ext %in% c("png", "jpg", "jpeg", "webp") && BASE64_AVAILABLE) {
     mime <- if (ext == "png") "image/png" else "image/jpeg"
-    tags$img(src = paste0("data:", mime, ";base64,", base64enc::base64encode(path)), style = "max-width:100%; border:1px solid #d8dde8; border-radius:8px;")
+    image_width <- if (isTRUE(fill_width)) "width:100%; height:auto;" else "max-width:100%;"
+    tags$img(src = paste0("data:", mime, ";base64,", base64enc::base64encode(path)), style = paste0(image_width, " border:1px solid #d8dde8; border-radius:8px;"))
   } else if (ext == "html") {
     html <- paste(readLines(path, warn = FALSE), collapse = "\n")
     tags$iframe(srcdoc = htmltools::HTML(html), style = paste0("width:100%; height:", height, "; border:1px solid #d8dde8; border-radius:8px;"))
@@ -17182,7 +17235,7 @@ server <- function(input, output, session) {
     })
     tagList(
       div(class = "read-source-note", tags$strong("Manual cluster review"), tags$p("The ranking is a suggestion, not a final call. Review the marker dot plot, then choose one cell type for every cluster.")),
-      if (length(dotplots)) image_or_file_ui(dotplots[[which.max(file.info(dotplots)$mtime)]], height = "720px") else tags$p(class = "muted small-note", "The cluster marker dot plot was not found, but the score rankings are available below."),
+      if (length(dotplots)) image_or_file_ui(dotplots[[which.max(file.info(dotplots)$mtime)]], height = "720px", fill_width = TRUE) else tags$p(class = "muted small-note", "The cluster marker dot plot was not found, but the score rankings are available below."),
       br(), actionButton("scrna_apply_top_suggestions", "Fill with top suggestions", class = "btn-default"), br(), br(),
       tags$div(style = "overflow-x:auto;", tags$table(class = "table table-striped table-condensed", tags$thead(tags$tr(tags$th("Cluster"), tags$th("Suggested ranking (normalized average)"), tags$th("Final cell type"))), tags$tbody(rows)))
     )
@@ -18664,7 +18717,7 @@ server <- function(input, output, session) {
       tags$p(class = "muted small-note", "Start with Cluster number to check whether the marker programs support the unsupervised groups. Then switch to Cell-type annotation to show the same evidence at the final label level."),
       radioButtons("scrna_marker_panel_group", "Group marker figures by", choices = available_groups, selected = group_selected, inline = TRUE),
       selectInput("scrna_marker_panel", "Marker figure", choices = files, selected = selected, selectize = FALSE),
-      image_or_file_ui(selected, "900px")
+      image_or_file_ui(selected, "900px", fill_width = TRUE)
     )
   })
   output$scrna_cluster_marker_heatmap_ui <- renderUI({

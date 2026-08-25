@@ -261,6 +261,14 @@ dir.create(file.path(pbmc_manifest_dir, "manifest"), recursive = TRUE)
 pbmc_manifest <- file.path(pbmc_manifest_dir, "manifest", "scrna_samples.tsv")
 utils::write.table(data.frame(sample_id = "pbmc3k", input_path = app_env$SCRNA_PBMC3K_EXAMPLE_DIR), pbmc_manifest, sep = "\t", row.names = FALSE, quote = FALSE)
 pbmc_project <- list(data_dir = pbmc_manifest_dir, design_matrix_path = pbmc_manifest, scrna_input_manifest = pbmc_manifest)
+pbmc_methods_project <- utils::modifyList(pbmc_project, list(id = "scrna/example_pbmc3k", name = "example_pbmc3k", label = "PBMC 3K", analysis_key = "scrna", analysis = "scRNA-seq", genome = "human", genome_version = "", scrna_engine = "seurat", results_root = dirname(pbmc_manifest_dir), paired_end = FALSE))
+pbmc_method_tools <- app_env$tool_reference_summary(pbmc_methods_project)
+assert(
+  all(c("Seurat", "scDblFinder", "Harmony", "Differential expression", "fgsea") %in% pbmc_method_tools$Name) &&
+    !any(c("STAR", "featureCounts / Subread", "RSEM", "Kallisto") %in% pbmc_method_tools$Name),
+  "scRNA Methods lists single-cell tools and citations instead of bulk RNA-seq references"
+)
+assert(grepl('image_or_file_ui(selected, "900px", fill_width = TRUE)', app_text, fixed = TRUE), "cluster-number and cell-type marker panels fill the same viewer width")
 pbmc_local_umap <- app_env$scrna_umap_focus_settings(pbmc_project, "local")
 pbmc_global_umap <- app_env$scrna_umap_focus_settings(pbmc_project, "global")
 assert(
