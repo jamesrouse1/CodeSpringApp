@@ -417,6 +417,7 @@ PROGRESS_REFRESH_MS <- 20000
 JOB_HISTORY_CACHE_SECONDS <- 12
 MAX_SLURM_JOB_IDS_PER_REFRESH <- 100L
 SLURM_QUERY_TIMEOUT_SECONDS <- 2
+SAMPLE_PROGRESS_NICE_LIMIT <- 30L
 JOB_HISTORY_CACHE <- new.env(parent = emptyenv())
 METRIC_LINES_CACHE <- new.env(parent = emptyenv())
 GENOME_BROWSER_NAV_CACHE <- new.env(parent = emptyenv())
@@ -7055,6 +7056,13 @@ sample_progress_matrix_ui <- function(progress_df) {
   if (!NROW(progress_df)) return(div(class = "empty-box", "No sample progress available yet."))
   steps <- unique(progress_df$step[order(step_order(progress_df$step))])
   samples <- unique(progress_df$sample)
+  if (length(samples) > SAMPLE_PROGRESS_NICE_LIMIT) {
+    return(div(
+      class = "sample-matrix-wrap",
+      div(class = "adaptive-table-note", paste("Showing compact sample progress for", length(samples), "samples.")),
+      table_output("sample_progress_detail_table")
+    ))
+  }
   div(
     class = "sample-matrix-wrap",
     tags$table(
@@ -7371,6 +7379,13 @@ sample_progress_step_table <- function(progress_df, step) {
 sample_progress_step_ui <- function(progress_df, step) {
   table <- sample_progress_step_table(progress_df, step)
   if (!NROW(table)) return(NULL)
+  if (NROW(table) > SAMPLE_PROGRESS_NICE_LIMIT) {
+    return(div(
+      class = "tool-progress-wrap",
+      div(class = "tool-progress-title", paste("Sample progress —", NROW(table), "samples")),
+      table_output(tool_progress_output_id(step))
+    ))
+  }
   hit <- progress_df[progress_df$step == step, , drop = FALSE]
   hit <- hit[order(hit$sample), , drop = FALSE]
   div(

@@ -102,6 +102,11 @@ assert(
     grepl("write_last_analysis(input$analysis)", app_text, fixed = TRUE),
   "the selected analysis is restored after a browser reconnect"
 )
+assert(
+  identical(app_env$SAMPLE_PROGRESS_NICE_LIMIT, 30L) &&
+    grepl("Showing compact sample progress", app_text, fixed = TRUE),
+  "large projects use the compact paginated progress view"
+)
 cutrun_progress_root <- tempfile("cutrun_progress_")
 dir.create(file.path(cutrun_progress_root, "seacr", "spikein_non_stringent"), recursive = TRUE)
 cutrun_progress_files <- file.path(
