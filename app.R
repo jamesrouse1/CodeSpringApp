@@ -10400,16 +10400,16 @@ scrna_object_query_jobs <- function(project, output_path) {
 submit_scrna_object_query_job <- function(project, engine, task, object_path, output_path, value = "") {
   runner <- file.path(SCRIPTS_DIR, "singleCellRNAseq", "scrna_object_query.sh")
   if (!file.exists(runner) || file.access(runner, mode = 1) != 0) {
-    return(record_preflight_failure(project, "scRNA object query", "CodeSpringLab's compute-node object-query runner is missing or not executable. Pull the latest CodeSpringLab main branch.", "scrna_object_query"))
+    return(record_preflight_failure(project, "Marker expression", "CodeSpringLab's compute-node object-query runner is missing or not executable. Pull the latest CodeSpringLab main branch.", "scrna_object_query"))
   }
   container_path <- if (identical(tolower(engine), "scanpy")) {
     container <- scanpy_container_check()
-    if (!isTRUE(container$ready)) return(record_preflight_failure(project, "scRNA object query", paste("The shared Scanpy container is unavailable.", container$detail), "scrna_object_query"))
+    if (!isTRUE(container$ready)) return(record_preflight_failure(project, "Marker expression", paste("The shared Scanpy container is unavailable.", container$detail), "scrna_object_query"))
     container$path
   } else ""
   scope <- if (identical(task, "gene")) paste0("gene_", clean_name(value, "marker")) else "gene_list"
   submit_sbatch(
-    project, "scRNA object query", runner,
+    project, "Marker expression", runner,
     c(engine, task, object_path, output_path, value, container_path),
     "scrna_object_query", paste(task, engine), sample = scope,
     target = output_path, reference = object_path,
@@ -12363,7 +12363,7 @@ scrna_gene_select_input <- function(project, input_id, label, selected = "") {
   if (!length(genes)) {
     return(tagList(
       textInput(input_id, label, value = selected, placeholder = "Type an exact gene symbol"),
-      tags$p(class = "muted small-note", "This legacy result does not include the exported gene list. Enter an exact gene symbol; its expression will be extracted by a Slurm compute job rather than by the web server.")
+      tags$p(class = "muted small-note", "This legacy result does not include the exported gene list. Enter an exact gene symbol; its expression will be prepared when requested.")
     ))
   }
   case_match <- match(tolower(selected), tolower(genes))
@@ -18934,21 +18934,21 @@ server <- function(input, output, session) {
         scrna_object_query_submitted(unique(c(submitted, cache_path)))
         job_id <- parse_sbatch_job_id(message)
         if (!nzchar(job_id)) {
-          scrna_dashboard_expression_error(paste("The marker-expression compute job could not be submitted.", message))
+          scrna_dashboard_expression_error("Marker expression could not be started. Check the Logs tab for details.")
           return(NULL)
         }
-        scrna_dashboard_expression_error(paste0("Marker expression is being extracted on a Slurm compute node (job ", job_id, "). This view will update automatically when it finishes."))
+        scrna_dashboard_expression_error("Marker expression is running. This view will update automatically when it finishes.")
         invalidateLater(5000, session)
         return(NULL)
       }
       latest_state <- if (NROW(query_jobs) && "slurm_state" %in% names(query_jobs)) as.character(utils::tail(query_jobs$slurm_state, 1L)) else "Submitted"
       latest_id <- if (NROW(query_jobs) && "job_id" %in% names(query_jobs)) as.character(utils::tail(query_jobs$job_id, 1L)) else ""
       if (latest_state %in% c(active_slurm_states(), "Submitted", "Finished or not in queue")) {
-        scrna_dashboard_expression_error(paste0("Marker expression is being extracted on a Slurm compute node", if (nzchar(latest_id)) paste0(" (job ", latest_id, ")") else "", ". This view will update automatically when it finishes."))
+        scrna_dashboard_expression_error("Marker expression is running. This view will update automatically when it finishes.")
         invalidateLater(5000, session)
         return(NULL)
       }
-      scrna_dashboard_expression_error(paste0("The Slurm marker-expression query ended with state ", latest_state, if (nzchar(latest_id)) paste0(" (job ", latest_id, ")") else "", " without producing the cache. Check its log in the Logs tab."))
+      scrna_dashboard_expression_error("Marker expression did not finish successfully. Check the Logs tab for details.")
       return(NULL)
     }
     values <- safe_read_table(cache_path, 1000000)

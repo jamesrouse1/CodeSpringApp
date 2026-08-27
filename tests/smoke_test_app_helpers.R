@@ -87,7 +87,7 @@ assert(
 )
 assert(
   grepl("submit_scrna_object_query_job", app_text, fixed = TRUE) &&
-    grepl("scRNA object query", app_text, fixed = TRUE) &&
+    grepl("Marker expression", app_text, fixed = TRUE) &&
     !grepl('system2(rscript, c(helper, checkpoint, gene, cache_path)', app_text, fixed = TRUE) &&
     !grepl('system2("singularity", c("exec", container$path, "python", helper, checkpoint, gene, cache_path)', app_text, fixed = TRUE),
   "large Seurat/H5AD marker queries are submitted to Slurm instead of loading objects in the web process"
