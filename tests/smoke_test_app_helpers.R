@@ -98,6 +98,29 @@ assert(
   "project inventories are cached and oversized logs are not loaded wholesale by the web process"
 )
 assert(
+  grepl("selected = read_last_analysis()", app_text, fixed = TRUE) &&
+    grepl("write_last_analysis(input$analysis)", app_text, fixed = TRUE),
+  "the selected analysis is restored after a browser reconnect"
+)
+cutrun_progress_root <- tempfile("cutrun_progress_")
+dir.create(file.path(cutrun_progress_root, "seacr", "spikein_non_stringent"), recursive = TRUE)
+cutrun_progress_files <- file.path(
+  cutrun_progress_root, "seacr", "spikein_non_stringent",
+  c("Sample1_seacr_summary.txt", "Sample10_seacr_summary.txt")
+)
+file.create(cutrun_progress_files)
+cutrun_progress_project <- list(data_dir = cutrun_progress_root, analysis_key = "cutrun", analysis = "CUT&RUN")
+cached_seacr_summaries <- app_env$cutrun_seacr_summary_paths(cutrun_progress_project)
+sample1_target <- app_env$sample_step_targets(
+  cutrun_progress_project, "Sample1", "SEACR",
+  cutrun_seacr_summaries = cached_seacr_summaries
+)
+assert(
+  length(cached_seacr_summaries) == 2L && identical(basename(sample1_target), "Sample1_seacr_summary.txt"),
+  "CUT&RUN progress scans SEACR summaries once and matches each sample exactly"
+)
+unlink(cutrun_progress_root, recursive = TRUE, force = TRUE)
+assert(
   !grepl("scrna_runtime_executable", app_text, fixed = TRUE) &&
     grepl("Annotation files are requested only at the annotation step", app_text, fixed = TRUE) &&
     grepl("Upload one Seurat/Scanpy object from laptop", app_text, fixed = TRUE),

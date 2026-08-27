@@ -349,6 +349,7 @@ APP_HOME <- normalizePath(if (nzchar(requested_app_home)) requested_app_home els
 dir.create(APP_HOME, recursive = TRUE, showWarnings = FALSE)
 JOBS_PATH <- file.path(APP_HOME, "jobs.tsv")
 LAST_PROJECT_PATH <- file.path(APP_HOME, "last_project_id.txt")
+LAST_ANALYSIS_PATH <- file.path(APP_HOME, "last_analysis.txt")
 PROJECT_CONFIG_ROOT <- file.path(APP_HOME, "project_configs")
 DEFAULT_RESULTS_ROOT <- normalizePath(file.path(CURRENT_HOME, "csl_results"), winslash = "/", mustWork = FALSE)
 APP_ROOT <- normalizePath(Sys.getenv("CSL_WEB_APP_ROOT", unset = getwd()), winslash = "/", mustWork = FALSE)
@@ -421,6 +422,7 @@ METRIC_LINES_CACHE <- new.env(parent = emptyenv())
 GENOME_BROWSER_NAV_CACHE <- new.env(parent = emptyenv())
 GENOME_BROWSER_FILTERED_BED_CACHE <- new.env(parent = emptyenv())
 CUTRUN_PEAK_SOURCE_CACHE <- new.env(parent = emptyenv())
+CUTRUN_SEACR_SUMMARY_CACHE <- new.env(parent = emptyenv())
 SCRNA_EMBEDDING_CACHE <- new.env(parent = emptyenv())
 PROJECT_FILE_INVENTORY_CACHE <- new.env(parent = emptyenv())
 CUTRUN_DEFAULT_SPIKEIN_INDEX <- "/grid/bsr/data/data/utama/genome/ecoli_k12/bowtie2_index/ecoli_k12_mg1655"
@@ -1405,6 +1407,22 @@ write_last_project_id <- function(project_id) {
   dir.create(dirname(LAST_PROJECT_PATH), recursive = TRUE, showWarnings = FALSE)
   writeLines(project_id, LAST_PROJECT_PATH)
   invisible(project_id)
+}
+
+read_last_analysis <- function() {
+  fallback <- "RNA-seq"
+  if (!file.exists(LAST_ANALYSIS_PATH)) return(fallback)
+  value <- trimws(readLines(LAST_ANALYSIS_PATH, warn = FALSE, n = 1))
+  choices <- unname(analysis_choices())
+  if (length(value) && value[[1]] %in% choices) value[[1]] else fallback
+}
+
+write_last_analysis <- function(analysis) {
+  analysis <- trimws(as.character(analysis %||% ""))
+  if (!analysis %in% unname(analysis_choices())) return(invisible(FALSE))
+  dir.create(dirname(LAST_ANALYSIS_PATH), recursive = TRUE, showWarnings = FALSE)
+  writeLines(analysis, LAST_ANALYSIS_PATH)
+  invisible(TRUE)
 }
 
 design_path_from_dir <- function(path) {
@@ -3235,6 +3253,20 @@ cutrun_seacr_method_dirs <- function(project) {
   dirs[grepl("^((spikein|cpm)_non|raw_norm|norm|non)_(stringent|relaxed)$", dirs)]
 }
 
+cutrun_seacr_summary_paths <- function(project, max_age_seconds = 30) {
+  root <- file.path(project$data_dir, "seacr")
+  if (!dir.exists(root)) return(character(0))
+  key <- normalizePath(root, winslash = "/", mustWork = TRUE)
+  if (exists(key, envir = CUTRUN_SEACR_SUMMARY_CACHE, inherits = FALSE)) {
+    cached <- get(key, envir = CUTRUN_SEACR_SUMMARY_CACHE, inherits = FALSE)
+    age <- suppressWarnings(as.numeric(difftime(Sys.time(), cached$checked, units = "secs")))
+    if (is.finite(age) && age >= 0 && age < max_age_seconds) return(cached$value)
+  }
+  paths <- list.files(root, pattern = "_seacr_summary\\.txt$", recursive = TRUE, full.names = TRUE)
+  assign(key, list(checked = Sys.time(), value = paths), envir = CUTRUN_SEACR_SUMMARY_CACHE)
+  paths
+}
+
 sample_step_data_paths <- function(project, step, samples, method = "") {
   data_dir <- project$data_dir
   samples <- unique(as.character(samples %||% character(0)))
@@ -4494,7 +4526,7 @@ fastqc_expected_targets <- function(reads, outdir) {
   ))
 }
 
-sample_step_targets <- function(project, sample, step, raw_pairs = NULL, trimmed_pairs = NULL) {
+sample_step_targets <- function(project, sample, step, raw_pairs = NULL, trimmed_pairs = NULL, cutrun_seacr_summaries = NULL) {
   data_dir <- project$data_dir
   if (identical(step, "FastQC")) {
     expected_for <- function(trimmed) {
@@ -4536,7 +4568,9 @@ sample_step_targets <- function(project, sample, step, raw_pairs = NULL, trimmed
       "SEACR" = {
         root <- file.path(data_dir, "seacr")
         pattern <- paste0("^", gsub("([][{}()+*^$|\\\\.?])", "\\\\\\1", sample, perl = TRUE), "_seacr_summary\\.txt$")
-        hits <- if (dir.exists(root)) list.files(root, pattern = pattern, recursive = TRUE, full.names = TRUE) else character(0)
+        candidates <- cutrun_seacr_summaries
+        if (is.null(candidates)) candidates <- if (dir.exists(root)) list.files(root, pattern = "_seacr_summary\\.txt$", recursive = TRUE, full.names = TRUE) else character(0)
+        hits <- candidates[grepl(pattern, basename(candidates), perl = TRUE)]
         if (length(hits)) hits else file.path(root, sample, paste0(sample, "_seacr_summary.txt"))
       },
       "MACS2 (optional)" = {
@@ -6865,6 +6899,7 @@ sample_progress <- function(project, active_states = active_job_state_map(projec
   deleted_records <- deleted_step_records(project)
   raw_pairs <- if (any(sample_steps %in% c("Cutadapt", "FastQC"))) sample_fastq_pairs(project, FALSE) else NULL
   trimmed_pairs <- if ("FastQC" %in% sample_steps) sample_fastq_pairs(project, TRUE) else NULL
+  cutrun_seacr_summaries <- if (is_cutrun_project(project) && "SEACR" %in% sample_steps) cutrun_seacr_summary_paths(project) else NULL
   active_job_states <- c("PENDING", "CONFIGURING", "COMPLETING", "RUNNING", "SUSPENDED", "Submitted")
   completed_job_states <- c("COMPLETED", "COMPLETED+", "CD")
   cancelled_job_states <- c("CANCELLED", "CANCELLED+", "CA")
@@ -6879,7 +6914,12 @@ sample_progress <- function(project, active_states = active_job_state_map(projec
     for (step in sample_steps) {
       if (is_cutrun_project(project) && step %in% c("SEACR", "MACS2 (optional)") && cutrun_control_like(target_by_sample[[sample]] %||% "")) next
       if (is_chip_project(project) && identical(step, "MACS2 Peaks") && identical(chip_reference_by_sample[[sample]] %||% "", "input")) next
-      targets <- sample_step_targets(project, sample, step, raw_pairs = raw_pairs, trimmed_pairs = trimmed_pairs)
+      targets <- sample_step_targets(
+        project, sample, step,
+        raw_pairs = raw_pairs,
+        trimmed_pairs = trimmed_pairs,
+        cutrun_seacr_summaries = cutrun_seacr_summaries
+      )
       target <- paste(targets, collapse = "; ")
       sizes <- vapply(targets, file_size_for, numeric(1))
       size <- sum(sizes, na.rm = TRUE)
@@ -13782,7 +13822,7 @@ ui <- fluidPage(
     sidebarPanel(
       class = "web-sidebar",
       width = 2,
-      selectInput("analysis", "Analysis type", choices = analysis_choices(), selected = "RNA-seq", selectize = FALSE),
+      selectInput("analysis", "Analysis type", choices = analysis_choices(), selected = read_last_analysis(), selectize = FALSE),
       conditionalPanel(
         "input.analysis != 'FetchNGS'",
         uiOutput("project_ui"),
@@ -14111,6 +14151,10 @@ server <- function(input, output, session) {
     check.names = FALSE
   ))
   new_scrna_input_message <- reactiveVal("")
+
+  observeEvent(input$analysis, {
+    write_last_analysis(input$analysis)
+  }, ignoreInit = FALSE)
 
   new_project_input_values <- function() {
     values <- reactiveValuesToList(input)
