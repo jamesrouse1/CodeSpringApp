@@ -127,6 +127,30 @@ assert(
   "CUT&RUN progress scans SEACR summaries once and matches each sample exactly"
 )
 unlink(cutrun_progress_root, recursive = TRUE, force = TRUE)
+cutrun_download_root <- tempfile("cutrun_summary_download_")
+dir.create(file.path(cutrun_download_root, "cutrun_summaries"), recursive = TRUE)
+cutrun_design_path <- file.path(cutrun_download_root, "design.tsv")
+utils::write.table(
+  data.frame(sample = "Sample1", target = "H3K27ac", condition = "AA", cell_type = "Epithelial"),
+  cutrun_design_path, sep = "\t", row.names = FALSE, quote = FALSE
+)
+utils::write.table(
+  data.frame(Comparison = "AA vs Vehicle", Status = "Complete", check.names = FALSE),
+  file.path(cutrun_download_root, "cutrun_summaries", "differential_peak_comparison_summary.tsv"),
+  sep = "\t", row.names = FALSE, quote = FALSE
+)
+cutrun_download_project <- list(
+  data_dir = cutrun_download_root, design_matrix_path = cutrun_design_path,
+  pipeline = "CUTRUN", analysis_key = "cutrun", analysis = "CUT&RUN"
+)
+cutrun_download_file <- tempfile(fileext = ".xlsx")
+app_env$copy_cutrun_generated_summary(cutrun_download_project, "differential", cutrun_download_file)
+assert(
+  app_env$valid_cutrun_xlsx(cutrun_download_file),
+  "CUT&RUN summary downloads rebuild a valid Excel workbook when the saved XLSX is absent"
+)
+unlink(cutrun_download_root, recursive = TRUE, force = TRUE)
+unlink(cutrun_download_file, force = TRUE)
 assert(
   !grepl("scrna_runtime_executable", app_text, fixed = TRUE) &&
     grepl("Annotation files are requested only at the annotation step", app_text, fixed = TRUE) &&

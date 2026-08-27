@@ -4930,6 +4930,46 @@ cutrun_tabular_data_rows <- function(path) {
   as.integer(max(lines - 1, 0))
 }
 
+write_cutrun_summary_table_xlsx <- function(table, file, sheet_name, title = sheet_name) {
+  table <- as.data.frame(table, check.names = FALSE, stringsAsFactors = FALSE)
+  if (requireNamespace("openxlsx", quietly = TRUE)) {
+    wb <- openxlsx::createWorkbook()
+    openxlsx::addWorksheet(wb, sheet_name, gridLines = FALSE)
+    title_style <- openxlsx::createStyle(
+      fontColour = "#FFFFFF", fgFill = "#1F4E78", textDecoration = "bold",
+      fontSize = 14, halign = "left"
+    )
+    header_style <- openxlsx::createStyle(
+      fontColour = "#1F1F1F", fgFill = "#D9EAF7", textDecoration = "bold",
+      wrapText = TRUE, valign = "center"
+    )
+    openxlsx::writeData(wb, sheet_name, title, startRow = 1, startCol = 1, colNames = FALSE)
+    openxlsx::addStyle(wb, sheet_name, title_style, rows = 1, cols = 1)
+    if (NCOL(table)) {
+      openxlsx::writeData(wb, sheet_name, table, startRow = 3, startCol = 1, withFilter = NROW(table) > 0)
+      openxlsx::addStyle(wb, sheet_name, header_style, rows = 3, cols = seq_len(NCOL(table)), gridExpand = TRUE)
+      openxlsx::mergeCells(wb, sheet_name, cols = seq_len(NCOL(table)), rows = 1)
+      openxlsx::setColWidths(wb, sheet_name, cols = seq_len(NCOL(table)), widths = "auto")
+      openxlsx::freezePane(wb, sheet_name, firstActiveRow = 4)
+    }
+    openxlsx::saveWorkbook(wb, file, overwrite = TRUE)
+  } else if (requireNamespace("writexl", quietly = TRUE)) {
+    sheets <- list(table)
+    names(sheets) <- sheet_name
+    writexl::write_xlsx(sheets, file)
+  } else {
+    stop("Excel export requires the R package 'openxlsx' or 'writexl'.", call. = FALSE)
+  }
+  if (!file.exists(file) || file.info(file)$size <= 0) stop("The Excel summary could not be created.", call. = FALSE)
+  invisible(file)
+}
+
+valid_cutrun_xlsx <- function(path) {
+  if (length(path) != 1L || is.na(path) || !nzchar(path) || !file.exists(path) || file.info(path)$size <= 0) return(FALSE)
+  members <- tryCatch(utils::unzip(path, list = TRUE), error = function(e) data.frame())
+  NROW(members) > 0L && any(as.character(members$Name) == "[Content_Types].xml")
+}
+
 write_cutrun_project_summary <- function(project, kind = c("peak_calling", "differential")) {
   kind <- match.arg(kind)
   out_dir <- file.path(project$data_dir, "cutrun_summaries")
@@ -4945,7 +4985,9 @@ write_cutrun_project_summary <- function(project, kind = c("peak_calling", "diff
   table <- cutrun_diffbind_summary_table(project)
   tsv <- file.path(out_dir, "differential_peak_comparison_summary.tsv")
   utils::write.table(table, tsv, sep = "\t", row.names = FALSE, quote = FALSE, na = "")
-  list(tsv = tsv, xlsx = "", rows = NROW(table))
+  xlsx <- file.path(out_dir, "differential_peak_comparison_summary.xlsx")
+  write_cutrun_summary_table_xlsx(table, xlsx, "Differential Comparisons", "CUT&RUN Differential Peak Comparisons")
+  list(tsv = tsv, xlsx = xlsx, rows = NROW(table))
 }
 
 cutrun_generated_summary_path <- function(project, kind = c("peak_calling", "differential"), extension = "tsv") {
@@ -4964,10 +5006,22 @@ cutrun_generated_summary_table <- function(project, kind = c("peak_calling", "di
 copy_cutrun_generated_summary <- function(project, kind = c("peak_calling", "differential"), destination) {
   kind <- match.arg(kind)
   source <- cutrun_generated_summary_path(project, kind, "xlsx")
-  if (!file.exists(source) || file.info(source)$size <= 0) {
-    stop("Run the ", if (identical(kind, "peak_calling")) "Peak-Calling Summary" else "Differential Peak Summary", " job first; its workbook is not available yet.")
+  if (valid_cutrun_xlsx(source)) {
+    if (!file.copy(source, destination, overwrite = TRUE)) stop("Could not copy the completed summary workbook.")
+    return(invisible(destination))
   }
-  if (!file.copy(source, destination, overwrite = TRUE)) stop("Could not copy the completed summary workbook.")
+  if (identical(kind, "peak_calling")) {
+    write_cutrun_peak_summary_xlsx(project, destination)
+  } else {
+    table <- cutrun_generated_summary_table(
+      project, "differential", function() cutrun_diffbind_summary_table(project)
+    )
+    write_cutrun_summary_table_xlsx(
+      table, destination, "Differential Comparisons", "CUT&RUN Differential Peak Comparisons"
+    )
+  }
+  if (!valid_cutrun_xlsx(destination)) stop("The CUT&RUN summary workbook could not be prepared for download.")
+  invisible(destination)
 }
 
 cutrun_diffbind_result_dirs <- function(project) {
@@ -20915,6 +20969,7 @@ server <- function(input, output, session) {
   )
   output$download_cutrun_peak_calling_run_summary <- downloadHandler(
     filename = function() paste0(clean_name(current_project()$name, "cutrun"), "_peak_calling_summary.xlsx"),
+    contentType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     content = function(file) copy_cutrun_generated_summary(current_project(), "peak_calling", file)
   )
   output$download_cutrun_peak_calling_explorer_summary <- downloadHandler(
@@ -20923,6 +20978,7 @@ server <- function(input, output, session) {
   )
   output$download_cutrun_seacr_peak_summary_xlsx <- downloadHandler(
     filename = function() paste0(clean_name(current_project()$name, "cutrun"), "_peak_summary.xlsx"),
+    contentType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     content = function(file) write_cutrun_peak_summary_xlsx(current_project(), file)
   )
   output$download_cutrun_peak_overlap_summary <- downloadHandler(
@@ -20957,10 +21013,12 @@ server <- function(input, output, session) {
   )
   output$download_cutrun_diffbind_summary <- downloadHandler(
     filename = function() paste0(clean_name(current_project()$name, "cutrun"), "_differential_peak_comparison_summary.xlsx"),
+    contentType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     content = function(file) copy_cutrun_generated_summary(current_project(), "differential", file)
   )
   output$download_cutrun_diffbind_run_summary <- downloadHandler(
     filename = function() paste0(clean_name(current_project()$name, "cutrun"), "_differential_peak_comparison_summary.xlsx"),
+    contentType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     content = function(file) copy_cutrun_generated_summary(current_project(), "differential", file)
   )
   output$download_cutrun_diffbind_significant <- downloadHandler(
