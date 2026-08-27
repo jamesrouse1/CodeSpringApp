@@ -12762,7 +12762,7 @@ scrna_results_explorer_ui <- function() {
     div(class = "main-tabs", tabsetPanel(
       id = "scrna_results_tabs",
       tabPanel("Interactive UMAP", br(), h3("Interactive UMAP"), tags$p(class = "muted", "Color every cell by metadata or normalized marker expression. Hover for cell identity and metadata; use lasso or box selection to inspect cells."), uiOutput("scrna_embedding_controls_ui"), uiOutput("scrna_embedding_widget_ui"), uiOutput("scrna_selected_cells_ui"), br(), uiOutput("scrna_processed_object_download_ui")),
-      tabPanel("Violins", br(), h3("Expression Violins"), tags$p(class = "muted", "Compare normalized gene expression or stored signature scores across clusters, cell types, or other categorical metadata."), uiOutput("scrna_violin_controls_ui"), plotOutput("scrna_expression_violin", height = "680px"), downloadButton("download_scrna_expression_violin", "Download current violin", class = "btn-default")),
+      tabPanel("Violins", br(), h3("Expression Violins"), tags$p(class = "muted", "Compare normalized gene expression or stored signature scores across clusters, cell types, or other categorical metadata."), uiOutput("scrna_violin_controls_ui"), uiOutput("scrna_violin_status_ui"), plotOutput("scrna_expression_violin", height = "680px"), downloadButton("download_scrna_expression_violin", "Download current violin", class = "btn-default")),
       tabPanel("Marker panels", br(), h3("Marker-list panels"), tags$p(class = "muted", "Use these to assess annotation evidence. Dot size is the fraction of cells expressing a marker and color is relative mean normalized expression within that marker. Heatmaps show the same expression summary without the prevalence encoding. Markers remain grouped by their supplied cell-type program."), uiOutput("scrna_marker_panel_ui")),
       tabPanel("Cluster markers", br(), h3("Top cluster-marker heatmap"), tags$p(class = "muted", "Created only when ‘Also calculate marker genes for every cluster’ was selected during annotation. One heatmap shows up to 10 positive markers for every cluster, ordered by cluster and effect size."), uiOutput("scrna_cluster_marker_heatmap_ui")),
       tabPanel("Differential expression", br(), h3("Differential expression"), tags$p(class = "muted", "Inspect completed comparisons only. Use pseudobulk DESeq2 for replicated projects and cell-level Wilcoxon for comparisons within a single sample."), uiOutput("scrna_de_result_controls_ui"), uiOutput("scrna_de_result_plots_ui"), table_output("scrna_de_result_table"), br(), tags$details(tags$summary("Completed comparison manifest"), table_output("scrna_de_manifest"))),
@@ -18986,27 +18986,28 @@ server <- function(input, output, session) {
       dir.create(dirname(cache_path), recursive = TRUE, showWarnings = FALSE)
       progress_refresh()
       query_jobs <- scrna_object_query_jobs(project, cache_path)
+      tracked_query_jobs <- if (NROW(query_jobs) && "job_id" %in% names(query_jobs)) query_jobs[nzchar(as.character(query_jobs$job_id)), , drop = FALSE] else data.frame()
       submitted <- isolate(scrna_object_query_submitted())
-      already_requested <- cache_path %in% submitted || NROW(query_jobs) > 0L
+      already_requested <- cache_path %in% submitted || NROW(tracked_query_jobs) > 0L
       if (!already_requested) {
         message <- submit_scrna_object_query_job(project, engine, "gene", checkpoint, cache_path, gene)
-        scrna_object_query_submitted(unique(c(submitted, cache_path)))
         job_id <- parse_sbatch_job_id(message)
         if (!nzchar(job_id)) {
           scrna_dashboard_expression_error("Marker expression could not be started. Check the Logs tab for details.")
           return(NULL)
         }
+        scrna_object_query_submitted(unique(c(submitted, cache_path)))
         scrna_dashboard_expression_error("Marker expression is running. This view will update automatically when it finishes.")
         invalidateLater(5000, session)
         return(NULL)
       }
-      latest_state <- if (NROW(query_jobs) && "slurm_state" %in% names(query_jobs)) as.character(utils::tail(query_jobs$slurm_state, 1L)) else "Submitted"
-      latest_id <- if (NROW(query_jobs) && "job_id" %in% names(query_jobs)) as.character(utils::tail(query_jobs$job_id, 1L)) else ""
+      latest_state <- if (NROW(tracked_query_jobs) && "slurm_state" %in% names(tracked_query_jobs)) as.character(utils::tail(tracked_query_jobs$slurm_state, 1L)) else "Submitted"
       if (latest_state %in% c(active_slurm_states(), "Submitted", "Finished or not in queue")) {
         scrna_dashboard_expression_error("Marker expression is running. This view will update automatically when it finishes.")
         invalidateLater(5000, session)
         return(NULL)
       }
+      scrna_object_query_submitted(setdiff(submitted, cache_path))
       scrna_dashboard_expression_error("Marker expression did not finish successfully. Check the Logs tab for details.")
       return(NULL)
     }
@@ -19057,6 +19058,12 @@ server <- function(input, output, session) {
       tags$p(class = "muted small-note", paste(if (length(signatures)) "Stored signatures are available because signature scoring has been completed. Gene violins use normalized expression from the processed object." else "Run Signature scoring to add reusable signature-score violins. Gene violins use normalized expression from the processed object.", "The y-axis ends at the 98th percentile of the displayed violin with the highest mean so rare extreme cells do not compress the distributions."))
     )
   })
+  output$scrna_violin_status_ui <- renderUI({
+    if (!identical(input$scrna_violin_value_mode %||% "gene", "gene")) return(NULL)
+    message <- trimws(as.character(scrna_dashboard_expression_error() %||% ""))
+    if (!nzchar(message)) return(NULL)
+    div(class = "read-source-note", tags$strong(message))
+  })
   scrna_violin_data <- reactive({
     p <- current_project(); req(is_scrna_project(p))
     mode <- input$scrna_violin_value_mode %||% "gene"
@@ -19077,7 +19084,10 @@ server <- function(input, output, session) {
       expression <- scrna_dashboard_marker_values(p, gene)
       validate(need(!is.null(expression), paste("Gene expression could not be read.", scrna_dashboard_expression_error() %||% "")))
       index <- match(x$cell, expression$cell)
-      req(!anyNA(index))
+      matched <- !is.na(index)
+      validate(need(any(matched), "The expression values do not match the cells in this UMAP."))
+      x <- x[matched, , drop = FALSE]
+      index <- index[matched]
       value <- expression$expression[index]
       label <- gene
       y_label <- "Normalized expression"

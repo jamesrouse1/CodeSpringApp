@@ -88,9 +88,11 @@ assert(
 assert(
   grepl("submit_scrna_object_query_job", app_text, fixed = TRUE) &&
     grepl("Marker expression", app_text, fixed = TRUE) &&
+    grepl("scrna_violin_status_ui", app_text, fixed = TRUE) &&
+    grepl("tracked_query_jobs", app_text, fixed = TRUE) &&
     !grepl('system2(rscript, c(helper, checkpoint, gene, cache_path)', app_text, fixed = TRUE) &&
     !grepl('system2("singularity", c("exec", container$path, "python", helper, checkpoint, gene, cache_path)', app_text, fixed = TRUE),
-  "large Seurat/H5AD marker queries are submitted to Slurm instead of loading objects in the web process"
+  "large Seurat/H5AD marker queries run outside the web process and report violin progress without retaining failed submissions"
 )
 assert(
   grepl("project_file_inventory", app_text, fixed = TRUE) &&
