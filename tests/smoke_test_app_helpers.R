@@ -86,6 +86,18 @@ assert(
   "single-cell stage identifiers map to their visible workflow steps"
 )
 assert(
+  grepl("submit_scrna_object_query_job", app_text, fixed = TRUE) &&
+    grepl("scRNA object query", app_text, fixed = TRUE) &&
+    !grepl('system2(rscript, c(helper, checkpoint, gene, cache_path)', app_text, fixed = TRUE) &&
+    !grepl('system2("singularity", c("exec", container$path, "python", helper, checkpoint, gene, cache_path)', app_text, fixed = TRUE),
+  "large Seurat/H5AD marker queries are submitted to Slurm instead of loading objects in the web process"
+)
+assert(
+  grepl("project_file_inventory", app_text, fixed = TRUE) &&
+    grepl("max_full_bytes", app_text, fixed = TRUE),
+  "project inventories are cached and oversized logs are not loaded wholesale by the web process"
+)
+assert(
   !grepl("scrna_runtime_executable", app_text, fixed = TRUE) &&
     grepl("Annotation files are requested only at the annotation step", app_text, fixed = TRUE) &&
     grepl("Upload one Seurat/Scanpy object from laptop", app_text, fixed = TRUE),

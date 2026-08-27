@@ -422,7 +422,7 @@ GENOME_BROWSER_NAV_CACHE <- new.env(parent = emptyenv())
 GENOME_BROWSER_FILTERED_BED_CACHE <- new.env(parent = emptyenv())
 CUTRUN_PEAK_SOURCE_CACHE <- new.env(parent = emptyenv())
 SCRNA_EMBEDDING_CACHE <- new.env(parent = emptyenv())
-SCRNA_GENE_LIST_BUILD_CACHE <- new.env(parent = emptyenv())
+PROJECT_FILE_INVENTORY_CACHE <- new.env(parent = emptyenv())
 CUTRUN_DEFAULT_SPIKEIN_INDEX <- "/grid/bsr/data/data/utama/genome/ecoli_k12/bowtie2_index/ecoli_k12_mg1655"
 CUTRUN_DEFAULT_SPIKEIN_NAME <- "ecoli"
 CUTRUN_SPIKEIN_GENOME_CHOICES <- c("E. coli K-12 MG1655" = CUTRUN_DEFAULT_SPIKEIN_INDEX)
@@ -3976,13 +3976,23 @@ log_file_choices <- function(project, tool = "All", log_type = "All", scope_type
   stats::setNames(entries$path, labels)
 }
 
-read_log_excerpt <- function(path, mode = "tail", n = 120) {
+read_log_excerpt <- function(path, mode = "tail", n = 120, max_full_bytes = 5 * 1024^2) {
   if (!nzchar(path %||% "") || !file.exists(path)) return("")
-  lines <- readLines(path, warn = FALSE)
   mode <- mode %||% "tail"
-  if (identical(mode, "head")) lines <- utils::head(lines, n)
-  else if (identical(mode, "full")) lines <- lines
-  else lines <- utils::tail(lines, n)
+  if (identical(mode, "full") && file_size_for(path) > max_full_bytes) {
+    return(paste0(
+      "This log is ", human_file_size(path), " and is too large to load into the web-app process. ",
+      "Use Head or Tail here, or open the absolute server path directly:\n", normalizePath(path, winslash = "/", mustWork = FALSE)
+    ))
+  }
+  command <- if (identical(mode, "head")) Sys.which("head") else if (!identical(mode, "full")) Sys.which("tail") else ""
+  if (nzchar(command)) {
+    lines <- tryCatch(system2(command, c("-n", as.character(max(1L, as.integer(n))), "--", path), stdout = TRUE, stderr = FALSE), error = function(e) character(0))
+  } else {
+    lines <- readLines(path, warn = FALSE)
+    if (identical(mode, "head")) lines <- utils::head(lines, n)
+    else if (!identical(mode, "full")) lines <- utils::tail(lines, n)
+  }
   paste(lines, collapse = "\n")
 }
 
@@ -4606,6 +4616,35 @@ file_size_for <- function(path) {
   if (!nzchar(path %||% "") || !file.exists(path)) return(0)
   info <- file.info(path)
   as.numeric(info$size %||% 0)
+}
+
+project_file_inventory <- function(root, max_age_seconds = 60) {
+  root <- trimws(as.character(root %||% ""))
+  if (!nzchar(root) || !dir.exists(root)) return(data.frame(path = character(0), size = numeric(0), mtime = as.POSIXct(character(0))))
+  key <- normalizePath(root, winslash = "/", mustWork = TRUE)
+  if (exists(key, envir = PROJECT_FILE_INVENTORY_CACHE, inherits = FALSE)) {
+    cached <- get(key, envir = PROJECT_FILE_INVENTORY_CACHE, inherits = FALSE)
+    age <- suppressWarnings(as.numeric(difftime(Sys.time(), cached$checked, units = "secs")))
+    if (is.finite(age) && age >= 0 && age < max_age_seconds) return(cached$value)
+  }
+  paths <- list.files(key, recursive = TRUE, full.names = TRUE, all.files = TRUE, no.. = TRUE)
+  info <- if (length(paths)) suppressWarnings(file.info(paths)) else data.frame()
+  keep <- if (length(paths) && NROW(info) == length(paths)) !is.na(info$isdir) & !info$isdir else rep(FALSE, length(paths))
+  value <- if (!length(paths) || !any(keep)) {
+    data.frame(path = character(0), size = numeric(0), mtime = as.POSIXct(character(0)))
+  } else {
+    data.frame(path = paths[keep], size = as.numeric(info$size[keep]), mtime = info$mtime[keep], stringsAsFactors = FALSE)
+  }
+  assign(key, list(checked = Sys.time(), value = value), envir = PROJECT_FILE_INVENTORY_CACHE)
+  value
+}
+
+invalidate_project_file_inventory <- function(root) {
+  root <- trimws(as.character(root %||% ""))
+  if (!nzchar(root)) return(invisible(FALSE))
+  key <- normalizePath(root, winslash = "/", mustWork = FALSE)
+  if (exists(key, envir = PROJECT_FILE_INVENTORY_CACHE, inherits = FALSE)) rm(list = key, envir = PROJECT_FILE_INVENTORY_CACHE)
+  invisible(TRUE)
 }
 
 previous_size_for <- function(cache, path) {
@@ -6026,11 +6065,8 @@ atac_summary_cards_ui <- function(project) {
       cutrun_metric_card("Differential comparisons", format_metric_value(length(comparisons)), "Completed DiffBind folders", "green")
     ))
   }
-  project_files <- if (dir.exists(project$data_dir)) {
-    list.files(project$data_dir, recursive = TRUE, full.names = TRUE, all.files = TRUE, no.. = TRUE)
-  } else character(0)
-  project_files <- project_files[file.exists(project_files) & !dir.exists(project_files)]
-  project_bytes <- if (length(project_files)) sum(vapply(project_files, file_size_for, numeric(1)), na.rm = TRUE) else 0
+  inventory <- project_file_inventory(project$data_dir)
+  project_bytes <- if (NROW(inventory)) sum(inventory$size, na.rm = TRUE) else 0
   result_files <- atac_files_by_category(project, "all")
   div(class = "cutrun-metric-grid",
     cutrun_metric_card("Disk space", human_byte_count(project_bytes), "Total size of project result files", "blue"),
@@ -6083,15 +6119,16 @@ atac_result_file_catalog <- function(project) {
   )
   root <- project$data_dir %||% ""
   if (!nzchar(root) || !dir.exists(root)) return(empty)
-  paths <- list.files(root, recursive = TRUE, full.names = TRUE, all.files = FALSE)
-  paths <- paths[file.exists(paths) & !dir.exists(paths)]
+  inventory <- project_file_inventory(root)
+  paths <- inventory$path
   if (!length(paths)) return(empty)
   absolute <- normalizePath(paths, winslash = "/", mustWork = FALSE)
   root_normalized <- normalizePath(root, winslash = "/", mustWork = FALSE)
   relative <- substring(absolute, nchar(root_normalized) + 2L)
   folder <- sub("/.*$", "", relative)
   folder[!grepl("/", relative, fixed = TRUE)] <- "project"
-  info <- file.info(absolute)
+  inventory_index <- match(absolute, normalizePath(inventory$path, winslash = "/", mustWork = FALSE))
+  info <- data.frame(size = inventory$size[inventory_index], mtime = inventory$mtime[inventory_index])
   samples <- project_samples(project)
   sample_labels <- vapply(absolute, function(path) {
     sample <- result_file_sample(project, path, samples)
@@ -6101,7 +6138,7 @@ atac_result_file_catalog <- function(project) {
     Tool = atac_file_tool_label(folder),
     Sample = sample_labels,
     File = basename(absolute),
-    Size = vapply(absolute, human_file_size, character(1)),
+    Size = vapply(info$size, human_byte_count, character(1)),
     Modified = format(info$mtime, "%Y-%m-%d %H:%M"),
     `Absolute path` = absolute,
     stringsAsFactors = FALSE,
@@ -10338,6 +10375,48 @@ scrna_stage_resource_options <- function(stage, input_bytes = 0, engine = "auto"
   )
 }
 
+scrna_object_query_resource_options <- function(object_path, engine = "seurat") {
+  bytes <- file_size_for(object_path)
+  tier <- scrna_resource_tier(bytes)
+  # Scanpy opens H5AD in backed mode, while Seurat must deserialize the RDS.
+  # Keep both on compute nodes and give large Seurat objects enough headroom.
+  memory_gb <- if (identical(tolower(engine), "scanpy")) switch(tier,
+    small = 16L, medium = 24L, large = 32L, xlarge = 48L
+  ) else switch(tier,
+    small = 32L, medium = 64L, large = 96L, xlarge = 128L
+  )
+  cpus <- if (tier %in% c("large", "xlarge")) 4L else 2L
+  run_time <- if (tier %in% c("large", "xlarge")) "08:00:00" else "04:00:00"
+  c(paste0("--cpus-per-task=", cpus), paste0("--mem=", memory_gb, "G"), paste0("--time=", run_time))
+}
+
+scrna_object_query_jobs <- function(project, output_path) {
+  jobs <- job_history(project)
+  if (!NROW(jobs) || !"output" %in% names(jobs)) return(data.frame())
+  marker <- paste("target:", output_path)
+  jobs[grepl(marker, as.character(jobs$output), fixed = TRUE), , drop = FALSE]
+}
+
+submit_scrna_object_query_job <- function(project, engine, task, object_path, output_path, value = "") {
+  runner <- file.path(SCRIPTS_DIR, "singleCellRNAseq", "scrna_object_query.sh")
+  if (!file.exists(runner) || file.access(runner, mode = 1) != 0) {
+    return(record_preflight_failure(project, "scRNA object query", "CodeSpringLab's compute-node object-query runner is missing or not executable. Pull the latest CodeSpringLab main branch.", "scrna_object_query"))
+  }
+  container_path <- if (identical(tolower(engine), "scanpy")) {
+    container <- scanpy_container_check()
+    if (!isTRUE(container$ready)) return(record_preflight_failure(project, "scRNA object query", paste("The shared Scanpy container is unavailable.", container$detail), "scrna_object_query"))
+    container$path
+  } else ""
+  scope <- if (identical(task, "gene")) paste0("gene_", clean_name(value, "marker")) else "gene_list"
+  submit_sbatch(
+    project, "scRNA object query", runner,
+    c(engine, task, object_path, output_path, value, container_path),
+    "scrna_object_query", paste(task, engine), sample = scope,
+    target = output_path, reference = object_path,
+    sbatch_options = scrna_object_query_resource_options(object_path, engine)
+  )
+}
+
 scrna_cellranger_resource_options <- function(fastq_paths) {
   paths <- unique(as.character(fastq_paths %||% character(0)))
   bytes <- sum(vapply(paths[file.exists(paths)], file_size_for, numeric(1)), na.rm = TRUE)
@@ -12253,38 +12332,10 @@ scrna_dashboard_gene_list_path <- function(project) {
   fallback_path <- file.path(scrna_output_dir(project), "tables", "dashboard_gene_expression_genes.tsv")
   if (file.exists(full_path) && file_size_for(full_path) > 0) return(full_path)
   if (file.exists(fallback_path) && file_size_for(fallback_path) > 0) return(fallback_path)
-
-  scanpy_object <- file.path(scrna_output_dir(project), "objects", "processed_scanpy.h5ad")
-  if (!file.exists(scanpy_object)) scanpy_object <- file.path(scrna_output_dir(project), "checkpoints", "04_clustered_scanpy.h5ad")
-  seurat_object <- file.path(scrna_output_dir(project), "objects", "processed_seurat.rds")
-  if (!file.exists(seurat_object)) seurat_object <- file.path(scrna_output_dir(project), "checkpoints", "04_clustered_seurat.rds")
-  engine <- if (file.exists(scanpy_object)) "scanpy" else if (file.exists(seurat_object)) "seurat" else ""
-  object_path <- if (identical(engine, "scanpy")) scanpy_object else seurat_object
-  if (!nzchar(engine) || !file.exists(object_path)) return("")
-
-  object_info <- file.info(object_path)
-  build_key <- paste(normalizePath(object_path, winslash = "/", mustWork = TRUE), object_info$size, object_info$mtime, sep = "::")
-  if (exists(build_key, envir = SCRNA_GENE_LIST_BUILD_CACHE, inherits = FALSE)) return("")
-  dir.create(dirname(full_path), recursive = TRUE, showWarnings = FALSE)
-  result <- character(0)
-  if (identical(engine, "scanpy")) {
-    container <- scanpy_container_check()
-    helper <- file.path(SCRIPTS_DIR, "singleCellRNAseq", "list_h5ad_genes.py")
-    if (isTRUE(container$ready) && file.exists(helper)) {
-      result <- tryCatch(system2("singularity", c("exec", container$path, "python", helper, object_path, full_path), stdout = TRUE, stderr = TRUE), error = function(e) conditionMessage(e))
-    }
-  } else {
-    helper <- file.path(SCRIPTS_DIR, "singleCellRNAseq", "list_seurat_genes.R")
-    rscript <- Sys.which("Rscript")
-    if (nzchar(rscript) && file.exists(helper)) {
-      result <- tryCatch(system2(rscript, c(helper, object_path, full_path), stdout = TRUE, stderr = TRUE), error = function(e) conditionMessage(e))
-    }
-  }
-  if (!file.exists(full_path) || file_size_for(full_path) <= 0) {
-    assign(build_key, paste(tail(result, 5L), collapse = "\n"), envir = SCRNA_GENE_LIST_BUILD_CACHE)
-    return("")
-  }
-  full_path
+  # Current CodeSpringLab jobs export this list while already holding the
+  # object on a compute node. Never deserialize a legacy multi-GB object from
+  # the web process merely to populate a selector.
+  ""
 }
 
 scrna_dashboard_gene_choices <- function(project) {
@@ -12312,7 +12363,7 @@ scrna_gene_select_input <- function(project, input_id, label, selected = "") {
   if (!length(genes)) {
     return(tagList(
       textInput(input_id, label, value = selected, placeholder = "Type an exact gene symbol"),
-      tags$p(class = "muted small-note", "The app is rebuilding the gene list from the existing processed object. You can also enter an exact gene symbol.")
+      tags$p(class = "muted small-note", "This legacy result does not include the exported gene list. Enter an exact gene symbol; its expression will be extracted by a Slurm compute job rather than by the web server.")
     ))
   }
   case_match <- match(tolower(selected), tolower(genes))
@@ -14035,6 +14086,7 @@ server <- function(input, output, session) {
   scrna_batch_default_project <- reactiveVal("")
   scrna_dashboard_expression_cache <- reactiveVal(list())
   scrna_dashboard_expression_error <- reactiveVal("")
+  scrna_object_query_submitted <- reactiveVal(character(0))
   scrna_embedding_selection_reset <- reactiveVal(0L)
   scrna_embedding_manual_selection <- reactiveVal(character(0))
   # Named manual marker/signature collections are stored per project for the
@@ -18873,28 +18925,31 @@ server <- function(input, output, session) {
     if (identical(cached$stamp %||% "", stamp)) return(cached$values)
     if (!file.exists(cache_path) || file.info(cache_path)$mtime < object_info$mtime) {
       dir.create(dirname(cache_path), recursive = TRUE, showWarnings = FALSE)
-      if (identical(engine, "scanpy")) {
-        container <- scanpy_container_check()
-        helper <- file.path(SCRIPTS_DIR, "singleCellRNAseq", "extract_h5ad_marker_expression.py")
-        if (!isTRUE(container$ready) || !file.exists(helper)) {
-          scrna_dashboard_expression_error("The Scanpy marker-expression helper or its container is unavailable.")
+      progress_refresh()
+      query_jobs <- scrna_object_query_jobs(project, cache_path)
+      submitted <- isolate(scrna_object_query_submitted())
+      already_requested <- cache_path %in% submitted || NROW(query_jobs) > 0L
+      if (!already_requested) {
+        message <- submit_scrna_object_query_job(project, engine, "gene", checkpoint, cache_path, gene)
+        scrna_object_query_submitted(unique(c(submitted, cache_path)))
+        job_id <- parse_sbatch_job_id(message)
+        if (!nzchar(job_id)) {
+          scrna_dashboard_expression_error(paste("The marker-expression compute job could not be submitted.", message))
           return(NULL)
         }
-        result <- tryCatch(system2("singularity", c("exec", container$path, "python", helper, checkpoint, gene, cache_path), stdout = TRUE, stderr = TRUE), error = function(e) character(0))
-      } else {
-        helper <- file.path(SCRIPTS_DIR, "singleCellRNAseq", "extract_seurat_marker_expression.R")
-        rscript <- Sys.which("Rscript")
-        if (!nzchar(rscript) || !file.exists(helper)) {
-          scrna_dashboard_expression_error("The Seurat marker-expression helper is unavailable.")
-          return(NULL)
-        }
-        result <- tryCatch(system2(rscript, c(helper, checkpoint, gene, cache_path), stdout = TRUE, stderr = TRUE), error = function(e) character(0))
-      }
-      if (!file.exists(cache_path) || !file_size_for(cache_path)) {
-        details <- trimws(paste(tail(result, 6L), collapse = " "))
-        scrna_dashboard_expression_error(if (nzchar(details)) details else "The expression helper did not create an output file.")
+        scrna_dashboard_expression_error(paste0("Marker expression is being extracted on a Slurm compute node (job ", job_id, "). This view will update automatically when it finishes."))
+        invalidateLater(5000, session)
         return(NULL)
       }
+      latest_state <- if (NROW(query_jobs) && "slurm_state" %in% names(query_jobs)) as.character(utils::tail(query_jobs$slurm_state, 1L)) else "Submitted"
+      latest_id <- if (NROW(query_jobs) && "job_id" %in% names(query_jobs)) as.character(utils::tail(query_jobs$job_id, 1L)) else ""
+      if (latest_state %in% c(active_slurm_states(), "Submitted", "Finished or not in queue")) {
+        scrna_dashboard_expression_error(paste0("Marker expression is being extracted on a Slurm compute node", if (nzchar(latest_id)) paste0(" (job ", latest_id, ")") else "", ". This view will update automatically when it finishes."))
+        invalidateLater(5000, session)
+        return(NULL)
+      }
+      scrna_dashboard_expression_error(paste0("The Slurm marker-expression query ended with state ", latest_state, if (nzchar(latest_id)) paste0(" (job ", latest_id, ")") else "", " without producing the cache. Check its log in the Logs tab."))
+      return(NULL)
     }
     values <- safe_read_table(cache_path, 1000000)
     if (!all(c("cell", "expression") %in% names(values))) {
@@ -20162,10 +20217,12 @@ server <- function(input, output, session) {
   output$atac_diffbind_volcano_ui <- renderUI({ image_or_file_ui(file.path(selected_atac_diffbind_dir(), "diffbind_volcano_byDiffPeaks.png"), "620px") })
   observeEvent(input$atac_results_tabs, {
     if (identical(input$atac_results_tabs %||% "", "Files")) {
+      invalidate_project_file_inventory(current_project()$data_dir)
       atac_file_catalog_refresh(isolate(atac_file_catalog_refresh()) + 1L)
     }
   }, ignoreInit = TRUE)
   observeEvent(input$refresh_atac_results, {
+    invalidate_project_file_inventory(current_project()$data_dir)
     atac_file_catalog_refresh(isolate(atac_file_catalog_refresh()) + 1L)
   }, ignoreInit = TRUE)
   atac_result_files <- reactive({
@@ -20317,6 +20374,7 @@ server <- function(input, output, session) {
       showNotification(paste("Could not delete", basename(path)), type = "error")
       return()
     }
+    invalidate_project_file_inventory(p$data_dir)
     atac_file_catalog_refresh(isolate(atac_file_catalog_refresh()) + 1L)
     progress_refresh(Sys.time())
     showNotification(paste("Deleted", basename(path)), type = "message")
