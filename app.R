@@ -7693,6 +7693,26 @@ sample_fastq_pairs <- function(project, trimmed = FALSE) {
   design <- included_design_table(project)
   if (!NROW(design) || !"sample" %in% names(design) || !"filename" %in% names(design)) return(data.frame())
   base <- if (trimmed) file.path(project$data_dir, "cutadapt") else project$fastq_dir
+  raw_fastqs <- if (isTRUE(trimmed)) character(0) else unique(unlist(
+    lapply(project_fastq_dirs(project), fastq_files),
+    use.names = FALSE
+  ))
+  raw_fastqs_by_name <- split(raw_fastqs, basename(raw_fastqs))
+  resolve_project_raw_read <- function(value) {
+    value <- trimws(as.character(value %||% ""))
+    if (!nzchar(value)) return("")
+    expanded <- path.expand(value)
+    if (startsWith(expanded, "/")) return(expanded)
+    matches <- unique(as.character(raw_fastqs_by_name[[basename(value)]] %||% character(0)))
+    if (length(matches) == 1L) return(matches[[1]])
+    if (length(matches) > 1L) {
+      stop(
+        "FASTQ filename is present in more than one configured folder; use an absolute path in design_matrix.txt: ",
+        basename(value)
+      )
+    }
+    file.path(base, basename(value))
+  }
   rows <- lapply(seq_len(NROW(design)), function(i) {
     sample <- as.character(design$sample[i])
     lanes <- trimws(unlist(strsplit(as.character(design$filename[i]), ";", fixed = TRUE)))
@@ -7714,8 +7734,8 @@ sample_fastq_pairs <- function(project, trimmed = FALSE) {
       r1 <- resolve_read_path(base, lane_parts[[1]][1], allow_absolute = FALSE)
       r2 <- if (project$paired_end) resolve_read_path(base, lane_parts[[1]][2], allow_absolute = FALSE) else r1
     } else {
-      r1 <- paste(vapply(lane_parts, function(parts) resolve_read_path(base, parts[1], allow_absolute = TRUE), character(1)), collapse = ",")
-      r2 <- if (project$paired_end) paste(vapply(lane_parts, function(parts) resolve_read_path(base, parts[2], allow_absolute = TRUE), character(1)), collapse = ",") else r1
+      r1 <- paste(vapply(lane_parts, function(parts) resolve_project_raw_read(parts[1]), character(1)), collapse = ",")
+      r2 <- if (project$paired_end) paste(vapply(lane_parts, function(parts) resolve_project_raw_read(parts[2]), character(1)), collapse = ",") else r1
     }
     trimmed_r1 <- if (lane_count > 1L) file.path(project$data_dir, "cutadapt", paste0(sample, "_R1.fastq.gz")) else file.path(project$data_dir, "cutadapt", basename(lane_parts[[1]][1]))
     trimmed_r2 <- if (project$paired_end) {

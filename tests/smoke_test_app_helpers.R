@@ -32,6 +32,36 @@ assert(all(startsWith(as.character(recursive_scan$filename), "/")), "recursive F
 assert(all(nzchar(as.character(recursive_scan$sample))), "recursive FASTQ discovery automatically infers sample identifiers")
 assert(any(grepl(";", recursive_scan$filename, fixed = TRUE)), "recursive FASTQ discovery pools multiple lanes for one inferred sample")
 assert(!any(grepl("singleton|orphan|unpaired", recursive_scan$filename, ignore.case = TRUE)), "automatic FASTQ discovery excludes singleton and orphan recovery files")
+
+relative_design_path <- file.path(recursive_fastq_root, "design_matrix.txt")
+utils::write.table(
+  data.frame(
+    include = TRUE,
+    sample = "ECO-18",
+    treatment = "test",
+    filename = "ECO-18_L007_001.R1.fastq.gz,ECO-18_L007_001.R2.fastq.gz",
+    stringsAsFactors = FALSE
+  ),
+  relative_design_path,
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE
+)
+relative_project <- list(
+  design_matrix_path = relative_design_path,
+  data_dir = file.path(recursive_fastq_root, "results"),
+  fastq_dir = file.path(recursive_fastq_root, "batch_2025"),
+  fastq_dirs = c(file.path(recursive_fastq_root, "batch_2025"), file.path(recursive_fastq_root, "batch_2026")),
+  paired_end = TRUE
+)
+relative_pairs <- app_env$sample_fastq_pairs(relative_project, trimmed = FALSE)
+assert(
+  identical(
+    as.character(relative_pairs$r1[[1]]),
+    normalizePath(recursive_fastqs[[3]], winslash = "/", mustWork = FALSE)
+  ),
+  "relative design-matrix filenames resolve across every configured FASTQ parent folder"
+)
 unlink(recursive_fastq_root, recursive = TRUE, force = TRUE)
 runtime_files <- c(
   file.path(repo_root, "app.R"),
