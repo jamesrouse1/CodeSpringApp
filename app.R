@@ -4996,31 +4996,35 @@ cutrun_generated_summary_path <- function(project, kind = c("peak_calling", "dif
   file.path(project$data_dir, "cutrun_summaries", paste0(stem, ".", extension))
 }
 
-cutrun_generated_summary_table <- function(project, kind = c("peak_calling", "differential"), fallback = NULL) {
+cutrun_generated_summary_table <- function(project, kind = c("peak_calling", "differential")) {
   kind <- match.arg(kind)
   path <- cutrun_generated_summary_path(project, kind, "tsv")
   if (file.exists(path) && file.info(path)$size > 0) return(safe_read_table(path, 5000))
-  if (is.function(fallback)) fallback() else data.frame()
+  data.frame()
+}
+
+cutrun_generated_summary_signature <- function(project, kind = c("peak_calling", "differential")) {
+  kind <- match.arg(kind)
+  path <- cutrun_generated_summary_path(project, kind, "tsv")
+  marker <- file.path(
+    project$data_dir, "cutrun_summaries",
+    if (identical(kind, "peak_calling")) "peak_calling_summary_COMPLETE" else "differential_summary_COMPLETE"
+  )
+  file_signature <- function(value) {
+    if (!file.exists(value)) return("missing")
+    info <- file.info(value)
+    paste(info$size, as.numeric(info$mtime), sep = ":")
+  }
+  paste(project$id %||% project$data_dir, file_signature(path), file_signature(marker), sep = "|")
 }
 
 copy_cutrun_generated_summary <- function(project, kind = c("peak_calling", "differential"), destination) {
   kind <- match.arg(kind)
   source <- cutrun_generated_summary_path(project, kind, "xlsx")
-  if (valid_cutrun_xlsx(source)) {
-    if (!file.copy(source, destination, overwrite = TRUE)) stop("Could not copy the completed summary workbook.")
-    return(invisible(destination))
+  if (!valid_cutrun_xlsx(source)) {
+    stop("The completed CUT&RUN summary workbook is not available yet. Run the corresponding summary step and wait for it to finish.")
   }
-  if (identical(kind, "peak_calling")) {
-    write_cutrun_peak_summary_xlsx(project, destination)
-  } else {
-    table <- cutrun_generated_summary_table(
-      project, "differential", function() cutrun_diffbind_summary_table(project)
-    )
-    write_cutrun_summary_table_xlsx(
-      table, destination, "Differential Comparisons", "CUT&RUN Differential Peak Comparisons"
-    )
-  }
-  if (!valid_cutrun_xlsx(destination)) stop("The CUT&RUN summary workbook could not be prepared for download.")
+  if (!file.copy(source, destination, overwrite = TRUE)) stop("Could not copy the completed summary workbook.")
   invisible(destination)
 }
 
@@ -20623,13 +20627,32 @@ server <- function(input, output, session) {
     progress_refresh()
     cutrun_seacr_peak_summary_table(current_project())
   }, page_length = 50, scroll_y = "520px")
+
+  # Project-wide CUT&RUN summaries are built by dedicated Slurm jobs. Poll only
+  # the small completion/output file signatures so an active job does not make
+  # Shiny repeatedly rescan every peak file and redraw a large table.
+  cutrun_peak_calling_summary_result <- reactivePoll(
+    intervalMillis = 5000,
+    session = session,
+    checkFunc = function() cutrun_generated_summary_signature(current_project(), "peak_calling"),
+    valueFunc = function() cutrun_generated_summary_table(current_project(), "peak_calling")
+  )
+  cutrun_differential_summary_result <- reactivePoll(
+    intervalMillis = 5000,
+    session = session,
+    checkFunc = function() cutrun_generated_summary_signature(current_project(), "differential"),
+    valueFunc = function() cutrun_generated_summary_table(current_project(), "differential")
+  )
+
   output$cutrun_peak_calling_run_summary <- render_csl_table({
-    progress_refresh()
-    cutrun_generated_summary_table(current_project(), "peak_calling", function() cutrun_seacr_peak_summary_table(current_project()))
+    df <- cutrun_peak_calling_summary_result()
+    validate(need(NROW(df), "The peak-calling summary is queued or has not been generated yet."))
+    df
   }, page_length = 25, scroll_y = "420px")
   output$cutrun_peak_calling_explorer_summary <- render_csl_table({
-    progress_refresh()
-    cutrun_generated_summary_table(current_project(), "peak_calling", function() cutrun_seacr_peak_summary_table(current_project()))
+    df <- cutrun_peak_calling_summary_result()
+    validate(need(NROW(df), "Run Peak-Calling Summary to generate this table."))
+    df
   }, page_length = 50, scroll_y = "620px")
   output$cutrun_frip_plot <- renderPlot({
     progress_refresh()
@@ -20796,12 +20819,14 @@ server <- function(input, output, session) {
     df[keep, , drop = FALSE]
   })
   output$cutrun_diffbind_summary <- render_csl_table({
-    progress_refresh()
-    cutrun_generated_summary_table(current_project(), "differential", function() cutrun_diffbind_summary_table(current_project()))
+    df <- cutrun_differential_summary_result()
+    validate(need(NROW(df), "Run Differential Peak Summary to generate this table."))
+    df
   }, page_length = 25)
   output$cutrun_diffbind_run_summary <- render_csl_table({
-    progress_refresh()
-    cutrun_generated_summary_table(current_project(), "differential", function() cutrun_diffbind_summary_table(current_project()))
+    df <- cutrun_differential_summary_result()
+    validate(need(NROW(df), "The differential-peak summary is queued or has not been generated yet."))
+    df
   }, page_length = 25, scroll_y = "420px")
   output$cutrun_diffbind_results <- render_csl_table({
     cutrun_diffbind_filtered_results()
@@ -20974,7 +20999,11 @@ server <- function(input, output, session) {
   )
   output$download_cutrun_peak_calling_explorer_summary <- downloadHandler(
     filename = function() paste0(clean_name(current_project()$name, "cutrun"), "_peak_calling_summary.tsv"),
-    content = function(file) utils::write.table(cutrun_seacr_peak_summary_table(current_project()), file, sep = "\t", row.names = FALSE, quote = FALSE, na = "")
+    content = function(file) {
+      source <- cutrun_generated_summary_path(current_project(), "peak_calling", "tsv")
+      if (!file.exists(source) || file.info(source)$size <= 0) stop("Run Peak-Calling Summary and wait for it to finish before downloading.")
+      if (!file.copy(source, file, overwrite = TRUE)) stop("Could not copy the completed peak-calling summary.")
+    }
   )
   output$download_cutrun_seacr_peak_summary_xlsx <- downloadHandler(
     filename = function() paste0(clean_name(current_project()$name, "cutrun"), "_peak_summary.xlsx"),
