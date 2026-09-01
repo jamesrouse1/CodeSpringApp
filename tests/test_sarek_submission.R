@@ -107,14 +107,90 @@ result <- sarek_submit_run(
   }
 )
 
-assert_true(identical(result$status, "submitted"), "Submission result did not report submitted status.")
-assert_true(identical(result$job_id, "424242"), "Slurm job ID was not preserved.")
-assert_true(identical(captured$command, sbatch), "The configured sbatch executable was not used.")
-assert_true("cpuq" %in% captured$args && "--partition" %in% captured$args, "The CSHL Slurm queue was not submitted.")
-time_position <- match("--time", captured$args)
 assert_true(
-  !is.na(time_position) && identical(captured$args[[time_position + 1L]], "2-00:00:00"),
-  "The default Sarek controller time does not respect the 48-hour QOS limit."
+  identical(result$status, "submitted"),
+  "Submission result did not report submitted status."
+)
+
+assert_true(
+  identical(result$job_id, ""),
+  "Detached Sarek submission should not return a Slurm controller job ID."
+)
+
+assert_true(
+  identical(result$controller_pid, "424242"),
+  "Detached controller PID was not preserved."
+)
+
+assert_true(
+  identical(result$controller_mode, "detached"),
+  "Sarek controller was not recorded as detached."
+)
+
+assert_true(
+  identical(captured$command, "detached"),
+  "Sarek submission did not use the detached-controller starter."
+)
+
+assert_true(
+  length(captured$args) >= 2L &&
+    identical(captured$args[[1]], "initial"),
+  "Detached controller was not started in initial mode."
+)
+
+assert_true(
+  file.exists(captured$args[[2]]),
+  "Detached controller launch script was not created."
+)
+
+assert_true(
+  nzchar(result$child_tag),
+  "Sarek submission did not create a child-job tag."
+)
+
+assert_true(
+  identical(result$controller_time, "not_applicable"),
+  "Detached controller should not have a Slurm time limit."
+)
+
+run_config <- file.path(
+  result$run_dir,
+  ".codespring",
+  "nextflow.config"
+)
+
+assert_true(
+  file.exists(run_config),
+  "Per-run Nextflow config was not created."
+)
+
+run_config_lines <- readLines(run_config, warn = FALSE)
+
+assert_true(
+  any(grepl(
+    paste0("--comment=", result$child_tag),
+    run_config_lines,
+    fixed = TRUE
+  )),
+  "Per-run Nextflow config does not tag Sarek child Slurm jobs."
+)
+
+launch_script <- file.path(
+  result$run_dir,
+  ".codespring",
+  "launch.sh"
+)
+
+launch_lines <- readLines(launch_script, warn = FALSE)
+
+assert_true(
+  any(grepl("CSL_SAREK_RESUME", launch_lines, fixed = TRUE)),
+  "Generated Sarek launcher does not support resume mode."
+)
+
+assert_true(
+  any(grepl("controller_info_file", launch_lines, fixed = TRUE)),
+  "Generated Sarek launcher does not record its real controller PID."
 )
 assert_true(file.exists(file.path(result$run_dir, ".codespring", "manifest.json")), "Internal manifest was not recorded.")
 assert_true(file.exists(file.path(result$run_dir, ".codespring", "input", "samplesheet.csv")), "Internal samplesheet was not recorded.")
@@ -122,12 +198,59 @@ assert_true(file.exists(file.path(result$run_dir, ".codespring", "params.json"))
 assert_true(file.exists(file.path(result$run_dir, ".codespring", "submission.tsv")), "Submission record was not written.")
 
 record <- sarek_read_key_value_file(file.path(result$run_dir, ".codespring", "submission.tsv"))
-assert_true(record[["job_id"]] == "424242", "Submission record job ID could not be read.")
-assert_true(record[["tools"]] == "haplotypecaller", "Submission record does not preserve the selected tools.")
-assert_true(record[["controller_time"]] == "2-00:00:00", "Submission record does not preserve the controller wall time.")
+
+assert_true(
+  identical(sarek_text(record[["job_id"]]), ""),
+  "Detached submission record should not contain a Slurm controller job ID."
+)
+
+assert_true(
+  record[["controller_pid"]] == "424242",
+  "Submission record did not preserve the detached controller PID."
+)
+
+assert_true(
+  record[["controller_mode"]] == "detached",
+  "Submission record does not identify the controller as detached."
+)
+
+assert_true(
+  nzchar(record[["child_tag"]]),
+  "Submission record does not preserve the Sarek child-job tag."
+)
+
+assert_true(
+  record[["tools"]] == "haplotypecaller",
+  "Submission record does not preserve the selected tools."
+)
+
+assert_true(
+  record[["controller_time"]] == "not_applicable",
+  "Detached controller should not preserve a Slurm controller wall time."
+)
+
 catalog <- sarek_submission_catalog(results_root)
-assert_true(NROW(catalog) == 1L && catalog$run_id[[1]] == "submission_test", "Submitted run was not found in run history.")
-assert_true(catalog$job_id[[1]] == "424242", "Run history lost the Slurm job ID.")
+
+assert_true(
+  NROW(catalog) == 1L &&
+    catalog$run_id[[1]] == "submission_test",
+  "Submitted run was not found in run history."
+)
+
+assert_true(
+  identical(sarek_text(catalog$job_id[[1]]), ""),
+  "Run history should not contain a Slurm controller job ID."
+)
+
+assert_true(
+  catalog$controller_pid[[1]] == "424242",
+  "Run history lost the detached controller PID."
+)
+
+assert_true(
+  catalog$child_tag[[1]] == record[["child_tag"]],
+  "Run history lost the Sarek child-job tag."
+)
 
 dir.create(file.path(result$output_dir, "variant_calling"), recursive = TRUE)
 writeLines("<html><body>MultiQC</body></html>", file.path(result$output_dir, "multiqc_report.html"))
@@ -149,7 +272,29 @@ launch_lines <- readLines(file.path(result$run_dir, ".codespring", "launch.sh"),
 launch_text <- paste(launch_lines, collapse = "\n")
 assert_true(grepl("nf-core/sarek", launch_text, fixed = TRUE), "Launch script does not pin the Sarek project.")
 assert_true(grepl("3.9.0", launch_text, fixed = TRUE), "Launch script does not pin Sarek 3.9.0.")
-assert_true(grepl(config, launch_text, fixed = TRUE), "Launch script does not use the CSHL Sarek config.")
+assert_true(
+  grepl(run_config, launch_text, fixed = TRUE),
+  "Launch script does not use the generated per-run Sarek config."
+)
+
+run_config_text <- paste(
+  readLines(run_config, warn = FALSE),
+  collapse = "\n"
+)
+
+assert_true(
+  grepl(config, run_config_text, fixed = TRUE),
+  "Per-run Sarek config does not include the CSHL cluster configuration."
+)
+
+assert_true(
+  grepl(
+    paste0("--comment=", result$child_tag),
+    run_config_text,
+    fixed = TRUE
+  ),
+  "Per-run Sarek config does not tag child Slurm jobs."
+)
 assert_true(grepl("-profile singularity", launch_text, fixed = TRUE), "Launch script does not select Singularity.")
 assert_true(grepl("-params-file", launch_text, fixed = TRUE), "Launch script does not use the generated parameter file.")
 assert_true(grepl(result$work_dir, launch_text, fixed = TRUE), "Launch script does not use user work storage.")

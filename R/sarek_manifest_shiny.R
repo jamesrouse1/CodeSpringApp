@@ -247,7 +247,7 @@ sarek_run_activity_panel <- function(activity, state = "") {
   state <- sarek_normalize_slurm_state(state)
   if (!is.list(activity) || !isTRUE(activity$available)) {
     message <- if (state %in% c("PENDING", "CONFIGURING", "SUBMITTED")) {
-      "The controller job is queued. Nextflow activity will appear after it starts."
+      "The Nextflow controller is starting. Pipeline activity will appear shortly."
     } else if (state %in% c("RUNNING", "COMPLETING", "SUSPENDED")) {
       "The controller is active, but no readable Nextflow activity has been recorded yet."
     } else {
@@ -1100,7 +1100,7 @@ sarek_manifest_ui <- function(id) {
               shiny::h3("Sarek run status"),
               shiny::tags$p(
                 class = "muted",
-                "Track active controller jobs and review previously submitted analyses."
+                "Track active Sarek runs and review previously submitted analyses."
               )
             )
           ),
@@ -1318,7 +1318,7 @@ sarek_manifest_server <- function(
       data.frame(
         Run = shown$run_id,
         Submitted = gsub("T", " ", sub("Z$", " UTC", shown$submitted_at)),
-        `Job ID` = shown$job_id,
+        `Controller PID` = if ("controller_pid" %in% names(shown)) shown$controller_pid else shown$job_id,
         `Starting step` = shown$step,
         Tools = shown$tools,
         stringsAsFactors = FALSE,
@@ -1347,7 +1347,13 @@ sarek_manifest_server <- function(
       progress <- sarek_run_progress(status$state)
       activity <- sarek_run_activity(as.list(run), state = status$state)
       details <- c(
-        if (nzchar(sarek_text(run$job_id))) paste0("Slurm job ", sarek_text(run$job_id)) else "No Slurm job ID recorded",
+        if ("controller_pid" %in% names(run) && nzchar(sarek_text(run$controller_pid))) {
+          paste0("Nextflow controller PID ", sarek_text(run$controller_pid))
+        } else if (nzchar(sarek_text(run$job_id))) {
+          paste0("Slurm job ", sarek_text(run$job_id))
+        } else {
+          "No active controller ID recorded"
+        },
         if (nzchar(sarek_text(status$elapsed))) paste0("elapsed ", sarek_text(status$elapsed)) else NULL,
         paste0("status source: ", sarek_text(status$source, "record"))
       )
@@ -2277,7 +2283,7 @@ sarek_manifest_server <- function(
         return(shiny::div(
           class = "sarek-submit-panel",
           shiny::tags$strong("This run has been submitted."),
-          shiny::tags$p(class = "muted small-note", "Use the recorded Slurm job ID to track the controller job.")
+          shiny::tags$p(class = "muted small-note", "Use the recorded controller PID and run activity to track this analysis.")
         ))
       }
       reviewed <- identical(reviewed_validation_version(), validation_version())
@@ -2299,7 +2305,7 @@ sarek_manifest_server <- function(
             )
           )
         } else if (isTRUE(submission_in_progress())) {
-          shiny::tags$p(class = "muted small-note", "Submitting the controller job to Slurm...")
+          shiny::tags$p(class = "muted small-note", "Starting the detached Nextflow controller...")
         } else {
           shiny::tags$p(class = "muted small-note", "Acknowledge the review above to enable submission.")
         }
@@ -2385,8 +2391,8 @@ sarek_manifest_server <- function(
         if (!is.function(submit_handler)) stop("The Sarek submission backend is not configured.")
         submitted <- submit_handler(manifest, state$input)
         if (!is.list(submitted) || !identical(sarek_text(submitted$status), "submitted") ||
-            !nzchar(sarek_text(submitted$job_id))) {
-          stop("The Sarek submission backend did not return a Slurm job ID.")
+            !nzchar(sarek_text(submitted$controller_pid))) {
+          stop("The Sarek submission backend did not return a detached controller PID.")
         }
         submitted
       }, error = function(error) error)
@@ -2400,7 +2406,7 @@ sarek_manifest_server <- function(
         submission_state(list(
           kind = "success",
           message = paste0(
-            "SUBMITTED\n- Slurm controller job: ", result$job_id,
+            "SUBMITTED\n- Nextflow controller PID: ", result$controller_pid,
             "\n- Run directory: ", result$run_dir,
             "\n- Results directory: ", result$output_dir
           ),
