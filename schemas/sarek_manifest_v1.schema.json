@@ -1,0 +1,263 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CodeSpring Sarek Analysis Manifest",
+  "description": "User-confirmed scientific intent and input organization for a CodeSpring Sarek analysis.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "manifest_id",
+    "status",
+    "created_at",
+    "created_by",
+    "reference",
+    "assay",
+    "analysis",
+    "storage",
+    "patients",
+    "provenance"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "manifest_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "status": {
+      "enum": ["proposed", "confirmed"]
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "created_by": {
+      "type": "string",
+      "minLength": 1
+    },
+    "reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["species", "assembly", "sarek_genome"],
+      "properties": {
+        "species": {
+          "type": "string",
+          "minLength": 1
+        },
+        "assembly": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sarek_genome": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "assay": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "enum": ["WGS", "WES", "targeted", "annotation_only"]
+        },
+        "intervals": {
+          "type": ["string", "null"]
+        }
+      }
+    },
+    "analysis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "preset"],
+      "properties": {
+        "mode": {
+          "enum": ["germline", "tumor_only", "matched_tumor_normal", "annotation_only"]
+        },
+        "preset": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["results_root", "work_root"],
+      "properties": {
+        "results_root": {
+          "$ref": "#/$defs/absolutePath"
+        },
+        "work_root": {
+          "$ref": "#/$defs/absolutePath"
+        }
+      }
+    },
+    "patients": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/patient"
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_paths", "inspector_version"],
+      "properties": {
+        "source_paths": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/absolutePath"
+          }
+        },
+        "inspector_version": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$",
+      "maxLength": 128
+    },
+    "absolutePath": {
+      "type": "string",
+      "pattern": "^/",
+      "minLength": 2
+    },
+    "fileFormat": {
+      "enum": ["fastq", "ubam", "bam", "cram", "vcf", "bcf"]
+    },
+    "sampleRole": {
+      "enum": ["germline", "tumor", "normal", "unknown"]
+    },
+    "processingState": {
+      "enum": [
+        "unknown",
+        "unmapped",
+        "aligned",
+        "duplicate_marked",
+        "recalibrated",
+        "analysis_ready",
+        "variant_calls"
+      ]
+    },
+    "inputFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path"],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/absolutePath"
+        },
+        "index": {
+          "type": ["string", "null"],
+          "pattern": "^/"
+        },
+        "lane": {
+          "type": ["string", "null"]
+        },
+        "read": {
+          "type": ["integer", "null"],
+          "enum": [1, 2, null]
+        }
+      }
+    },
+    "sample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sample_id",
+        "role",
+        "input_format",
+        "processing_state",
+        "files"
+      ],
+      "properties": {
+        "sample_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "role": {
+          "$ref": "#/$defs/sampleRole"
+        },
+        "input_format": {
+          "$ref": "#/$defs/fileFormat"
+        },
+        "processing_state": {
+          "$ref": "#/$defs/processingState"
+        },
+        "files": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/inputFile"
+          }
+        },
+        "confirmation_notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "relationship": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "sample_ids"],
+      "properties": {
+        "type": {
+          "enum": [
+            "matched_tumor_normal",
+            "parent_child",
+            "siblings",
+            "replicates",
+            "longitudinal"
+          ]
+        },
+        "sample_ids": {
+          "type": "array",
+          "minItems": 2,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/identifier"
+          }
+        }
+      }
+    },
+    "patient": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["patient_id", "samples", "relationships"],
+      "properties": {
+        "patient_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "sex": {
+          "description": "Patient sex chromosome complement for CNV callers; NA means not provided.",
+          "enum": ["NA", "XX", "XY"]
+        },
+        "samples": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/sample"
+          }
+        },
+        "relationships": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/relationship"
+          }
+        }
+      }
+    }
+  }
+}
