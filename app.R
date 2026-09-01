@@ -1501,9 +1501,19 @@ write_last_project_id <- function(project_id) {
 read_last_analysis <- function() {
   fallback <- "RNA-seq"
   if (!file.exists(LAST_ANALYSIS_PATH)) return(fallback)
+
   value <- trimws(readLines(LAST_ANALYSIS_PATH, warn = FALSE, n = 1))
   choices <- unname(analysis_choices())
-  if (length(value) && value[[1]] %in% choices) value[[1]] else fallback
+
+  if (
+    length(value) &&
+    value[[1]] %in% choices &&
+    !value[[1]] %in% c("FetchNGS", "Sarek WGS")
+  ) {
+    value[[1]]
+  } else {
+    fallback
+  }
 }
 
 write_last_analysis <- function(analysis) {
@@ -13741,10 +13751,11 @@ select.form-control {
   font-size:11px;
 }
 
-/* The server still owns tab switching; this only prevents FetchNGS tabs from
-   appearing during the initial RNA-seq browser paint before Shiny connects. */
+/* The server owns tab switching. These rules prevent standalone workflow
+   tabs from appearing during the initial browser paint before Shiny connects. */
 body:not(:has(#analysis option[value='FetchNGS']:checked)) #web_main_tabs > li:has(> a[data-value='FetchNGS']),
-body:not(:has(#analysis option[value='FetchNGS']:checked)) #web_main_tabs > li:has(> a[data-value='FetchNGS Outputs']) {
+body:not(:has(#analysis option[value='FetchNGS']:checked)) #web_main_tabs > li:has(> a[data-value='FetchNGS Outputs']),
+body:not(:has(#analysis option[value='Sarek WGS']:checked)) #web_main_tabs > li:has(> a[data-value='Sarek Manifest']) {
   display:none !important;
 }
 
@@ -16129,6 +16140,27 @@ server <- function(input, output, session) {
     lapply(fetchngs_tabs, function(tab) hideTab("web_main_tabs", tab, session = session))
     lapply(sarek_tabs, function(tab) hideTab("web_main_tabs", tab, session = session))
   })
+
+  observeEvent(input$web_main_tabs, {
+    current_tab <- input$web_main_tabs %||% ""
+    current_analysis <- input$analysis %||% "RNA-seq"
+
+    if (
+      identical(current_tab, "Sarek Manifest") &&
+      !is_sarek_analysis(current_analysis)
+    ) {
+      updateTabsetPanel(session, "web_main_tabs", selected = "Setup")
+      return(invisible(NULL))
+    }
+
+    if (
+      current_tab %in% c("FetchNGS", "FetchNGS Outputs") &&
+      !is_fetchngs_analysis(current_analysis)
+    ) {
+      updateTabsetPanel(session, "web_main_tabs", selected = "Setup")
+      return(invisible(NULL))
+    }
+  }, ignoreInit = TRUE)
 
   observeEvent(input$project_id, {
     if (is_standalone_analysis(input$analysis %||% "RNA-seq")) return(invisible(NULL))
