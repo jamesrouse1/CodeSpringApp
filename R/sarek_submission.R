@@ -1,7 +1,7 @@
 # Durable Slurm submission helpers for confirmed nf-core/sarek runs.
 # The Shiny module owns presentation; this file owns filesystem and scheduler work.
 
-SAREK_SUBMISSION_VERSION <- "0.3.0"
+SAREK_SUBMISSION_VERSION <- "0.5.0"
 
 sarek_submission_require_helpers <- function() {
   required <- c(
@@ -110,13 +110,17 @@ sarek_submission_paths <- function(manifest) {
     manifest_path = file.path(internal_dir, "manifest.json"),
     samplesheet_path = file.path(internal_dir, "input", "samplesheet.csv"),
     params_path = file.path(internal_dir, "params.json"),
+    run_config = file.path(internal_dir, "nextflow.config"),
     launch_script = file.path(internal_dir, "launch.sh"),
     nextflow_log = file.path(internal_dir, "logs", "nextflow.log"),
     trace_path = file.path(internal_dir, "logs", "trace.tsv"),
     stdout = file.path(internal_dir, "logs", "controller.out"),
     stderr = file.path(internal_dir, "logs", "controller.err"),
     submission_record = file.path(internal_dir, "submission.tsv"),
-    runtime_status = file.path(internal_dir, "runtime_status.tsv")
+    controller_attempts = file.path(internal_dir, "controller_attempts.tsv"),
+    runtime_status = file.path(internal_dir, "runtime_status.tsv"),
+    active_children = file.path(internal_dir, "active_children.tsv"),
+    controller_info = file.path(internal_dir, "controller.tsv")
   )
 }
 
@@ -186,19 +190,20 @@ sarek_submission_launch_script <- function(paths, runtime, pipeline, pipeline_ve
     paste("export NXF_SINGULARITY_CACHEDIR=", shQuote(runtime$singularity_cache), sep = ""),
     paste("export NXF_VER=", shQuote(nextflow_version), sep = "")
   )
+
   command <- c(
     shQuote(runtime$launcher),
     "-log", shQuote(paths$nextflow_log),
-    "-c", shQuote(runtime$config),
+    "-c", shQuote(paths$run_config),
     "run", shQuote(pipeline),
     "-ansi-log false",
     "-r", shQuote(pipeline_version),
     "-profile", "singularity",
     "-params-file", shQuote(paths$params_path),
     "-work-dir", shQuote(paths$work_dir),
-    "-with-trace", shQuote(paths$trace_path),
-    "-name", shQuote(paste0("codespring_", paths$manifest_id))
+    "-with-trace", shQuote(paths$trace_path)
   )
+
   c(
     "#!/usr/bin/env bash",
     "set -euo pipefail",
@@ -206,31 +211,100 @@ sarek_submission_launch_script <- function(paths, runtime, pipeline, pipeline_ve
     paste("mkdir -p", shQuote(paths$work_dir)),
     paste("cd", shQuote(paths$run_dir)),
     paste("status_file=", shQuote(paths$runtime_status), sep = ""),
+    paste("active_children_file=", shQuote(paths$active_children), sep = ""),
+    paste("controller_info_file=", shQuote(paths$controller_info), sep = ""),
+    paste("child_tag=", shQuote(paths$child_tag), sep = ""),
+    'controller_mode="${CSL_SAREK_CONTROLLER_MODE:-initial}"',
     "started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+    "controller_host=$(uname -n)",
+    "{",
+    "  printf 'field\\tvalue\\n'",
+    "  printf 'pid\\t%s\\n' \"$$\"",
+    "  printf 'host\\t%s\\n' \"$controller_host\"",
+    "  printf 'started_at\\t%s\\n' \"$started_at\"",
+    "} > \"${controller_info_file}.tmp\"",
+    "mv -f \"${controller_info_file}.tmp\" \"$controller_info_file\"",
+    "",
+    'if [[ "${CSL_SAREK_RESUME:-false}" == "true" ]]; then',
+    "  resume_args=(-resume)",
+    "else",
+    paste0(
+      "  resume_args=(-name ",
+      shQuote(paste0("codespring_", paths$manifest_id)),
+      ")"
+    ),
+    "fi",
+    "",
     "write_runtime_status() {",
-    "  local state=\"$1\"",
-    "  local exit_code=\"$2\"",
-    "  local ended_at=\"$3\"",
+    '  local state="$1"',
+    '  local exit_code="$2"',
+    '  local ended_at="$3"',
+    '  local active_children="$4"',
     "  {",
     "    printf 'field\\tvalue\\n'",
-    "    printf 'state\\t%s\\n' \"$state\"",
-    "    printf 'started_at\\t%s\\n' \"$started_at\"",
-    "    printf 'ended_at\\t%s\\n' \"$ended_at\"",
-    "    printf 'exit_code\\t%s\\n' \"$exit_code\"",
-    "  } > \"${status_file}.tmp\"",
-    "  mv -f \"${status_file}.tmp\" \"$status_file\"",
+    '    printf \'state\\t%s\\n\' "$state"',
+    '    printf \'mode\\t%s\\n\' "$controller_mode"',
+    '    printf \'started_at\\t%s\\n\' "$started_at"',
+    '    printf \'ended_at\\t%s\\n\' "$ended_at"',
+    '    printf \'exit_code\\t%s\\n\' "$exit_code"',
+    '    printf \'active_children\\t%s\\n\' "$active_children"',
+    '    printf \'child_tag\\t%s\\n\' "$child_tag"',
+    '  } > "${status_file}.tmp"',
+    '  mv -f "${status_file}.tmp" "$status_file"',
     "}",
+    "",
+    "snapshot_active_children() {",
+    '  local raw="${active_children_file}.raw.$$"',
+    '  local tmp="${active_children_file}.tmp.$$"',
+    "",
+    '  if ! squeue -h -u "$USER" -o "%i|%T|%M|%l|%k|%j" > "$raw" 2>/dev/null; then',
+    '    rm -f "$raw" "$tmp"',
+    "    return 1",
+    "  fi",
+    "",
+    "  {",
+    "    printf 'job_id\\tstate\\telapsed\\ttime_limit\\tcomment\\tjob_name\\n'",
+    '    awk -F"|" -v tag="$child_tag" \'$5 == tag {',
+    '      printf "%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n", $1, $2, $3, $4, $5, $6',
+    "    }' \"$raw\"",
+    '  } > "$tmp"',
+    "",
+    '  mv -f "$tmp" "$active_children_file"',
+    '  rm -f "$raw"',
+    "  return 0",
+    "}",
+    "",
     "finish_controller() {",
     "  local exit_code=$?",
     "  trap - EXIT",
+    "",
     "  local state=FAILED",
-    "  if [ \"$exit_code\" -eq 0 ]; then state=COMPLETED; fi",
-    "  write_runtime_status \"$state\" \"$exit_code\" \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"",
-    "  exit \"$exit_code\"",
+    '  local active_count=""',
+    "  local child_query_ok=0",
+    "",
+    "  if snapshot_active_children; then",
+    "    child_query_ok=1",
+    '    active_count=$(awk \'NR > 1 { n++ } END { print n + 0 }\' "$active_children_file")',
+    "  fi",
+    "",
+    '  if [ "$exit_code" -eq 0 ]; then',
+    '    if [ "$child_query_ok" -eq 1 ] && [ "${active_count:-0}" -eq 0 ]; then',
+    "      state=COMPLETED",
+    "    else",
+    "      state=INCOMPLETE",
+    "    fi",
+    "  fi",
+    "",
+    '  write_runtime_status "$state" "$exit_code" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${active_count:-unknown}"',
+    '  exit "$exit_code"',
     "}",
+    "",
     "trap finish_controller EXIT",
-    "write_runtime_status RUNNING '' ''",
-    paste(command, collapse = " ")
+    "write_runtime_status RUNNING '' '' ''",
+    paste(
+      paste(command, collapse = " "),
+      '"${resume_args[@]}"'
+    )
   )
 }
 
@@ -478,6 +552,8 @@ sarek_run_activity <- function(run, state = "", max_events = 12L) {
 sarek_submission_catalog <- function(results_root) {
   empty <- data.frame(
     run_id = character(0), status = character(0), job_id = character(0),
+    controller_pid = character(0), controller_host = character(0),
+    child_tag = character(0),
     submitted_at = character(0), step = character(0), tools = character(0),
     run_dir = character(0), output_dir = character(0), work_dir = character(0),
     runtime_status = character(0), updated_at = as.POSIXct(character(0)),
@@ -497,6 +573,9 @@ sarek_submission_catalog <- function(results_root) {
   rows <- lapply(seq_along(run_dirs), function(index) {
     run_dir <- normalizePath(run_dirs[[index]], winslash = "/", mustWork = FALSE)
     values <- sarek_read_key_value_file(records[[index]])
+    controller_info <- sarek_read_key_value_file(
+      file.path(run_dir, ".codespring", "controller.tsv")
+    )
     params_path <- file.path(run_dir, ".codespring", "params.json")
     params <- if (file.exists(params_path) && requireNamespace("jsonlite", quietly = TRUE)) {
       tryCatch(jsonlite::read_json(params_path, simplifyVector = TRUE), error = function(error) list())
@@ -508,6 +587,15 @@ sarek_submission_catalog <- function(results_root) {
       run_id = basename(run_dir),
       status = sarek_text(values["status"], "submitted"),
       job_id = sarek_text(values["job_id"]),
+      controller_pid = sarek_text(
+        controller_info["pid"],
+        sarek_text(values["controller_pid"])
+      ),
+      controller_host = sarek_text(
+        controller_info["host"],
+        sarek_text(values["controller_host"])
+      ),
+      child_tag = sarek_text(values["child_tag"]),
       submitted_at = sarek_text(values["submitted_at"]),
       step = sarek_text(values["step"], sarek_text(params$step)),
       tools = sarek_text(values["tools"], sarek_text(params$tools)),
@@ -668,28 +756,152 @@ sarek_query_slurm_job <- function(job_id, runner = NULL, squeue = "squeue", sacc
   list(state = "", elapsed = "", source = "record")
 }
 
+sarek_pid_alive <- function(pid, host = "") {
+  pid <- sarek_text(pid)
+
+  if (!grepl("^[0-9]+$", pid)) return(FALSE)
+
+  host <- sarek_text(host)
+  local_host <- sarek_text(Sys.info()[["nodename"]])
+
+  if (nzchar(host) && nzchar(local_host) && !identical(host, local_host)) {
+    return(NA)
+  }
+
+  file.exists(file.path("/proc", pid))
+}
+
+sarek_query_active_children <- function(
+  child_tag,
+  user = Sys.info()[["user"]],
+  runner = NULL,
+  squeue = "squeue"
+) {
+  empty <- data.frame(
+    job_id = character(0),
+    state = character(0),
+    elapsed = character(0),
+    time_limit = character(0),
+    comment = character(0),
+    job_name = character(0),
+    stringsAsFactors = FALSE,
+    check.names = FALSE
+  )
+
+  child_tag <- sarek_text(child_tag)
+  user <- sarek_text(user)
+
+  if (!nzchar(child_tag) || !nzchar(user)) return(empty)
+
+  output <- sarek_run_command(
+    squeue,
+    c("-h", "-u", user, "-o", "%i|%T|%M|%l|%k|%j"),
+    runner = runner
+  )
+
+  lines <- trimws(as.character(output))
+  lines <- lines[nzchar(lines)]
+
+  if (!length(lines)) return(empty)
+
+  fields <- strsplit(lines, "|", fixed = TRUE)
+
+  rows <- lapply(fields, function(parts) {
+    if (length(parts) < 6L || trimws(parts[[5]]) != child_tag) return(NULL)
+
+    data.frame(
+      job_id = trimws(parts[[1]]),
+      state = sarek_normalize_slurm_state(parts[[2]]),
+      elapsed = trimws(parts[[3]]),
+      time_limit = trimws(parts[[4]]),
+      comment = trimws(parts[[5]]),
+      job_name = trimws(paste(parts[6:length(parts)], collapse = "|")),
+      stringsAsFactors = FALSE,
+      check.names = FALSE
+    )
+  })
+
+  rows <- Filter(Negate(is.null), rows)
+  if (!length(rows)) return(empty)
+
+  do.call(rbind, rows)
+}
+
 sarek_run_status <- function(run, runner = NULL, squeue = "squeue", sacct = "sacct") {
   scalar <- function(name, default = "") {
     value <- tryCatch(run[[name]], error = function(error) NULL)
     sarek_text(value, default)
   }
+
   runtime <- sarek_read_key_value_file(scalar("runtime_status"))
-  runtime_state <- sarek_normalize_slurm_state(runtime["state"])
-  terminal <- c("COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY")
-  scheduler <- if (runtime_state %in% terminal) {
-    list(state = runtime_state, elapsed = "", source = "runtime")
+  runtime_state <- toupper(sarek_text(runtime["state"]))
+
+  run_dir <- scalar("run_dir")
+  controller_info <- if (nzchar(run_dir)) {
+    sarek_read_key_value_file(
+      file.path(run_dir, ".codespring", "controller.tsv")
+    )
   } else {
-    sarek_query_slurm_job(scalar("job_id"), runner = runner, squeue = squeue, sacct = sacct)
+    character(0)
   }
-  state <- sarek_normalize_slurm_state(scheduler$state)
-  if (!nzchar(state)) state <- if (nzchar(runtime_state)) runtime_state else sarek_normalize_slurm_state(scalar("status", "SUBMITTED"))
+
+  controller_pid <- sarek_text(
+    controller_info["pid"],
+    scalar("controller_pid")
+  )
+  controller_host <- sarek_text(
+    controller_info["host"],
+    scalar("controller_host")
+  )
+  child_tag <- scalar("child_tag", sarek_text(runtime["child_tag"]))
+
+  children <- sarek_query_active_children(
+    child_tag,
+    runner = runner,
+    squeue = squeue
+  )
+
+  active_children <- NROW(children)
+
+  terminal <- c(
+    "COMPLETED",
+    "FAILED",
+    "INCOMPLETE",
+    "CANCELLED",
+    "TIMEOUT",
+    "OUT_OF_MEMORY"
+  )
+
+  controller_alive <- sarek_pid_alive(
+    controller_pid,
+    controller_host
+  )
+
+  state <- ""
+
+  if (runtime_state %in% terminal) {
+    state <- runtime_state
+  } else if (isTRUE(controller_alive)) {
+    state <- "RUNNING"
+  } else if (identical(runtime_state, "RUNNING")) {
+    state <- "INCOMPLETE"
+  } else if (active_children > 0L) {
+    state <- "INCOMPLETE"
+  } else {
+    state <- toupper(scalar("status", "SUBMITTED"))
+  }
+
   list(
     state = state,
-    elapsed = sarek_text(scheduler$elapsed),
-    source = sarek_text(scheduler$source, if (nzchar(runtime_state)) "runtime" else "record"),
+    elapsed = "",
+    source = if (runtime_state %in% terminal) "runtime" else "controller",
     exit_code = sarek_text(runtime["exit_code"]),
     started_at = sarek_text(runtime["started_at"]),
-    ended_at = sarek_text(runtime["ended_at"])
+    ended_at = sarek_text(runtime["ended_at"]),
+    controller_pid = controller_pid,
+    controller_alive = controller_alive,
+    active_children = active_children,
+    child_jobs = children
   )
 }
 
@@ -707,7 +919,7 @@ sarek_run_progress <- function(state) {
   if (identical(state, "COMPLETED")) {
     return(list(percent = 100L, label = "Completed", kind = "success", active = FALSE))
   }
-  if (state %in% c("FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY")) {
+  if (state %in% c("FAILED", "INCOMPLETE", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY")) {
     return(list(percent = 100L, label = gsub("_", " ", tools::toTitleCase(tolower(state))), kind = "error", active = FALSE))
   }
   list(percent = 15L, label = if (nzchar(state)) gsub("_", " ", state) else "Status unavailable", kind = "unknown", active = FALSE)
@@ -740,6 +952,19 @@ sarek_build_submission_bundle <- function(
       call. = FALSE
     )
   }
+  paths$child_tag <- substr(
+    paste0(
+      "codespring_sarek_",
+      paths$manifest_id,
+      "_",
+      format(Sys.time(), "%Y%m%d%H%M%S", tz = "UTC"),
+      "_",
+      Sys.getpid()
+    ),
+    1L,
+    220L
+  )
+
   params <- sarek_submission_params(manifest, nextflow_input, paths)
   tool_resolution <- sarek_submission_tool_resolution(
     manifest$analysis$mode,
@@ -758,6 +983,22 @@ sarek_build_submission_bundle <- function(
   sarek_write_manifest(manifest, paths$manifest_path)
   sarek_write_nextflow_samplesheet(nextflow_input, paths$samplesheet_path)
   jsonlite::write_json(params, paths$params_path, auto_unbox = TRUE, pretty = TRUE, null = "null")
+
+  sarek_write_text_atomic(
+    c(
+      paste("includeConfig", shQuote(runtime$config)),
+      "",
+      "process {",
+      paste0(
+        "  clusterOptions = '--comment=",
+        paths$child_tag,
+        "'"
+      ),
+      "}"
+    ),
+    paths$run_config
+  )
+
   sarek_write_text_atomic(
     sarek_submission_launch_script(
       paths,
@@ -778,6 +1019,22 @@ sarek_parse_slurm_job_id <- function(output) {
   if (grepl("^[0-9]+$", first)) first else ""
 }
 
+
+
+
+sarek_submission_write_values <- function(path, values) {
+  values <- as.character(values)
+  names(values) <- names(values)
+  sarek_write_text_atomic(
+    c(
+      "field\tvalue",
+      paste(names(values), values, sep = "\t")
+    ),
+    path
+  )
+}
+
+
 sarek_validate_slurm_time <- function(value, default = "2-00:00:00") {
   value <- sarek_text(value, default)
   valid <- grepl(
@@ -787,12 +1044,93 @@ sarek_validate_slurm_time <- function(value, default = "2-00:00:00") {
   )
   if (!valid) {
     stop(
-      "Slurm controller time must use HH:MM:SS or D-HH:MM:SS format: ",
+      "Sarek controller_time compatibility value must use HH:MM:SS or D-HH:MM:SS format: ",
       value,
       call. = FALSE
     )
   }
   value
+}
+
+sarek_start_detached_controller <- function(
+  paths,
+  mode = c("initial", "resume"),
+  starter = NULL
+) {
+  mode <- match.arg(mode)
+
+  if (is.function(starter)) {
+    output <- starter(paths, mode)
+    pid <- sarek_parse_slurm_job_id(output)
+
+    if (!nzchar(pid)) {
+      stop(
+        "Detached-controller test starter did not return a numeric PID.",
+        call. = FALSE
+      )
+    }
+
+    return(list(
+      pid = pid,
+      host = sarek_text(Sys.info()[["nodename"]]),
+      output = as.character(output)
+    ))
+  }
+
+  bash <- Sys.which("bash")
+  nohup <- Sys.which("nohup")
+  setsid <- Sys.which("setsid")
+
+  if (!nzchar(bash) || !nzchar(nohup) || !nzchar(setsid)) {
+    stop(
+      "Detached Sarek execution requires bash, nohup, and setsid on the application host.",
+      call. = FALSE
+    )
+  }
+
+  resume_value <- if (identical(mode, "resume")) "true" else "false"
+
+  command <- paste(
+    shQuote(nohup),
+    shQuote(setsid),
+    "env",
+    paste0("CSL_SAREK_RESUME=", resume_value),
+    paste0("CSL_SAREK_CONTROLLER_MODE=", mode),
+    shQuote(paths$launch_script),
+    "</dev/null",
+    paste0(">", shQuote(paths$stdout)),
+    paste0("2>", shQuote(paths$stderr)),
+    "& echo $!"
+  )
+
+  output <- tryCatch(
+    system2(
+      bash,
+      c("-lc", shQuote(command)),
+      stdout = TRUE,
+      stderr = TRUE
+    ),
+    error = function(error) structure(conditionMessage(error), status = 1L)
+  )
+
+  status <- attr(output, "status")
+  if (is.null(status)) status <- 0L
+
+  pid <- sarek_parse_slurm_job_id(output)
+
+  if (!identical(as.integer(status), 0L) || !nzchar(pid)) {
+    stop(
+      "Could not start the detached Sarek Nextflow controller: ",
+      paste(as.character(output), collapse = " "),
+      call. = FALSE
+    )
+  }
+
+  list(
+    pid = pid,
+    host = sarek_text(Sys.info()[["nodename"]]),
+    output = as.character(output)
+  )
 }
 
 sarek_submit_run <- function(
@@ -808,70 +1146,92 @@ sarek_submit_run <- function(
   sbatch = "sbatch",
   submitter = NULL
 ) {
-  runtime <- sarek_submission_validate_runtime(launcher, config, nxf_home, singularity_cache, sbatch)
-  controller_time <- sarek_validate_slurm_time(controller_time)
-  bundle <- sarek_build_submission_bundle(manifest, nextflow_input, runtime, nextflow_version)
+  runtime <- sarek_submission_validate_runtime(
+    launcher,
+    config,
+    nxf_home,
+    singularity_cache,
+    sbatch
+  )
+
+  # Kept for API compatibility. The detached controller itself no longer
+  # consumes a Slurm allocation.
+  sarek_validate_slurm_time(controller_time)
+
+  bundle <- sarek_build_submission_bundle(
+    manifest,
+    nextflow_input,
+    runtime,
+    nextflow_version
+  )
+
   paths <- bundle$paths
-  queue <- sarek_text(queue, "cpuq")
-  args <- c(
-    "--parsable",
-    "--partition", queue,
-    "--job-name", paste0("sarek_", paths$manifest_id),
-    "--cpus-per-task", "1",
-    "--mem", "4G",
-    "--time", controller_time,
-    "--chdir", paths$run_dir,
-    "--output", paths$stdout,
-    "--error", paths$stderr,
-    paths$launch_script
-  )
-  output <- tryCatch(
-    if (is.function(submitter)) submitter(runtime$sbatch, args) else {
-      system2(runtime$sbatch, vapply(args, shQuote, character(1)), stdout = TRUE, stderr = TRUE)
-    },
-    error = function(error) structure(conditionMessage(error), status = 1L)
-  )
-  status <- attr(output, "status")
-  if (is.null(status)) status <- 0L
-  job_id <- sarek_parse_slurm_job_id(output)
-  if (!identical(as.integer(status), 0L) || !nzchar(job_id)) {
-    sarek_write_text_atomic(
-      c(
-        "field\tvalue",
-        "status\terror",
-        paste0("controller_time\t", controller_time),
-        paste0("message\t", paste(as.character(output), collapse = " "))
-      ),
-      paths$submission_record
-    )
-    stop(
-      "Slurm did not accept the Sarek controller job. See ", paths$submission_record,
-      " for the recorded response.",
-      call. = FALSE
-    )
+
+  starter <- if (is.function(submitter)) {
+    function(paths, mode) submitter("detached", c(mode, paths$launch_script))
+  } else {
+    NULL
   }
+
+  controller <- sarek_start_detached_controller(
+    paths,
+    mode = "initial",
+    starter = starter
+  )
+
+  submitted_at <- format(
+    Sys.time(),
+    "%Y-%m-%dT%H:%M:%SZ",
+    tz = "UTC"
+  )
+
   sarek_write_text_atomic(
     c(
       "field\tvalue",
-      paste0("status\tsubmitted"),
-      paste0("job_id\t", job_id),
-      paste0("submitted_at\t", format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")),
+      "status\tsubmitted",
+      "job_id\t",
+      paste0("controller_pid\t", controller$pid),
+      paste0("controller_host\t", controller$host),
+      "controller_mode\tdetached",
+      "attempt\t1",
+      "mode\tinitial",
+      paste0("child_tag\t", paths$child_tag),
+      paste0("submitted_at\t", submitted_at),
       paste0("run_dir\t", paths$run_dir),
       paste0("output_dir\t", paths$output_dir),
       paste0("work_dir\t", paths$work_dir),
       paste0("step\t", bundle$params$step),
       paste0("tools\t", bundle$params$tools),
-      paste0("requested_tools\t", bundle$tool_resolution$requested_tools),
-      paste0("skipped_tools\t", paste(bundle$tool_resolution$skipped_tools, collapse = ",")),
-      paste0("tool_warning\t", paste(bundle$tool_resolution$warnings, collapse = " ")),
-      paste0("controller_time\t", controller_time),
-      paste0("submission_version\t", SAREK_SUBMISSION_VERSION)
+      paste0(
+        "requested_tools\t",
+        bundle$tool_resolution$requested_tools
+      ),
+      paste0(
+        "skipped_tools\t",
+        paste(bundle$tool_resolution$skipped_tools, collapse = ",")
+      ),
+      paste0(
+        "tool_warning\t",
+        paste(bundle$tool_resolution$warnings, collapse = " ")
+      ),
+      "controller_time\tnot_applicable",
+      paste0(
+        "submission_version\t",
+        SAREK_SUBMISSION_VERSION
+      )
     ),
     paths$submission_record
   )
+
   list(
     status = "submitted",
-    job_id = job_id,
+    job_id = "",
+    controller_pid = controller$pid,
+    controller_host = controller$host,
+    controller_mode = "detached",
+    child_tag = paths$child_tag,
+    attempt = 1L,
+    mode = "initial",
     run_dir = paths$run_dir,
     output_dir = paths$output_dir,
     work_dir = paths$work_dir,
@@ -880,6 +1240,208 @@ sarek_submit_run <- function(
     skipped_tools = bundle$tool_resolution$skipped_tools,
     warnings = bundle$tool_resolution$warnings,
     step = bundle$params$step,
-    controller_time = controller_time
+    controller_time = "not_applicable"
+  )
+}
+
+sarek_resume_run <- function(
+  run_dir,
+  launcher,
+  config,
+  nxf_home,
+  singularity_cache,
+  queue = "cpuq",
+  controller_time = "2-00:00:00",
+  sbatch = "sbatch",
+  submitter = NULL,
+  status_runner = NULL,
+  squeue = "squeue",
+  sacct = "sacct"
+) {
+  run_dir <- sarek_text(run_dir)
+
+  if (!sarek_is_absolute_path(run_dir) || !dir.exists(run_dir)) {
+    stop(
+      "Cannot resume Sarek run because its run directory is missing: ",
+      run_dir,
+      call. = FALSE
+    )
+  }
+
+  run_dir <- normalizePath(run_dir, winslash = "/", mustWork = TRUE)
+
+  internal_dir <- file.path(run_dir, ".codespring")
+  log_dir <- file.path(internal_dir, "logs")
+
+  submission_record <- file.path(internal_dir, "submission.tsv")
+  launch_script <- file.path(internal_dir, "launch.sh")
+  params_path <- file.path(internal_dir, "params.json")
+  run_config <- file.path(internal_dir, "nextflow.config")
+  runtime_status <- file.path(internal_dir, "runtime_status.tsv")
+  active_children <- file.path(internal_dir, "active_children.tsv")
+
+  required <- c(
+    submission_record,
+    launch_script,
+    params_path,
+    run_config
+  )
+
+  missing <- required[!file.exists(required)]
+
+  if (length(missing)) {
+    stop(
+      "Cannot resume Sarek because required run state is missing: ",
+      paste(missing, collapse = ", "),
+      call. = FALSE
+    )
+  }
+
+  launch_lines <- tryCatch(
+    readLines(launch_script, warn = FALSE),
+    error = function(error) character(0)
+  )
+
+  if (!any(grepl("CSL_SAREK_RESUME", launch_lines, fixed = TRUE))) {
+    stop(
+      "This Sarek run was created before detached resume support was added.",
+      call. = FALSE
+    )
+  }
+
+  values <- sarek_read_key_value_file(submission_record)
+
+  controller_info <- sarek_read_key_value_file(
+    file.path(internal_dir, "controller.tsv")
+  )
+
+  existing_pid <- sarek_text(
+    controller_info["pid"],
+    sarek_text(values["controller_pid"])
+  )
+  existing_host <- sarek_text(
+    controller_info["host"],
+    sarek_text(values["controller_host"])
+  )
+
+  if (isTRUE(sarek_pid_alive(existing_pid, existing_host))) {
+    stop(
+      "Cannot resume Sarek while its Nextflow controller PID ",
+      existing_pid,
+      " is still running.",
+      call. = FALSE
+    )
+  }
+
+  runtime <- sarek_submission_validate_runtime(
+    launcher,
+    config,
+    nxf_home,
+    singularity_cache,
+    sbatch
+  )
+
+  sarek_validate_slurm_time(controller_time)
+
+  work_dir <- sarek_text(values["work_dir"])
+
+  if (!sarek_is_absolute_path(work_dir) || !dir.exists(work_dir)) {
+    stop(
+      "Cannot resume Sarek because its original work directory is missing: ",
+      work_dir,
+      call. = FALSE
+    )
+  }
+
+  child_tag <- sarek_text(values["child_tag"])
+
+  if (!nzchar(child_tag)) {
+    stop(
+      "Cannot resume Sarek because its child-job tag was not recorded.",
+      call. = FALSE
+    )
+  }
+
+  paths <- list(
+    manifest_id = basename(run_dir),
+    run_dir = run_dir,
+    output_dir = sarek_text(
+      values["output_dir"],
+      file.path(run_dir, "results")
+    ),
+    internal_dir = internal_dir,
+    log_dir = log_dir,
+    work_dir = work_dir,
+    params_path = params_path,
+    run_config = run_config,
+    launch_script = launch_script,
+    nextflow_log = file.path(log_dir, "nextflow.log"),
+    trace_path = file.path(log_dir, "trace.tsv"),
+    stdout = file.path(log_dir, "controller.out"),
+    stderr = file.path(log_dir, "controller.err"),
+    submission_record = submission_record,
+    runtime_status = runtime_status,
+    active_children = active_children,
+    controller_info = file.path(internal_dir, "controller.tsv"),
+    child_tag = child_tag
+  )
+
+  starter <- if (is.function(submitter)) {
+    function(paths, mode) submitter("detached", c(mode, paths$launch_script))
+  } else {
+    NULL
+  }
+
+  controller <- sarek_start_detached_controller(
+    paths,
+    mode = "resume",
+    starter = starter
+  )
+
+  previous_attempt <- suppressWarnings(
+    as.integer(sarek_text(values["attempt"], "1"))
+  )
+
+  if (is.na(previous_attempt) || previous_attempt < 1L) {
+    previous_attempt <- 1L
+  }
+
+  attempt <- previous_attempt + 1L
+
+  submitted_at <- format(
+    Sys.time(),
+    "%Y-%m-%dT%H:%M:%SZ",
+    tz = "UTC"
+  )
+
+  values["status"] <- "submitted"
+  values["job_id"] <- ""
+  values["controller_pid"] <- controller$pid
+  values["controller_host"] <- controller$host
+  values["controller_mode"] <- "detached"
+  values["attempt"] <- as.character(attempt)
+  values["mode"] <- "resume"
+  values["submitted_at"] <- submitted_at
+  values["controller_time"] <- "not_applicable"
+  values["submission_version"] <- SAREK_SUBMISSION_VERSION
+
+  sarek_submission_write_values(
+    submission_record,
+    values
+  )
+
+  list(
+    status = "submitted",
+    job_id = "",
+    controller_pid = controller$pid,
+    controller_host = controller$host,
+    controller_mode = "detached",
+    child_tag = child_tag,
+    attempt = attempt,
+    mode = "resume",
+    run_dir = run_dir,
+    output_dir = paths$output_dir,
+    work_dir = paths$work_dir,
+    controller_time = "not_applicable"
   )
 }
