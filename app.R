@@ -1426,6 +1426,28 @@ is_cutrun_project <- function(project) {
   identical(analysis_key(project$analysis_key %||% project$analysis), "cutrun")
 }
 
+normalize_cutrun_backend <- function(x, default = "native") {
+  allowed <- c("native", "nfcore")
+  default <- tolower(trimws(as.character(default %||% "native")))[1]
+  if (is.na(default) || !default %in% allowed) default <- "native"
+
+  value <- tolower(trimws(as.character(x %||% "")))[1]
+  if (is.na(value) || !value %in% allowed) default else value
+}
+
+cutrun_backend <- function(project) {
+  if (is.null(project) || !is_cutrun_project(project)) return("")
+  normalize_cutrun_backend(project$cutrun_backend, default = "native")
+}
+
+is_native_cutrun_project <- function(project) {
+  identical(cutrun_backend(project), "native")
+}
+
+is_nfcore_cutrun_project <- function(project) {
+  identical(cutrun_backend(project), "nfcore")
+}
+
 is_atac_project <- function(project) {
   identical(analysis_key(project$analysis_key %||% project$analysis), "atac")
 }
@@ -1554,6 +1576,7 @@ legacy_project_from_config <- function(path) {
     label = project_name,
     analysis = analysis_label(key),
     analysis_key = key,
+    cutrun_backend = if (identical(key, "cutrun")) normalize_cutrun_backend(vals$cutrun_backend, default = "native") else "",
     genome = tolower(vals$genome %||% "mouse"),
     genome_version = vals$genome_version %||% vals$reference_genome %||% "",
     paired_end = !(pairing %in% c("n", "no", "false", "single", "se")),
@@ -1692,6 +1715,7 @@ new_project_from_inputs <- function(input) {
     label = label,
     analysis = analysis_label(key),
     analysis_key = key,
+    cutrun_backend = if (identical(key, "cutrun")) normalize_cutrun_backend(input$new_cutrun_backend, default = "native") else "",
     genome = if (identical(key, "scrna") && !scrna_fastq_start) "auto" else tolower(input$new_species %||% "mouse"),
     genome_version = if (identical(key, "scrna") && !scrna_fastq_start) "" else input$new_genome_version %||% "",
     paired_end = paired,
@@ -1853,6 +1877,7 @@ write_project_config <- function(project) {
   cfg_path <- file.path(cfg_dir, paste0(clean_name(project$name, "project"), ".py"))
   lines <- c(
     sprintf("analysis_type = %s", deparse(project$analysis_key)),
+    if (is_cutrun_project(project)) sprintf("cutrun_backend = %s", deparse(cutrun_backend(project))) else NULL,
     sprintf("project_name = %s", deparse(project$name)),
     sprintf("results_directory = %s", deparse(with_slash(project$results_root))),
     sprintf("visualizer_data_dir = %s", deparse(project$data_dir)),
