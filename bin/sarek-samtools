@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+# Run samtools from the cluster module used by the lightweight Sarek BAM
+# inspector. Administrators can update the module names without editing code.
+module_prerequisite="${CSL_SAREK_SAMTOOLS_MODULE_PREREQUISITE:-EB5}"
+samtools_module="${CSL_SAREK_SAMTOOLS_MODULE:-SAMtools/1.23.1-GCC-15.2.0}"
+module_init_override="${CSL_SAREK_MODULE_INIT:-}"
+
+initialize_module_command() {
+  if type module >/dev/null 2>&1; then
+    return 0
+  fi
+
+  local init_script
+  if [[ -n "$module_init_override" ]]; then
+    if [[ ! -r "$module_init_override" ]]; then
+      echo "Configured module initialization script is unreadable: $module_init_override" >&2
+      return 1
+    fi
+    # shellcheck disable=SC1090
+    source "$module_init_override"
+  else
+    for init_script in \
+      /etc/profile.d/lmod.sh \
+      /etc/profile.d/modules.sh \
+      /usr/share/lmod/lmod/init/bash
+    do
+      if [[ -r "$init_script" ]]; then
+        # shellcheck disable=SC1090
+        source "$init_script"
+        if type module >/dev/null 2>&1; then
+          break
+        fi
+      fi
+    done
+  fi
+
+  if ! type module >/dev/null 2>&1; then
+    echo "The environment-modules command could not be initialized." >&2
+    return 1
+  fi
+}
+
+load_required_module() {
+  local module_name="$1"
+  [[ -z "$module_name" ]] && return 0
+  if ! module load "$module_name" >/dev/null 2>&1; then
+    echo "Could not load required module: $module_name" >&2
+    return 1
+  fi
+}
+
+initialize_module_command || exit 127
+load_required_module "$module_prerequisite" || exit 127
+load_required_module "$samtools_module" || exit 127
+
+samtools_path="$(command -v samtools || true)"
+if [[ -z "$samtools_path" ]]; then
+  echo "The loaded module did not provide a samtools executable: $samtools_module" >&2
+  exit 127
+fi
+
+exec "$samtools_path" "$@"

@@ -353,6 +353,89 @@ LAST_ANALYSIS_PATH <- file.path(APP_HOME, "last_analysis.txt")
 PROJECT_CONFIG_ROOT <- file.path(APP_HOME, "project_configs")
 DEFAULT_RESULTS_ROOT <- normalizePath(file.path(CURRENT_HOME, "csl_results"), winslash = "/", mustWork = FALSE)
 APP_ROOT <- normalizePath(Sys.getenv("CSL_WEB_APP_ROOT", unset = getwd()), winslash = "/", mustWork = FALSE)
+SAREK_MANIFEST_HELPERS <- file.path(APP_ROOT, "R", "sarek_manifest.R")
+SAREK_BAM_INSPECTOR_HELPERS <- file.path(APP_ROOT, "R", "sarek_bam_inspector.R")
+SAREK_NEXTFLOW_INPUT_HELPERS <- file.path(APP_ROOT, "R", "sarek_nextflow_input.R")
+SAREK_SUBMISSION_HELPERS <- file.path(APP_ROOT, "R", "sarek_submission.R")
+SAREK_MANIFEST_SHINY <- file.path(APP_ROOT, "R", "sarek_manifest_shiny.R")
+if (!file.exists(SAREK_MANIFEST_HELPERS)) stop("Sarek manifest helpers are missing: ", SAREK_MANIFEST_HELPERS)
+if (!file.exists(SAREK_BAM_INSPECTOR_HELPERS)) stop("Sarek BAM inspector helpers are missing: ", SAREK_BAM_INSPECTOR_HELPERS)
+if (!file.exists(SAREK_NEXTFLOW_INPUT_HELPERS)) stop("Sarek Nextflow input helpers are missing: ", SAREK_NEXTFLOW_INPUT_HELPERS)
+if (!file.exists(SAREK_SUBMISSION_HELPERS)) stop("Sarek submission helpers are missing: ", SAREK_SUBMISSION_HELPERS)
+if (!file.exists(SAREK_MANIFEST_SHINY)) stop("Sarek Shiny module is missing: ", SAREK_MANIFEST_SHINY)
+source(SAREK_MANIFEST_HELPERS, local = FALSE)
+source(SAREK_BAM_INSPECTOR_HELPERS, local = FALSE)
+source(SAREK_NEXTFLOW_INPUT_HELPERS, local = FALSE)
+source(SAREK_SUBMISSION_HELPERS, local = FALSE)
+source(SAREK_MANIFEST_SHINY, local = FALSE)
+SAREK_USER_STORAGE_ROOT <- normalizePath(
+  Sys.getenv(
+    "CSL_USER_STORAGE_ROOT",
+    unset = CURRENT_HOME
+  ),
+  winslash = "/",
+  mustWork = FALSE
+)
+SAREK_RESULTS_ROOT <- normalizePath(
+  Sys.getenv(
+    "CSL_SAREK_RESULTS_ROOT",
+    unset = file.path(SAREK_USER_STORAGE_ROOT, "csl_results", "sarek")
+  ),
+  winslash = "/",
+  mustWork = FALSE
+)
+SAREK_WORK_ROOT <- normalizePath(
+  Sys.getenv(
+    "CSL_SAREK_WORK_ROOT",
+    unset = file.path(SAREK_USER_STORAGE_ROOT, "csl_work", "sarek")
+  ),
+  winslash = "/",
+  mustWork = FALSE
+)
+SAREK_BACKEND_ROOT <- normalizePath(
+  Sys.getenv(
+    "CSL_SAREK_BACKEND_ROOT",
+    unset = "/grid/bsr/data/data/bsr_readable_data/CodeSpringFlow"
+  ),
+  winslash = "/",
+  mustWork = FALSE
+)
+SAREK_LAUNCHER <- normalizePath(
+  Sys.getenv("CSL_SAREK_LAUNCHER", unset = file.path(SAREK_BACKEND_ROOT, "bin", "nextflow-sarek")),
+  winslash = "/",
+  mustWork = FALSE
+)
+SAREK_CLUSTER_CONFIG <- normalizePath(
+  Sys.getenv(
+    "CSL_SAREK_CONFIG",
+    unset = file.path(SAREK_BACKEND_ROOT, "pipelines", "sarek", "conf", "cshl_sarek.config")
+  ),
+  winslash = "/",
+  mustWork = FALSE
+)
+SAREK_NXF_HOME <- normalizePath(
+  Sys.getenv("CSL_SAREK_NXF_HOME", unset = file.path(SAREK_BACKEND_ROOT, "runtime", "nextflow", "sarek")),
+  winslash = "/",
+  mustWork = FALSE
+)
+SAREK_SINGULARITY_CACHE <- normalizePath(
+  Sys.getenv("CSL_SAREK_SINGULARITY_CACHE", unset = file.path(SAREK_BACKEND_ROOT, "cache", "singularity")),
+  winslash = "/",
+  mustWork = FALSE
+)
+SAREK_NEXTFLOW_VERSION <- Sys.getenv("CSL_SAREK_NEXTFLOW_VERSION", unset = "25.10.2")
+SAREK_CONTROLLER_QUEUE <- Sys.getenv("CSL_SAREK_QUEUE", unset = "cpuq")
+SAREK_CONTROLLER_TIME <- Sys.getenv("CSL_SAREK_CONTROLLER_TIME", unset = "2-00:00:00")
+SAREK_SAMTOOLS <- Sys.getenv(
+  "CSL_SAREK_SAMTOOLS",
+  unset = file.path(APP_ROOT, "bin", "sarek-samtools")
+)
+SAREK_MAX_AUTO_BAM_INSPECTIONS <- suppressWarnings(as.integer(
+  Sys.getenv("CSL_SAREK_MAX_AUTO_BAM_INSPECTIONS", unset = "20")
+))
+if (!is.finite(SAREK_MAX_AUTO_BAM_INSPECTIONS) || SAREK_MAX_AUTO_BAM_INSPECTIONS < 0L) {
+  stop("CSL_SAREK_MAX_AUTO_BAM_INSPECTIONS must be a non-negative integer.")
+}
 FETCHNGS_RESULTS_ROOT <- normalizePath(
   Sys.getenv("CSL_FETCHNGS_RESULTS_ROOT", unset = file.path(DEFAULT_RESULTS_ROOT, "fetchngs")),
   winslash = "/",
@@ -1268,10 +1351,11 @@ cleanup_previous_shiny_processes <- function() {
 }
 
 ANALYSIS_CATALOG <- data.frame(
-  key = c("fetchngs", "rna", "scrna", "atac", "cutrun", "chip"),
-  label = c("FetchNGS", "RNA-seq", "scRNA-seq", "ATAC-seq", "CUT&RUN", "ChIP-seq"),
+  key = c("fetchngs", "sarek", "rna", "scrna", "atac", "cutrun", "chip"),
+  label = c("FetchNGS", "Sarek WGS", "RNA-seq", "scRNA-seq", "ATAC-seq", "CUT&RUN", "ChIP-seq"),
   description = c(
     "Retrieve public sequencing data and metadata through nf-core/fetchngs",
+    "Discover WGS inputs and build a user-confirmed nf-core/sarek manifest",
     "Gene expression, transcript quantification, differential expression, and pathway analysis",
     "Single-cell QC, normalization, integration, clustering, annotation, and result visualization",
     "Chromatin accessibility, signal tracks, peak calling, and differential accessibility",
@@ -1284,15 +1368,18 @@ ANALYSIS_CATALOG <- data.frame(
 analysis_choices <- function() stats::setNames(ANALYSIS_CATALOG$label, ANALYSIS_CATALOG$label)
 
 project_analysis_choices <- function() {
-  catalog <- ANALYSIS_CATALOG[ANALYSIS_CATALOG$key != "fetchngs", , drop = FALSE]
+  catalog <- ANALYSIS_CATALOG[!ANALYSIS_CATALOG$key %in% c("fetchngs", "sarek"), , drop = FALSE]
   stats::setNames(catalog$label, catalog$label)
 }
 
 is_fetchngs_analysis <- function(x) identical(analysis_key(x), "fetchngs")
+is_sarek_analysis <- function(x) identical(analysis_key(x), "sarek")
+is_standalone_analysis <- function(x) analysis_key(x) %in% c("fetchngs", "sarek")
 
 analysis_label <- function(x) {
   x <- tolower(as.character(x %||% "rna"))
   if (grepl("fetch.?ngs", x)) return("FetchNGS")
+  if (grepl("sarek|whole.?genome|wgs", x)) return("Sarek WGS")
   if (grepl("single.?cell|scrna", x)) return("scRNA-seq")
   if (grepl("cut.?run|cutandrun", x)) return("CUT&RUN")
   if (grepl("atac", x)) return("ATAC-seq")
@@ -1303,6 +1390,7 @@ analysis_label <- function(x) {
 analysis_key <- function(x) {
   x <- tolower(as.character(x %||% "rna"))
   if (grepl("fetch.?ngs", x)) return("fetchngs")
+  if (grepl("sarek|whole.?genome|wgs", x)) return("sarek")
   if (grepl("single.?cell|scrna", x)) return("scrna")
   if (grepl("cut.?run|cutandrun", x)) return("cutrun")
   if (grepl("atac", x)) return("atac")
@@ -13887,7 +13975,7 @@ ui <- fluidPage(
   div(class = "csl-header",
       div(class = "brand-lockup",
           if (file.exists(LOGO_PATH)) tags$img(src = file.path("codespring_logo", basename(LOGO_PATH))),
-          div(h2("CodeSpringApp"), div(class = "muted", "Developed by James Rouse, Rad Utama and Alex Dobin (Bioinformatics Shared Resource)"))
+          div(h2("CodeSpringApp"), div(class = "muted", "Developed by James Rouse, Rad Utama, Alex Dobin, and Aarushi Gajri (Bioinformatics Shared Resource)"))
       ),
       if (file.exists(LOGO_CSL_PATH)) tags$img(src = file.path("csl_logo", basename(LOGO_CSL_PATH)), style = "max-height:120px;max-width:300px;background:white;border-radius:8px;padding:10px;object-fit:contain;")
   ),
@@ -13897,7 +13985,7 @@ ui <- fluidPage(
       width = 2,
       selectInput("analysis", "Analysis type", choices = analysis_choices(), selected = read_last_analysis(), selectize = FALSE),
       conditionalPanel(
-        "input.analysis != 'FetchNGS'",
+        "input.analysis != 'FetchNGS' && input.analysis != 'Sarek WGS'",
         uiOutput("project_ui"),
         tags$p(class = "muted small-note", "Saved projects are private to the Unix account running this app."),
         uiOutput("new_project_ui"),
@@ -13912,6 +14000,14 @@ ui <- fluidPage(
             div(class = "eyebrow", "Data retrieval"),
             h3("FetchNGS"),
             tags$p(class = "muted small-note", "Fetch public sequencing data."))
+      ),
+      conditionalPanel(
+        "input.analysis == 'Sarek WGS'",
+        tags$hr(),
+        div(class = "project-card",
+            div(class = "eyebrow", "Whole-genome analysis"),
+            h3("Sarek WGS"),
+            tags$p(class = "muted small-note", "Discover inputs and confirm a portable analysis manifest."))
       )
     ),
     mainPanel(
@@ -14049,6 +14145,7 @@ ui <- fluidPage(
                           h4("Selected file preview"),
                           uiOutput("fetchngs_output_file_view"))
                  )),
+        tabPanel("Sarek Manifest", br(), sarek_manifest_ui("sarek_manifest")),
         tabPanel("Samples & Design", br(),
                  conditionalPanel(
                    "input.project_id == '__new__' && input.new_project_analysis == 'scRNA-seq' && input.new_project_mode == 'new' && input.new_scrna_start_mode == 'new'",
@@ -14128,6 +14225,36 @@ ui <- function(request) {
 server <- function(input, output, session) {
   projects <- reactiveVal(discover_projects())
   design_state <- reactiveVal(data.frame())
+  sarek_manifest_server(
+    "sarek_manifest",
+    default_results_root = SAREK_RESULTS_ROOT,
+    default_work_root = SAREK_WORK_ROOT,
+    created_by = CURRENT_USER,
+    samtools = SAREK_SAMTOOLS,
+    max_auto_bam_inspections = SAREK_MAX_AUTO_BAM_INSPECTIONS,
+    submit_handler = function(manifest, nextflow_input) {
+      sarek_submit_run(
+        manifest = manifest,
+        nextflow_input = nextflow_input,
+        launcher = SAREK_LAUNCHER,
+        config = SAREK_CLUSTER_CONFIG,
+        nxf_home = SAREK_NXF_HOME,
+        singularity_cache = SAREK_SINGULARITY_CACHE,
+        queue = SAREK_CONTROLLER_QUEUE,
+        controller_time = SAREK_CONTROLLER_TIME,
+        nextflow_version = SAREK_NEXTFLOW_VERSION
+      )
+    },
+    browse_handler = function(target, mode = "dir", current = "", input_type = "text", append = FALSE) {
+      open_server_browser(
+        target = target,
+        mode = mode,
+        current = current,
+        input_type = input_type,
+        append = append
+      )
+    }
+  )
   # scRNA inputs live in a project-local manifest, separate from the bulk-RNA
   # design state. Keeping it reactive makes the same editable-table workflow
   # available without mutating the source manifest selected at project setup.
@@ -14214,7 +14341,10 @@ server <- function(input, output, session) {
   atac_file_catalog_refresh <- reactiveVal(0L)
   selected_atac_download_path <- reactiveVal("")
   pending_atac_delete_path <- reactiveVal("")
-  path_browser <- reactiveValues(target = "", mode = "dir", path = CURRENT_HOME, selected_file = "", message = "")
+  path_browser <- reactiveValues(
+    target = "", mode = "dir", path = CURRENT_HOME, selected_file = "", message = "",
+    input_type = "text", append = FALSE, prior_value = ""
+  )
   project_selection <- reactiveValues(rna = "", scrna = "", cutrun = "", atac = "", chip = "")
   new_fastq_folders <- reactiveVal(character(0))
   scrna_example_mode <- reactiveVal(FALSE)
@@ -14414,10 +14544,13 @@ server <- function(input, output, session) {
     }
   }
 
-  open_server_browser <- function(target, mode = "dir", current = "") {
+  open_server_browser <- function(target, mode = "dir", current = "", input_type = "text", append = FALSE) {
     original_value <- path.expand(trimws(first_scalar_string(current, "")))
     path_browser$target <- target
     path_browser$mode <- mode
+    path_browser$input_type <- input_type
+    path_browser$append <- isTRUE(append)
+    path_browser$prior_value <- as.character(current %||% "")
     path_browser$path <- normalizePath(browser_start_path(current, mode), winslash = "/", mustWork = FALSE)
     path_browser$selected_file <- if (identical(mode, "file") && file.exists(path.expand(current)) && !dir.exists(path.expand(current))) {
       normalizePath(path.expand(current), winslash = "/", mustWork = FALSE)
@@ -14838,6 +14971,19 @@ server <- function(input, output, session) {
 
   observeEvent(input$browser_use_current, {
     typed_value <- path.expand(trimws(input$browser_manual_path %||% ""))
+    update_browser_target <- function(value) {
+      if (identical(path_browser$input_type, "textarea")) {
+        prior <- trimws(as.character(path_browser$prior_value %||% ""))
+        if (isTRUE(path_browser$append) && nzchar(prior)) {
+          existing <- trimws(unlist(strsplit(prior, "\n", fixed = TRUE), use.names = FALSE))
+          existing <- existing[nzchar(existing)]
+          value <- paste(unique(c(existing, value)), collapse = "\n")
+        }
+        updateTextAreaInput(session, path_browser$target, value = value)
+      } else {
+        updateTextInput(session, path_browser$target, value = value)
+      }
+    }
     if (identical(path_browser$mode, "file")) {
       # A pasted full file path is authoritative even when the user clicks
       # "Use selected file" without first clicking the separate Jump button.
@@ -14855,7 +15001,7 @@ server <- function(input, output, session) {
         return()
       }
       value <- normalizePath(value, winslash = "/", mustWork = FALSE)
-      updateTextInput(session, path_browser$target, value = value)
+      update_browser_target(value)
       removeModal()
       return()
     }
@@ -14867,7 +15013,7 @@ server <- function(input, output, session) {
       path_browser$message <- paste("The app cannot use this folder:", value)
       return()
     }
-    updateTextInput(session, path_browser$target, value = value)
+    update_browser_target(value)
     removeModal()
   })
 
@@ -15477,7 +15623,7 @@ server <- function(input, output, session) {
   })
 
   filtered_projects <- reactive({
-    if (is_fetchngs_analysis(input$analysis %||% "RNA-seq")) return(list())
+    if (is_standalone_analysis(input$analysis %||% "RNA-seq")) return(list())
     p <- projects()
     analysis <- input$analysis
     if (!length(analysis) || is.null(analysis) || !nzchar(analysis)) return(p)
@@ -15485,7 +15631,7 @@ server <- function(input, output, session) {
   })
 
   output$project_ui <- renderUI({
-    if (is_fetchngs_analysis(input$analysis %||% "RNA-seq")) return(NULL)
+    if (is_standalone_analysis(input$analysis %||% "RNA-seq")) return(NULL)
     p <- filtered_projects()
     choices <- project_select_choices(p, input$analysis %||% "RNA-seq")
     key <- analysis_key(input$analysis %||% "RNA-seq")
@@ -15499,7 +15645,7 @@ server <- function(input, output, session) {
   })
 
   output$new_project_ui <- renderUI({
-    if (is_fetchngs_analysis(input$analysis %||% "RNA-seq")) return(NULL)
+    if (is_standalone_analysis(input$analysis %||% "RNA-seq")) return(NULL)
     if (!identical(input$project_id, "__new__")) return(NULL)
     new_analysis_key <- analysis_key(input$new_project_analysis %||% input$analysis %||% "RNA-seq")
     example <- example_dataset_paths(new_analysis_key)
@@ -15793,7 +15939,7 @@ server <- function(input, output, session) {
   })
 
   current_project <- reactive({
-    req(!is_fetchngs_analysis(input$analysis %||% "RNA-seq"))
+    req(!is_standalone_analysis(input$analysis %||% "RNA-seq"))
     selected <- input$project_id
     if (is.null(selected) || !length(selected) || !nzchar(selected) || identical(selected, "__new__")) {
       return(new_project_from_inputs(new_project_input_values()))
@@ -15897,7 +16043,7 @@ server <- function(input, output, session) {
   )
 
   existing_project_selected <- reactive({
-    if (is_fetchngs_analysis(input$analysis %||% "RNA-seq")) return(FALSE)
+    if (is_standalone_analysis(input$analysis %||% "RNA-seq")) return(FALSE)
     selected <- input$project_id
     !is.null(selected) && length(selected) && nzchar(selected) && !identical(selected, "__new__")
   })
@@ -15944,7 +16090,9 @@ server <- function(input, output, session) {
 
   observe({
     fetchngs_mode <- is_fetchngs_analysis(input$analysis %||% "RNA-seq")
+    sarek_mode <- is_sarek_analysis(input$analysis %||% "RNA-seq")
     fetchngs_tabs <- c("FetchNGS", "FetchNGS Outputs")
+    sarek_tabs <- "Sarek Manifest"
     analysis_tabs <- c("Setup", "Samples & Design", "Run Pipeline", "Progress", "Results Explorer", "Logs", "Methods")
     current_tab <- input$web_main_tabs %||% ""
     if (fetchngs_mode) {
@@ -15952,6 +16100,16 @@ server <- function(input, output, session) {
       if (!current_tab %in% fetchngs_tabs) {
         updateTabsetPanel(session, "web_main_tabs", selected = "FetchNGS")
       }
+      lapply(analysis_tabs, function(tab) hideTab("web_main_tabs", tab, session = session))
+      lapply(sarek_tabs, function(tab) hideTab("web_main_tabs", tab, session = session))
+      return(invisible(NULL))
+    }
+    if (sarek_mode) {
+      lapply(sarek_tabs, function(tab) showTab("web_main_tabs", tab, session = session))
+      if (!current_tab %in% sarek_tabs) {
+        updateTabsetPanel(session, "web_main_tabs", selected = "Sarek Manifest")
+      }
+      lapply(fetchngs_tabs, function(tab) hideTab("web_main_tabs", tab, session = session))
       lapply(analysis_tabs, function(tab) hideTab("web_main_tabs", tab, session = session))
       return(invisible(NULL))
     }
@@ -15964,15 +16122,16 @@ server <- function(input, output, session) {
     } else {
       lapply(non_viewer_tabs, function(tab) showTab("web_main_tabs", tab, session = session))
       showTab("web_main_tabs", "Results Explorer", session = session)
-      if (current_tab %in% fetchngs_tabs || !nzchar(current_tab)) {
+      if (current_tab %in% c(fetchngs_tabs, sarek_tabs) || !nzchar(current_tab)) {
         updateTabsetPanel(session, "web_main_tabs", selected = "Setup")
       }
     }
     lapply(fetchngs_tabs, function(tab) hideTab("web_main_tabs", tab, session = session))
+    lapply(sarek_tabs, function(tab) hideTab("web_main_tabs", tab, session = session))
   })
 
   observeEvent(input$project_id, {
-    if (is_fetchngs_analysis(input$analysis %||% "RNA-seq")) return(invisible(NULL))
+    if (is_standalone_analysis(input$analysis %||% "RNA-seq")) return(invisible(NULL))
     selected <- input$project_id %||% "__new__"
     if (!identical(selected, "__new__")) {
       project_selection[[analysis_key(input$analysis %||% "RNA-seq")]] <- selected
@@ -16023,7 +16182,7 @@ server <- function(input, output, session) {
   }, ignoreInit = FALSE)
 
   output$project_card <- renderUI({
-    if (is_fetchngs_analysis(input$analysis %||% "RNA-seq")) return(NULL)
+    if (is_standalone_analysis(input$analysis %||% "RNA-seq")) return(NULL)
     p <- current_project()
     if (!isTRUE(existing_project_selected())) {
       return(div(class = "project-card",
