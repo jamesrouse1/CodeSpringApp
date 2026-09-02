@@ -333,3 +333,631 @@ cutrun_nfcore_write_inputs <- function(
     samples = length(unique(generated$mapping$codespring_sample))
   )
 }
+
+# -------------------------------------------------------------------------
+# nf-core/cutandrun submission bundle
+# -------------------------------------------------------------------------
+
+CUTRUN_NFCORE_NEXTFLOW_VERSION <- "25.10.2"
+CUTRUN_NFCORE_PIPELINE <- "nf-core/cutandrun"
+
+cutrun_nfcore_runtime_defaults <- function() {
+  backend_root <- Sys.getenv(
+    "CSL_CUTRUN_NFCORE_BACKEND_ROOT",
+    unset = "/grid/bsr/data/data/bsr_readable_data/CodeSpringFlow"
+  )
+
+  list(
+    launcher = Sys.getenv(
+      "CSL_CUTRUN_NFCORE_LAUNCHER",
+      unset = file.path(backend_root, "bin", "nextflow-sarek")
+    ),
+    config = Sys.getenv(
+      "CSL_CUTRUN_NFCORE_CONFIG",
+      unset = file.path(backend_root, "conf", "cshl_slurm.config")
+    ),
+    nxf_home = Sys.getenv(
+      "CSL_CUTRUN_NFCORE_NXF_HOME",
+      unset = file.path(
+        backend_root,
+        "runtime",
+        "nextflow",
+        "cutandrun"
+      )
+    ),
+    singularity_cache = Sys.getenv(
+      "CSL_CUTRUN_NFCORE_SINGULARITY_CACHE",
+      unset = file.path(
+        backend_root,
+        "cache",
+        "singularity"
+      )
+    )
+  )
+}
+
+cutrun_nfcore_validate_runtime <- function(runtime) {
+  required <- c(
+    "launcher",
+    "config",
+    "nxf_home",
+    "singularity_cache"
+  )
+
+  missing <- required[
+    !vapply(
+      required,
+      function(name) {
+        value <- runtime[[name]]
+        length(value) &&
+          !is.na(value[[1]]) &&
+          nzchar(trimws(as.character(value[[1]])))
+      },
+      logical(1)
+    )
+  ]
+
+  if (length(missing)) {
+    stop(
+      "CUT&RUN nf-core runtime is missing: ",
+      paste(missing, collapse = ", "),
+      call. = FALSE
+    )
+  }
+
+  runtime <- lapply(runtime, function(value) {
+    trimws(as.character(value[[1]]))
+  })
+
+  if (!grepl("^/", runtime$launcher)) {
+    stop(
+      "CUT&RUN nf-core launcher must use an absolute path.",
+      call. = FALSE
+    )
+  }
+
+  if (!file.exists(runtime$launcher) ||
+      dir.exists(runtime$launcher) ||
+      file.access(runtime$launcher, 1) != 0) {
+    stop(
+      "CUT&RUN nf-core launcher is missing or not executable: ",
+      runtime$launcher,
+      call. = FALSE
+    )
+  }
+
+  if (!grepl("^/", runtime$config) ||
+      !file.exists(runtime$config) ||
+      dir.exists(runtime$config) ||
+      file.access(runtime$config, 4) != 0) {
+    stop(
+      "CUT&RUN nf-core CSHL config is missing or unreadable: ",
+      runtime$config,
+      call. = FALSE
+    )
+  }
+
+  for (field in c("nxf_home", "singularity_cache")) {
+    if (!grepl("^/", runtime[[field]])) {
+      stop(
+        field,
+        " must use an absolute path.",
+        call. = FALSE
+      )
+    }
+
+    if (!dir.create(
+      runtime[[field]],
+      recursive = TRUE,
+      showWarnings = FALSE
+    ) && !dir.exists(runtime[[field]])) {
+      stop(
+        "Could not create CUT&RUN nf-core runtime directory: ",
+        runtime[[field]],
+        call. = FALSE
+      )
+    }
+  }
+
+  runtime
+}
+
+cutrun_nfcore_submission_paths <- function(
+  project,
+  run_id = "nfcore_cutandrun"
+) {
+  if (is.null(project) ||
+      !is.list(project) ||
+      !is_cutrun_project(project)) {
+    stop(
+      "CUT&RUN nf-core submission requires a CUT&RUN project.",
+      call. = FALSE
+    )
+  }
+
+  data_dir <- trimws(as.character(project$data_dir %||% "")[1])
+
+  if (is.na(data_dir) ||
+      !nzchar(data_dir) ||
+      !grepl("^/", data_dir)) {
+    stop(
+      "CUT&RUN project data_dir must be an absolute path.",
+      call. = FALSE
+    )
+  }
+
+  if (!dir.exists(data_dir)) {
+    stop(
+      "CUT&RUN project data directory does not exist: ",
+      data_dir,
+      call. = FALSE
+    )
+  }
+
+  run_id <- trimws(as.character(run_id %||% "")[1])
+  run_id <- gsub("[^A-Za-z0-9._-]+", "_", run_id)
+  run_id <- gsub("^_+|_+$", "", run_id)
+
+  if (!nzchar(run_id)) {
+    stop(
+      "CUT&RUN nf-core run ID cannot be empty.",
+      call. = FALSE
+    )
+  }
+
+  run_dir <- normalizePath(
+    file.path(data_dir, run_id),
+    winslash = "/",
+    mustWork = FALSE
+  )
+
+  internal_dir <- file.path(run_dir, ".codespring")
+
+  list(
+    run_id = run_id,
+    run_dir = run_dir,
+    output_dir = file.path(run_dir, "results"),
+    internal_dir = internal_dir,
+    log_dir = file.path(internal_dir, "logs"),
+    work_dir = file.path(internal_dir, "work"),
+    samplesheet_path = file.path(
+      internal_dir,
+      "samplesheet.csv"
+    ),
+    mapping_path = file.path(
+      internal_dir,
+      "sample_mapping.tsv"
+    ),
+    params_path = file.path(
+      internal_dir,
+      "params.json"
+    ),
+    run_config = file.path(
+      internal_dir,
+      "nextflow.config"
+    ),
+    launch_script = file.path(
+      internal_dir,
+      "launch.sh"
+    ),
+    nextflow_log = file.path(
+      internal_dir,
+      "logs",
+      "nextflow.log"
+    ),
+    trace_path = file.path(
+      internal_dir,
+      "logs",
+      "trace.tsv"
+    )
+  )
+}
+
+cutrun_nfcore_reference_params <- function(project) {
+  ref <- cutrun_reference_resources(project)
+  species <- genome_species(project)
+
+  if (!species %in% c("human", "mouse")) {
+    stop(
+      "nf-core CUT&RUN currently supports the configured ",
+      "CodeSpring human or mouse reference only.",
+      call. = FALSE
+    )
+  }
+
+  bowtie2_prefix <- normalizePath(
+    ref$bowtie2_index,
+    winslash = "/",
+    mustWork = FALSE
+  )
+
+  bowtie2_dir <- dirname(bowtie2_prefix)
+  reference_root <- dirname(bowtie2_dir)
+
+  fasta <- if (identical(species, "human")) {
+    file.path(
+      reference_root,
+      "GRCh38.primary_assembly.genome.fa"
+    )
+  } else {
+    file.path(
+      reference_root,
+      "GRCm39.primary_assembly.genome.fa"
+    )
+  }
+
+  gtf <- trimws(as.character(ref$gtf %||% "")[1])
+
+  required_files <- c(
+    fasta = fasta,
+    gtf = gtf
+  )
+
+  missing_files <- required_files[
+    !file.exists(required_files)
+  ]
+
+  if (length(missing_files)) {
+    stop(
+      "CUT&RUN nf-core reference files are missing: ",
+      paste(missing_files, collapse = ", "),
+      call. = FALSE
+    )
+  }
+
+  if (!dir.exists(bowtie2_dir)) {
+    stop(
+      "CUT&RUN Bowtie2 index directory is missing: ",
+      bowtie2_dir,
+      call. = FALSE
+    )
+  }
+
+  index_files <- Sys.glob(
+    paste0(bowtie2_prefix, "*.bt2")
+  )
+
+  if (length(index_files) < 6L) {
+    index_files <- Sys.glob(
+      paste0(bowtie2_prefix, "*.bt2l")
+    )
+  }
+
+  if (length(index_files) < 6L) {
+    stop(
+      "A complete Bowtie2 index was not found for: ",
+      bowtie2_prefix,
+      call. = FALSE
+    )
+  }
+
+  list(
+    fasta = normalizePath(
+      fasta,
+      winslash = "/",
+      mustWork = TRUE
+    ),
+    gtf = normalizePath(
+      gtf,
+      winslash = "/",
+      mustWork = TRUE
+    ),
+    bowtie2 = normalizePath(
+      bowtie2_dir,
+      winslash = "/",
+      mustWork = TRUE
+    ),
+    igenomes_ignore = TRUE
+  )
+}
+
+cutrun_nfcore_params <- function(
+  project,
+  paths,
+  generated,
+  normalisation_mode = "CPM",
+  include_macs2 = FALSE,
+  macs2_narrow_peak = TRUE,
+  seacr_stringent = "stringent"
+) {
+  normalisation_mode <- match.arg(
+    normalisation_mode,
+    c("CPM", "RPKM", "BPM", "None", "Spikein")
+  )
+
+  if (identical(normalisation_mode, "Spikein")) {
+    stop(
+      "Spike-in normalisation is not wired into the ",
+      "CodeSpring nf-core CUT&RUN backend yet. ",
+      "Use CPM for the initial integration.",
+      call. = FALSE
+    )
+  }
+
+  seacr_stringent <- match.arg(
+    seacr_stringent,
+    c("stringent", "relaxed")
+  )
+
+  if (!is.data.frame(generated$samplesheet) ||
+      !NROW(generated$samplesheet)) {
+    stop(
+      "A generated nf-core CUT&RUN samplesheet is required.",
+      call. = FALSE
+    )
+  }
+
+  has_controls <- any(
+    nzchar(
+      trimws(
+        as.character(
+          generated$samplesheet$control %||% ""
+        )
+      )
+    )
+  )
+
+  reference <- cutrun_nfcore_reference_params(project)
+
+  params <- c(
+    list(
+      input = paths$samplesheet_path,
+      outdir = paths$output_dir
+    ),
+    reference,
+    list(
+      normalisation_mode = normalisation_mode,
+      peakcaller = if (isTRUE(include_macs2)) {
+        "seacr,macs2"
+      } else {
+        "seacr"
+      },
+      use_control = has_controls,
+      minimum_alignment_q_score = 20L,
+      seacr_norm = "non",
+      seacr_stringent = seacr_stringent,
+      consensus_peak_mode = "group",
+      replicate_threshold = 1L
+    )
+  )
+
+  if (isTRUE(include_macs2)) {
+    params$macs_gsize <- if (
+      identical(genome_species(project), "human")
+    ) {
+      2.7e9
+    } else {
+      1.87e9
+    }
+
+    params$macs2_narrow_peak <- isTRUE(
+      macs2_narrow_peak
+    )
+  }
+
+  params
+}
+
+cutrun_nfcore_nextflow_config <- function(
+  runtime,
+  time_limit_hours = 48L
+) {
+  time_limit_hours <- suppressWarnings(
+    as.integer(time_limit_hours)[1]
+  )
+
+  if (is.na(time_limit_hours) ||
+      time_limit_hours < 1L ||
+      time_limit_hours > 48L) {
+    stop(
+      "CUT&RUN nf-core process time limit must be ",
+      "between 1 and 48 hours.",
+      call. = FALSE
+    )
+  }
+
+  c(
+    paste(
+      "includeConfig",
+      shQuote(runtime$config)
+    ),
+    "",
+    "process {",
+    paste0(
+      "  resourceLimits = [ time: ",
+      time_limit_hours,
+      ".h ]"
+    ),
+    "}"
+  )
+}
+
+cutrun_nfcore_launch_script <- function(
+  paths,
+  runtime,
+  pipeline_version = CUTRUN_NFCORE_VERSION,
+  nextflow_version = CUTRUN_NFCORE_NEXTFLOW_VERSION
+) {
+  command <- c(
+    shQuote(runtime$launcher),
+    "-log",
+    shQuote(paths$nextflow_log),
+    "-c",
+    shQuote(paths$run_config),
+    "run",
+    shQuote(CUTRUN_NFCORE_PIPELINE),
+    "-ansi-log",
+    "false",
+    "-r",
+    shQuote(pipeline_version),
+    "-profile",
+    "singularity",
+    "-params-file",
+    shQuote(paths$params_path),
+    "-work-dir",
+    shQuote(paths$work_dir),
+    "-with-trace",
+    shQuote(paths$trace_path)
+  )
+
+  c(
+    "#!/usr/bin/env bash",
+    "set -euo pipefail",
+    "",
+    paste0(
+      "export NXF_HOME=",
+      shQuote(runtime$nxf_home)
+    ),
+    paste0(
+      "export NXF_SINGULARITY_CACHEDIR=",
+      shQuote(runtime$singularity_cache)
+    ),
+    paste0(
+      "export NXF_VER=",
+      shQuote(nextflow_version)
+    ),
+    "",
+    paste(
+      "mkdir -p",
+      shQuote(paths$output_dir),
+      shQuote(paths$log_dir),
+      shQuote(paths$work_dir)
+    ),
+    paste(
+      "cd",
+      shQuote(paths$run_dir)
+    ),
+    "",
+    paste(command, collapse = " ")
+  )
+}
+
+cutrun_nfcore_build_bundle <- function(
+  project,
+  run_id = "nfcore_cutandrun",
+  runtime = cutrun_nfcore_runtime_defaults(),
+  normalisation_mode = "CPM",
+  include_macs2 = FALSE,
+  macs2_narrow_peak = TRUE,
+  seacr_stringent = "stringent",
+  time_limit_hours = 48L
+) {
+  if (!is_cutrun_project(project)) {
+    stop(
+      "nf-core CUT&RUN bundle generation requires ",
+      "a CUT&RUN project.",
+      call. = FALSE
+    )
+  }
+
+  if (!requireNamespace(
+    "jsonlite",
+    quietly = TRUE
+  )) {
+    stop(
+      "The jsonlite R package is required to prepare ",
+      "an nf-core CUT&RUN run.",
+      call. = FALSE
+    )
+  }
+
+  runtime <- cutrun_nfcore_validate_runtime(runtime)
+  paths <- cutrun_nfcore_submission_paths(
+    project,
+    run_id = run_id
+  )
+
+  if (file.exists(paths$run_dir)) {
+    stop(
+      "CUT&RUN nf-core run already exists: ",
+      paths$run_dir,
+      call. = FALSE
+    )
+  }
+
+  for (directory in c(
+    paths$internal_dir,
+    paths$log_dir,
+    paths$output_dir,
+    paths$work_dir
+  )) {
+    if (!dir.create(
+      directory,
+      recursive = TRUE,
+      showWarnings = FALSE
+    ) && !dir.exists(directory)) {
+      stop(
+        "Could not create CUT&RUN nf-core directory: ",
+        directory,
+        call. = FALSE
+      )
+    }
+  }
+
+  generated <- cutrun_nfcore_samplesheet(project)
+
+  write.csv(
+    generated$samplesheet,
+    paths$samplesheet_path,
+    row.names = FALSE,
+    quote = FALSE,
+    na = ""
+  )
+
+  write.table(
+    generated$mapping,
+    paths$mapping_path,
+    sep = "\t",
+    quote = FALSE,
+    row.names = FALSE,
+    na = ""
+  )
+
+  params <- cutrun_nfcore_params(
+    project = project,
+    paths = paths,
+    generated = generated,
+    normalisation_mode = normalisation_mode,
+    include_macs2 = include_macs2,
+    macs2_narrow_peak = macs2_narrow_peak,
+    seacr_stringent = seacr_stringent
+  )
+
+  jsonlite::write_json(
+    params,
+    paths$params_path,
+    auto_unbox = TRUE,
+    pretty = TRUE,
+    null = "null"
+  )
+
+  writeLines(
+    cutrun_nfcore_nextflow_config(
+      runtime,
+      time_limit_hours = time_limit_hours
+    ),
+    paths$run_config,
+    useBytes = TRUE
+  )
+
+  writeLines(
+    cutrun_nfcore_launch_script(
+      paths,
+      runtime
+    ),
+    paths$launch_script,
+    useBytes = TRUE
+  )
+
+  Sys.chmod(
+    paths$launch_script,
+    mode = "0700"
+  )
+
+  list(
+    paths = paths,
+    params = params,
+    generated = generated,
+    runtime = runtime
+  )
+}
