@@ -366,11 +366,11 @@ launch_text <- paste(
 
 assert(
   grepl(
-    "NXF_VER='25.10.2'",
+    "NXF_VER='24.04.4'",
     launch_text,
     fixed = TRUE
   ),
-  "Launch script does not pin Nextflow 25.10.2."
+  "Launch script does not pin Nextflow 24.04.4."
 )
 
 assert(

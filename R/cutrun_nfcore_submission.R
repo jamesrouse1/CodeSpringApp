@@ -338,7 +338,7 @@ cutrun_nfcore_write_inputs <- function(
 # nf-core/cutandrun submission bundle
 # -------------------------------------------------------------------------
 
-CUTRUN_NFCORE_NEXTFLOW_VERSION <- "25.10.2"
+CUTRUN_NFCORE_NEXTFLOW_VERSION <- "24.04.4"
 CUTRUN_NFCORE_PIPELINE <- "nf-core/cutandrun"
 
 cutrun_nfcore_runtime_defaults <- function() {
