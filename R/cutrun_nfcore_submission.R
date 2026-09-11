@@ -961,3 +961,595 @@ cutrun_nfcore_build_bundle <- function(
     runtime = runtime
   )
 }
+
+# -------------------------------------------------------------------------
+# Detached nf-core/cutandrun lifecycle
+#
+# Reuses the detached Nextflow controller/status machinery already proven
+# for Sarek. The nf-core bundle itself remains CUT&RUN-specific.
+# -------------------------------------------------------------------------
+
+cutrun_nfcore_controller_paths <- function(
+  project,
+  run_id = "nfcore_cutandrun"
+) {
+  paths <- cutrun_nfcore_submission_paths(project, run_id)
+
+  project_key <- as.character(
+    project$id %||%
+      project$name %||%
+      run_id
+  )[[1]]
+
+  project_key <- gsub(
+    "[^A-Za-z0-9_.-]+",
+    "_",
+    project_key
+  )
+
+  project_key <- sub("^_+", "", project_key)
+  project_key <- sub("_+$", "", project_key)
+
+  if (!nzchar(project_key)) {
+    project_key <- run_id
+  }
+
+  # Keep the Slurm comment reasonably short.
+  project_key <- substr(project_key, 1L, 80L)
+
+  paths$manifest_id <- project_key
+
+  paths$stdout <- file.path(
+    paths$log_dir,
+    "controller.out"
+  )
+
+  paths$stderr <- file.path(
+    paths$log_dir,
+    "controller.err"
+  )
+
+  paths$submission_record <- file.path(
+    paths$internal_dir,
+    "submission.tsv"
+  )
+
+  paths$runtime_status <- file.path(
+    paths$internal_dir,
+    "runtime_status.tsv"
+  )
+
+  paths$active_children <- file.path(
+    paths$internal_dir,
+    "active_children.tsv"
+  )
+
+  paths$controller_info <- file.path(
+    paths$internal_dir,
+    "controller.tsv"
+  )
+
+  paths$child_tag <- paste0(
+    "codespring_cutrun_",
+    project_key
+  )
+
+  paths
+}
+
+
+cutrun_nfcore_prepare_controller_bundle <- function(
+  project,
+  run_id = "nfcore_cutandrun",
+  runtime = cutrun_nfcore_runtime_defaults(),
+  normalisation_mode = "CPM",
+  include_macs2 = FALSE,
+  macs2_narrow_peak = TRUE,
+  seacr_stringent = "stringent",
+  time_limit_hours = 48L
+) {
+  runtime <- cutrun_nfcore_validate_runtime(runtime)
+
+  bundle <- cutrun_nfcore_build_bundle(
+    project = project,
+    run_id = run_id,
+    runtime = runtime,
+    normalisation_mode = normalisation_mode,
+    include_macs2 = include_macs2,
+    macs2_narrow_peak = macs2_narrow_peak,
+    seacr_stringent = seacr_stringent,
+    time_limit_hours = time_limit_hours
+  )
+
+  paths <- cutrun_nfcore_controller_paths(
+    project,
+    run_id
+  )
+
+  # Every nf-core/cutandrun process must execute through Slurm.
+  # The lightweight Nextflow controller itself remains detached on the
+  # application host, matching the established Sarek lifecycle.
+  #
+  # bam01 currently cannot resolve this Unix account correctly inside
+  # Singularity. Allow an environment override, but keep bam01 as the
+  # temporary CSHL safety default until the node is repaired.
+  excluded_nodes <- trimws(
+    Sys.getenv(
+      "CSL_SLURM_EXCLUDE_NODES",
+      unset = "bam01"
+    )
+  )
+
+  child_cluster_options <- paste0(
+    "--comment=",
+    paths$child_tag
+  )
+
+  if (nzchar(excluded_nodes)) {
+    child_cluster_options <- paste(
+      child_cluster_options,
+      paste0(
+        "--exclude=",
+        excluded_nodes
+      )
+    )
+  }
+
+  config_lines <- c(
+    paste0(
+      "includeConfig '",
+      runtime$config,
+      "'"
+    ),
+    "",
+    "process {",
+    "  executor = 'slurm'",
+    paste0(
+      "  clusterOptions = '",
+      child_cluster_options,
+      "'"
+    ),
+    paste0(
+      "  resourceLimits = [ time: ",
+      as.integer(time_limit_hours),
+      ".h ]"
+    ),
+    "}"
+  )
+
+  writeLines(
+    config_lines,
+    paths$run_config
+  )
+
+  # Use the already-proven detached-controller wrapper. It provides:
+  # - controller PID tracking
+  # - runtime_status.tsv
+  # - active_children.tsv
+  # - initial vs -resume operation
+  launch_lines <- sarek_submission_launch_script(
+    paths = paths,
+    runtime = runtime,
+    pipeline = CUTRUN_NFCORE_PIPELINE,
+    pipeline_version = CUTRUN_NFCORE_VERSION,
+    nextflow_version = CUTRUN_NFCORE_NEXTFLOW_VERSION
+  )
+
+  writeLines(
+    launch_lines,
+    paths$launch_script
+  )
+
+  Sys.chmod(
+    paths$launch_script,
+    mode = "0700"
+  )
+
+  bundle$paths <- paths
+  bundle
+}
+
+
+cutrun_nfcore_submit_run <- function(
+  project,
+  run_id = "nfcore_cutandrun",
+  runtime = cutrun_nfcore_runtime_defaults(),
+  normalisation_mode = "CPM",
+  include_macs2 = FALSE,
+  macs2_narrow_peak = TRUE,
+  seacr_stringent = "stringent",
+  time_limit_hours = 48L,
+  starter = NULL
+) {
+  if (!is_nfcore_cutrun_project(project)) {
+    stop(
+      "nf-core CUT&RUN submission requires an nf-core CUT&RUN project."
+    )
+  }
+
+  if (!isTRUE(project$paired_end)) {
+    stop(
+      "nf-core/cutandrun 3.2.2 supports paired-end CUT&RUN data only."
+    )
+  }
+
+  bundle <- cutrun_nfcore_prepare_controller_bundle(
+    project = project,
+    run_id = run_id,
+    runtime = runtime,
+    normalisation_mode = normalisation_mode,
+    include_macs2 = include_macs2,
+    macs2_narrow_peak = macs2_narrow_peak,
+    seacr_stringent = seacr_stringent,
+    time_limit_hours = time_limit_hours
+  )
+
+  paths <- bundle$paths
+
+  controller <- sarek_start_detached_controller(
+    paths = paths,
+    mode = "initial",
+    starter = starter
+  )
+
+  submitted_at <- format(
+    Sys.time(),
+    "%Y-%m-%dT%H:%M:%SZ",
+    tz = "UTC"
+  )
+
+  sarek_submission_write_values(
+    paths$submission_record,
+    c(
+      status = "submitted",
+      controller_pid = controller$pid,
+      controller_host = controller$host,
+      controller_mode = "detached",
+      attempt = "1",
+      mode = "initial",
+      child_tag = paths$child_tag,
+      submitted_at = submitted_at,
+      run_dir = paths$run_dir,
+      output_dir = paths$output_dir,
+      work_dir = paths$work_dir,
+      pipeline = CUTRUN_NFCORE_PIPELINE,
+      pipeline_version = CUTRUN_NFCORE_VERSION,
+      nextflow_version = CUTRUN_NFCORE_NEXTFLOW_VERSION
+    )
+  )
+
+  list(
+    status = "submitted",
+    controller_pid = controller$pid,
+    controller_host = controller$host,
+    child_tag = paths$child_tag,
+    run_dir = paths$run_dir,
+    output_dir = paths$output_dir,
+    work_dir = paths$work_dir
+  )
+}
+
+
+cutrun_nfcore_run_status <- function(
+  project,
+  run_id = "nfcore_cutandrun",
+  runner = NULL,
+  squeue = "squeue",
+  sacct = "sacct"
+) {
+  paths <- cutrun_nfcore_controller_paths(
+    project,
+    run_id
+  )
+
+  # A run has not actually started until CodeSpring has written its
+  # submission record. The project/run directory existing by itself is
+  # not evidence of a submitted Nextflow run.
+  has_submission <- (
+    file.exists(paths$submission_record) &&
+    !dir.exists(paths$submission_record)
+  )
+
+  if (!has_submission) {
+    return(list(
+      state = "NOT_STARTED",
+      has_submission = FALSE,
+      controller_pid = "",
+      controller_alive = FALSE,
+      active_children = 0L,
+      child_jobs = data.frame(),
+      run_dir = paths$run_dir,
+      output_dir = paths$output_dir
+    ))
+  }
+
+  values <- sarek_read_key_value_file(
+    paths$submission_record
+  )
+
+  run <- list(
+    status = sarek_text(
+      values["status"],
+      "submitted"
+    ),
+    run_dir = paths$run_dir,
+    output_dir = paths$output_dir,
+    work_dir = paths$work_dir,
+    runtime_status = paths$runtime_status,
+    controller_pid = sarek_text(
+      values["controller_pid"]
+    ),
+    controller_host = sarek_text(
+      values["controller_host"]
+    ),
+    child_tag = sarek_text(
+      values["child_tag"],
+      paths$child_tag
+    )
+  )
+
+  status <- sarek_run_status(
+    run,
+    runner = runner,
+    squeue = squeue,
+    sacct = sacct
+  )
+
+  status$has_submission <- TRUE
+  status$run_dir <- paths$run_dir
+  status$output_dir <- paths$output_dir
+
+  active_children <- suppressWarnings(
+    as.integer(status$active_children %||% 0L)
+  )
+
+  if (
+    is.na(active_children) ||
+    active_children < 0L
+  ) {
+    active_children <- 0L
+  }
+
+  status$active_children <- active_children
+
+  # Never report a CUT&RUN run as terminal while its detached
+  # controller or tagged Slurm children are still alive.
+  if (
+    isTRUE(status$controller_alive) ||
+    active_children > 0L
+  ) {
+    status$state <- "RUNNING"
+    status$source <- "live"
+  }
+
+  status
+}
+
+cutrun_nfcore_archive_trace <- function(paths) {
+  trace_path <- paths$trace_path %||%
+    file.path(
+      paths$run_dir,
+      ".codespring",
+      "logs",
+      "trace.tsv"
+    )
+
+  if (
+    !nzchar(trace_path) ||
+    !file.exists(trace_path) ||
+    dir.exists(trace_path)
+  ) {
+    return("")
+  }
+
+  stamp <- format(
+    Sys.time(),
+    "%Y%m%d_%H%M%S"
+  )
+
+  archive_path <- file.path(
+    dirname(trace_path),
+    paste0(
+      "trace.before_resume_",
+      stamp,
+      ".tsv"
+    )
+  )
+
+  counter <- 1L
+
+  while (file.exists(archive_path)) {
+    archive_path <- file.path(
+      dirname(trace_path),
+      paste0(
+        "trace.before_resume_",
+        stamp,
+        "_",
+        counter,
+        ".tsv"
+      )
+    )
+
+    counter <- counter + 1L
+  }
+
+  if (!file.rename(
+    trace_path,
+    archive_path
+  )) {
+    stop(
+      "Could not archive the existing Nextflow trace before resume: ",
+      trace_path
+    )
+  }
+
+  archive_path
+}
+
+
+cutrun_nfcore_resume_run <- function(
+  project,
+  run_id = "nfcore_cutandrun",
+  runtime = cutrun_nfcore_runtime_defaults(),
+  starter = NULL
+) {
+  runtime <- cutrun_nfcore_validate_runtime(
+    runtime
+  )
+
+  paths <- cutrun_nfcore_controller_paths(
+    project,
+    run_id
+  )
+
+  if (!dir.exists(paths$run_dir)) {
+    stop(
+      "No nf-core CUT&RUN run exists to resume."
+    )
+  }
+
+  required <- c(
+    paths$launch_script,
+    paths$params_path,
+    paths$run_config,
+    paths$work_dir
+  )
+
+  missing <- required[
+    !file.exists(required) &
+      !dir.exists(required)
+  ]
+
+  if (length(missing)) {
+    stop(
+      "Cannot resume nf-core CUT&RUN because required run state is missing: ",
+      paste(missing, collapse = ", ")
+    )
+  }
+
+  launch_lines <- readLines(
+    paths$launch_script,
+    warn = FALSE
+  )
+
+  if (
+    !any(
+      grepl(
+        "CSL_SAREK_RESUME",
+        launch_lines,
+        fixed = TRUE
+      )
+    )
+  ) {
+    stop(
+      "This CUT&RUN run was created before detached resume support was added."
+    )
+  }
+
+  current <- cutrun_nfcore_run_status(
+    project,
+    run_id
+  )
+
+  active_children <- suppressWarnings(
+    as.integer(current$active_children %||% 0L)
+  )
+
+  if (
+    is.na(active_children) ||
+    active_children < 0L
+  ) {
+    active_children <- 0L
+  }
+
+  if (
+    isTRUE(current$controller_alive) ||
+    active_children > 0L ||
+    current$state %in% c(
+      "RUNNING",
+      "PENDING",
+      "CONFIGURING",
+      "COMPLETING"
+    )
+  ) {
+    stop(
+      "Cannot resume nf-core CUT&RUN while the controller or tagged Slurm tasks are still active."
+    )
+  }
+
+  # Nextflow refuses to overwrite an existing -with-trace file.
+  # Preserve the previous attempt before starting -resume.
+  cutrun_nfcore_archive_trace(paths)
+
+  values <- sarek_read_key_value_file(
+    paths$submission_record
+  )
+
+  recorded_tag <- sarek_text(
+    values["child_tag"]
+  )
+
+  if (nzchar(recorded_tag)) {
+    paths$child_tag <- recorded_tag
+  }
+
+  controller <- sarek_start_detached_controller(
+    paths = paths,
+    mode = "resume",
+    starter = starter
+  )
+
+  previous_attempt <- suppressWarnings(
+    as.integer(
+      sarek_text(
+        values["attempt"],
+        "1"
+      )
+    )
+  )
+
+  if (
+    is.na(previous_attempt) ||
+    previous_attempt < 1L
+  ) {
+    previous_attempt <- 1L
+  }
+
+  submitted_at <- format(
+    Sys.time(),
+    "%Y-%m-%dT%H:%M:%SZ",
+    tz = "UTC"
+  )
+
+  sarek_submission_write_values(
+    paths$submission_record,
+    c(
+      status = "submitted",
+      controller_pid = controller$pid,
+      controller_host = controller$host,
+      controller_mode = "detached",
+      attempt = as.character(
+        previous_attempt + 1L
+      ),
+      mode = "resume",
+      child_tag = paths$child_tag,
+      submitted_at = submitted_at,
+      run_dir = paths$run_dir,
+      output_dir = paths$output_dir,
+      work_dir = paths$work_dir,
+      pipeline = CUTRUN_NFCORE_PIPELINE,
+      pipeline_version = CUTRUN_NFCORE_VERSION,
+      nextflow_version = CUTRUN_NFCORE_NEXTFLOW_VERSION
+    )
+  )
+
+  list(
+    status = "submitted",
+    controller_pid = controller$pid,
+    controller_host = controller$host,
+    child_tag = paths$child_tag,
+    run_dir = paths$run_dir,
+    output_dir = paths$output_dir,
+    work_dir = paths$work_dir
+  )
+}
