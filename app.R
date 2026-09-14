@@ -351,23 +351,54 @@ JOBS_PATH <- file.path(APP_HOME, "jobs.tsv")
 LAST_PROJECT_PATH <- file.path(APP_HOME, "last_project_id.txt")
 LAST_ANALYSIS_PATH <- file.path(APP_HOME, "last_analysis.txt")
 PROJECT_CONFIG_ROOT <- file.path(APP_HOME, "project_configs")
-DEFAULT_RESULTS_ROOT <- normalizePath(file.path(CURRENT_HOME, "csl_results"), winslash = "/", mustWork = FALSE)
+CODESPRING_UNIX_USER <- trimws(
+  Sys.getenv(
+    "USER",
+    unset = Sys.info()[["user"]] %||% ""
+  )
+)
+
+PERSONAL_RESULTS_ROOT <- if (
+  identical(
+    CODESPRING_UNIX_USER,
+    "gajri"
+  )
+) {
+  "/grid/bsr/data/data/gajri/csl_results"
+} else {
+  file.path(
+    CURRENT_HOME,
+    "csl_results"
+  )
+}
+
+DEFAULT_RESULTS_ROOT <- normalizePath(
+  Sys.getenv(
+    "CSL_RESULTS_ROOT",
+    unset = PERSONAL_RESULTS_ROOT
+  ),
+  winslash = "/",
+  mustWork = FALSE
+)
 APP_ROOT <- normalizePath(Sys.getenv("CSL_WEB_APP_ROOT", unset = getwd()), winslash = "/", mustWork = FALSE)
 SAREK_MANIFEST_HELPERS <- file.path(APP_ROOT, "R", "sarek_manifest.R")
 SAREK_BAM_INSPECTOR_HELPERS <- file.path(APP_ROOT, "R", "sarek_bam_inspector.R")
 SAREK_NEXTFLOW_INPUT_HELPERS <- file.path(APP_ROOT, "R", "sarek_nextflow_input.R")
 SAREK_SUBMISSION_HELPERS <- file.path(APP_ROOT, "R", "sarek_submission.R")
 SAREK_MANIFEST_SHINY <- file.path(APP_ROOT, "R", "sarek_manifest_shiny.R")
+CUTRUN_NFCORE_HELPERS <- file.path(APP_ROOT, "R", "cutrun_nfcore_submission.R")
 if (!file.exists(SAREK_MANIFEST_HELPERS)) stop("Sarek manifest helpers are missing: ", SAREK_MANIFEST_HELPERS)
 if (!file.exists(SAREK_BAM_INSPECTOR_HELPERS)) stop("Sarek BAM inspector helpers are missing: ", SAREK_BAM_INSPECTOR_HELPERS)
 if (!file.exists(SAREK_NEXTFLOW_INPUT_HELPERS)) stop("Sarek Nextflow input helpers are missing: ", SAREK_NEXTFLOW_INPUT_HELPERS)
 if (!file.exists(SAREK_SUBMISSION_HELPERS)) stop("Sarek submission helpers are missing: ", SAREK_SUBMISSION_HELPERS)
 if (!file.exists(SAREK_MANIFEST_SHINY)) stop("Sarek Shiny module is missing: ", SAREK_MANIFEST_SHINY)
+if (!file.exists(CUTRUN_NFCORE_HELPERS)) stop("CUT&RUN nf-core helpers are missing: ", CUTRUN_NFCORE_HELPERS)
 source(SAREK_MANIFEST_HELPERS, local = FALSE)
 source(SAREK_BAM_INSPECTOR_HELPERS, local = FALSE)
 source(SAREK_NEXTFLOW_INPUT_HELPERS, local = FALSE)
 source(SAREK_SUBMISSION_HELPERS, local = FALSE)
 source(SAREK_MANIFEST_SHINY, local = FALSE)
+source(CUTRUN_NFCORE_HELPERS, local = TRUE)
 SAREK_USER_STORAGE_ROOT <- normalizePath(
   Sys.getenv(
     "CSL_USER_STORAGE_ROOT",
@@ -1426,6 +1457,28 @@ is_cutrun_project <- function(project) {
   identical(analysis_key(project$analysis_key %||% project$analysis), "cutrun")
 }
 
+normalize_cutrun_backend <- function(x, default = "native") {
+  allowed <- c("native", "nfcore")
+  default <- tolower(trimws(as.character(default %||% "native")))[1]
+  if (is.na(default) || !default %in% allowed) default <- "native"
+
+  value <- tolower(trimws(as.character(x %||% "")))[1]
+  if (is.na(value) || !value %in% allowed) default else value
+}
+
+cutrun_backend <- function(project) {
+  if (is.null(project) || !is_cutrun_project(project)) return("")
+  normalize_cutrun_backend(project$cutrun_backend, default = "native")
+}
+
+is_native_cutrun_project <- function(project) {
+  identical(cutrun_backend(project), "native")
+}
+
+is_nfcore_cutrun_project <- function(project) {
+  identical(cutrun_backend(project), "nfcore")
+}
+
 is_atac_project <- function(project) {
   identical(analysis_key(project$analysis_key %||% project$analysis), "atac")
 }
@@ -1554,6 +1607,7 @@ legacy_project_from_config <- function(path) {
     label = project_name,
     analysis = analysis_label(key),
     analysis_key = key,
+    cutrun_backend = if (identical(key, "cutrun")) normalize_cutrun_backend(vals$cutrun_backend, default = "native") else "",
     genome = tolower(vals$genome %||% "mouse"),
     genome_version = vals$genome_version %||% vals$reference_genome %||% "",
     paired_end = !(pairing %in% c("n", "no", "false", "single", "se")),
@@ -1683,6 +1737,27 @@ new_project_from_inputs <- function(input) {
   }
   fastq_dir <- if (length(fastq_dirs)) fastq_dirs[[1]] else ""
   paired <- !tolower(input$new_paired_end %||% "paired") %in% c("single", "se", "n", "no", "false")
+
+  cutrun_backend_value <- if (identical(key, "cutrun")) {
+    normalize_cutrun_backend(
+      input$new_cutrun_backend,
+      default = "nfcore"
+    )
+  } else {
+    ""
+  }
+
+  if (
+    identical(key, "cutrun") &&
+    !existing_results &&
+    identical(cutrun_backend_value, "nfcore") &&
+    !isTRUE(paired)
+  ) {
+    stop(
+      "nf-core/cutandrun requires paired-end reads. ",
+      "Choose Paired-end or use the CodeSpring native backend."
+    )
+  }
   scrna_fastq_start <- identical(key, "scrna") &&
     identical(tolower(trimws(input$new_scrna_start_mode %||% "new")), "new") &&
     identical(tolower(trimws(input$new_scrna_folder_type %||% "filtered_10x_matrix")), "fastq_folder")
@@ -1692,6 +1767,7 @@ new_project_from_inputs <- function(input) {
     label = label,
     analysis = analysis_label(key),
     analysis_key = key,
+    cutrun_backend = cutrun_backend_value,
     genome = if (identical(key, "scrna") && !scrna_fastq_start) "auto" else tolower(input$new_species %||% "mouse"),
     genome_version = if (identical(key, "scrna") && !scrna_fastq_start) "" else input$new_genome_version %||% "",
     paired_end = paired,
@@ -1853,6 +1929,7 @@ write_project_config <- function(project) {
   cfg_path <- file.path(cfg_dir, paste0(clean_name(project$name, "project"), ".py"))
   lines <- c(
     sprintf("analysis_type = %s", deparse(project$analysis_key)),
+    if (is_cutrun_project(project)) sprintf("cutrun_backend = %s", deparse(cutrun_backend(project))) else NULL,
     sprintf("project_name = %s", deparse(project$name)),
     sprintf("results_directory = %s", deparse(with_slash(project$results_root))),
     sprintf("visualizer_data_dir = %s", deparse(project$data_dir)),
@@ -2195,48 +2272,1274 @@ scan_fastq_dirs <- function(folders, paired = TRUE, metadata_cols = "treatment",
 }
 
 infer_cutrun_metadata <- function(df) {
-  if (!NROW(df) || !"sample" %in% names(df)) return(df)
-  for (col in c("cell_type", "mark", "target_class", "seacr_stringency", "condition", "replicate", "control_sample")) {
-    if (!col %in% names(df)) df[[col]] <- ""
+  if (!NROW(df) || !"sample" %in% names(df)) {
+    return(df)
   }
+
+  required <- c(
+    "cell_type",
+    "mark",
+    "target_class",
+    "seacr_stringency",
+    "condition",
+    "replicate",
+    "control_sample"
+  )
+
+  for (column in required) {
+    if (!column %in% names(df)) {
+      df[[column]] <- ""
+    }
+  }
+
   for (i in seq_len(NROW(df))) {
-    sample <- trimws(as.character(df$sample[[i]] %||% ""))
-    core <- sub("_S[0-9]+(?:_.*)?$", "", sample, perl = TRUE, ignore.case = TRUE)
-    match <- regmatches(core, regexec("^([^_]+)_([^_-]+)[_-](.+?)([0-9]+)$", core, perl = TRUE))[[1]]
-    if (length(match) == 5L) {
-      inferred <- c(cell_type = match[[2]], mark = match[[3]], condition = match[[4]], replicate = match[[5]])
-    } else {
-      control_match <- regmatches(core, regexec("^([^_]+)_(IgG|input|control)[_-](.+)$", core, perl = TRUE, ignore.case = TRUE))[[1]]
-      if (length(control_match) != 4L) next
-      inferred <- c(cell_type = control_match[[2]], mark = control_match[[3]], condition = control_match[[4]])
-    }
-    for (field in names(inferred)) {
-      if (!nzchar(trimws(as.character(df[[field]][[i]] %||% "")))) df[[field]][[i]] <- inferred[[field]]
-    }
-  }
-  control_rows <- grepl("igg|input|control", tolower(as.character(df$mark)))
-  inferred_class <- vapply(as.character(df$mark), function(mark) {
-    value <- tolower(trimws(mark))
-    if (grepl("igg|input|control", value)) return("control")
-    if (grepl("h3k27me3|h3k9me3|h3k36me3|h4k20me3", value)) return("histone_broad")
-    if (grepl("^(h[1-4]|histone)", value)) return("histone_narrow")
-    "tf_or_other"
-  }, character(1))
-  blank_class <- !nzchar(trimws(as.character(df$target_class)))
-  df$target_class[blank_class] <- inferred_class[blank_class]
-  blank_stringency <- !nzchar(trimws(as.character(df$seacr_stringency)))
-  df$seacr_stringency[blank_stringency] <- "auto"
-  for (i in which(!control_rows)) {
-    if (nzchar(trimws(as.character(df$control_sample[[i]] %||% "")))) next
-    exact <- which(
-      control_rows &
-        trimws(as.character(df$cell_type)) == trimws(as.character(df$cell_type[[i]])) &
-        trimws(as.character(df$condition)) == trimws(as.character(df$condition[[i]]))
+    sample <- trimws(
+      as.character(df$sample[[i]] %||% "")
     )
-    if (length(exact) == 1L) df$control_sample[[i]] <- as.character(df$sample[[exact]])
+
+    # Illumina sample-number suffixes are sequencing metadata,
+    # not biological replicate numbers.
+    core <- sub(
+      "_S[0-9]+(?:_.*)?$",
+      "",
+      sample,
+      perl = TRUE,
+      ignore.case = TRUE
+    )
+
+    tokens <- unlist(
+      strsplit(core, "_", fixed = TRUE),
+      use.names = FALSE
+    )
+
+    tokens <- trimws(tokens)
+    tokens <- tokens[nzchar(tokens)]
+
+    # Only infer an explicit biological replicate token.
+    # Never interpret the '3' in H3K4me3 as replicate 3.
+    if (!nzchar(trimws(df$replicate[[i]] %||% ""))) {
+      rep_hits <- grep(
+        "^(?:rep|replicate)[_-]?[0-9]+$",
+        tokens,
+        ignore.case = TRUE,
+        perl = TRUE,
+        value = TRUE
+      )
+
+      if (length(rep_hits) == 1L) {
+        df$replicate[[i]] <- sub(
+          "^(?:rep|replicate)[_-]?",
+          "",
+          rep_hits[[1]],
+          ignore.case = TRUE,
+          perl = TRUE
+        )
+      }
+    }
+
+    # Marks can often be recognized without guessing experimental
+    # factors such as cell type or condition.
+    if (!nzchar(trimws(df$mark[[i]] %||% ""))) {
+      mark_hits <- tokens[
+        grepl(
+          "^(igg|input|control|h[1-4][a-z0-9]*|p?creb)$",
+          tokens,
+          ignore.case = TRUE,
+          perl = TRUE
+        )
+      ]
+
+      if (length(mark_hits) == 1L) {
+        df$mark[[i]] <- mark_hits[[1]]
+      }
+    }
   }
+
+  # Infer target class only when an actual mark is known.
+  for (i in seq_len(NROW(df))) {
+    if (nzchar(trimws(df$target_class[[i]] %||% ""))) {
+      next
+    }
+
+    mark <- tolower(
+      trimws(df$mark[[i]] %||% "")
+    )
+
+    if (!nzchar(mark)) {
+      next
+    }
+
+    df$target_class[[i]] <- if (
+      grepl("^(igg|input|control)$", mark)
+    ) {
+      "control"
+    } else if (
+      grepl(
+        "h3k27me3|h3k9me3|h3k36me3|h4k20me3",
+        mark
+      )
+    ) {
+      "histone_broad"
+    } else if (
+      grepl("^h[1-4]", mark)
+    ) {
+      "histone_narrow"
+    } else {
+      "tf_or_other"
+    }
+  }
+
+  blank_stringency <- !nzchar(
+    trimws(df$seacr_stringency)
+  )
+
+  df$seacr_stringency[
+    blank_stringency
+  ] <- "auto"
+
+  # Deliberately DO NOT infer cell_type or condition.
+  # Those meanings are experiment-specific.
+
   df
 }
+
+
+cutrun_design_required_metadata <- function() {
+  c(
+    "cell_type",
+    "mark",
+    "target_class",
+    "seacr_stringency",
+    "condition",
+    "replicate",
+    "control_sample"
+  )
+}
+
+
+cutrun_design_prepare <- function(
+  df,
+  infer_missing = FALSE
+) {
+  if (is.null(df)) {
+    df <- data.frame()
+  }
+
+  metadata <- unique(c(
+    cutrun_design_required_metadata(),
+    setdiff(
+      names(df),
+      c(
+        "include",
+        "sample",
+        "filename",
+        "status"
+      )
+    )
+  ))
+
+  df <- ensure_design_metadata_columns(
+    df,
+    metadata
+  )
+
+  if (!NROW(df)) {
+    return(df)
+  }
+
+  df$include <- vapply(
+    df$include,
+    as_design_bool,
+    logical(1)
+  )
+
+  for (column in setdiff(
+    names(df),
+    "include"
+  )) {
+    df[[column]] <- as.character(
+      df[[column]]
+    )
+  }
+
+  if (isTRUE(infer_missing)) {
+    df <- infer_cutrun_metadata(df)
+  }
+
+  df$target_class <- tolower(
+    trimws(df$target_class)
+  )
+
+  df$seacr_stringency <- tolower(
+    trimws(df$seacr_stringency)
+  )
+
+  df$replicate <- trimws(
+    df$replicate
+  )
+
+  df[
+    ,
+    design_matrix_columns(df),
+    drop = FALSE
+  ]
+}
+
+
+cutrun_auto_match_controls <- function(df) {
+  df <- cutrun_design_prepare(
+    df,
+    infer_missing = TRUE
+  )
+
+  if (!NROW(df)) {
+    return(df)
+  }
+
+  is_control <- (
+    df$include &
+    tolower(trimws(df$target_class)) == "control"
+  )
+
+  df$control_sample[is_control] <- ""
+
+  targets <- which(
+    df$include &
+    !is_control
+  )
+
+  for (i in targets) {
+    if (nzchar(trimws(df$control_sample[[i]]))) {
+      next
+    }
+
+    cell_type <- trimws(df$cell_type[[i]])
+    condition <- trimws(df$condition[[i]])
+    replicate <- trimws(df$replicate[[i]])
+
+    candidates <- which(is_control)
+
+    # Prefer same cell type when cell_type is being used.
+    if (nzchar(cell_type)) {
+      candidates <- candidates[
+        trimws(df$cell_type[candidates]) == cell_type
+      ]
+    }
+
+    if (!length(candidates)) {
+      next
+    }
+
+    # Prefer a condition-specific control if such a control exists.
+    # Shared IgG controls normally have blank condition, so they remain
+    # candidates when no condition-specific control exists.
+    if (nzchar(condition)) {
+      same_condition <- candidates[
+        nzchar(trimws(df$condition[candidates])) &
+        trimws(df$condition[candidates]) == condition
+      ]
+
+      if (length(same_condition)) {
+        candidates <- same_condition
+      }
+    }
+
+    # Biological replicate is the main discriminator for shared IgGs.
+    if (nzchar(replicate)) {
+      same_replicate <- candidates[
+        trimws(df$replicate[candidates]) == replicate
+      ]
+
+      if (length(same_replicate)) {
+        candidates <- same_replicate
+      }
+    }
+
+    if (length(candidates) == 1L) {
+      df$control_sample[[i]] <- df$sample[[candidates]]
+    }
+  }
+
+  df
+}
+
+
+cutrun_design_validation <- function(
+  df,
+  control_mode = c("matched", "none")
+) {
+  control_mode <- match.arg(control_mode)
+
+  df <- cutrun_design_prepare(
+    df,
+    infer_missing = FALSE
+  )
+
+  issues <- data.frame(
+    severity = character(),
+    sample = character(),
+    field = character(),
+    message = character(),
+    stringsAsFactors = FALSE,
+    check.names = FALSE
+  )
+
+  add_issue <- function(
+    severity,
+    sample = "",
+    field = "",
+    message
+  ) {
+    issues <<- rbind(
+      issues,
+      data.frame(
+        severity = severity,
+        sample = sample,
+        field = field,
+        message = message,
+        stringsAsFactors = FALSE,
+        check.names = FALSE
+      )
+    )
+  }
+
+  if (!NROW(df)) {
+    add_issue(
+      "error",
+      message = "No CUT&RUN samples are present."
+    )
+
+    return(list(
+      data = df,
+      issues = issues,
+      summary = list(
+        total = 0L,
+        included = 0L,
+        targets = 0L,
+        controls = 0L,
+        errors = 1L,
+        warnings = 0L
+      )
+    ))
+  }
+
+  included <- which(df$include)
+
+  if (!length(included)) {
+    add_issue(
+      "error",
+      message = "No samples are included."
+    )
+  }
+
+  work <- df[included, , drop = FALSE]
+
+  samples <- trimws(work$sample)
+
+  for (i in which(!nzchar(samples))) {
+    add_issue(
+      "error",
+      "",
+      "sample",
+      "Included rows must have a sample name."
+    )
+  }
+
+  duplicated_samples <- unique(
+    samples[
+      nzchar(samples) &
+      duplicated(samples)
+    ]
+  )
+
+  for (sample in duplicated_samples) {
+    add_issue(
+      "error",
+      sample,
+      "sample",
+      "Sample names must be unique."
+    )
+  }
+
+  valid_classes <- c(
+    "control",
+    "tf_or_other",
+    "histone_narrow",
+    "histone_broad"
+  )
+
+  valid_stringency <- c(
+    "auto",
+    "stringent",
+    "relaxed"
+  )
+
+  for (i in seq_len(NROW(work))) {
+    sample <- trimws(work$sample[[i]])
+    filename <- trimws(work$filename[[i]])
+    cell_type <- trimws(work$cell_type[[i]])
+    mark <- trimws(work$mark[[i]])
+    condition <- trimws(work$condition[[i]])
+    replicate <- trimws(work$replicate[[i]])
+
+    target_class <- tolower(
+      trimws(work$target_class[[i]])
+    )
+
+    stringency <- tolower(
+      trimws(work$seacr_stringency[[i]])
+    )
+
+    control <- trimws(
+      work$control_sample[[i]]
+    )
+
+    is_control_row <- identical(
+      target_class,
+      "control"
+    )
+
+    if (!nzchar(filename)) {
+      add_issue(
+        "error",
+        sample,
+        "filename",
+        "No FASTQ assignment is present."
+      )
+    }
+
+    # cell_type is optional.
+
+    if (!nzchar(mark)) {
+      add_issue(
+        "error",
+        sample,
+        "mark",
+        "Mark/target is required."
+      )
+    }
+
+    # Biological condition is required for targets, but shared IgG/input
+    # assay controls do not need a condition.
+    if (
+      !is_control_row &&
+      !nzchar(condition)
+    ) {
+      add_issue(
+        "error",
+        sample,
+        "condition",
+        "Condition is required."
+      )
+    }
+
+    if (
+      !nzchar(target_class) ||
+      !target_class %in% valid_classes
+    ) {
+      add_issue(
+        "error",
+        sample,
+        "target_class",
+        paste(
+          "Target class must be one of:",
+          paste(valid_classes, collapse = ", ")
+        )
+      )
+    }
+
+    if (
+      nzchar(stringency) &&
+      !stringency %in% valid_stringency
+    ) {
+      add_issue(
+        "error",
+        sample,
+        "seacr_stringency",
+        paste(
+          "SEACR stringency must be one of:",
+          paste(valid_stringency, collapse = ", ")
+        )
+      )
+    }
+
+    rep_number <- suppressWarnings(
+      as.integer(replicate)
+    )
+
+    if (
+      !nzchar(replicate) ||
+      !grepl("^[0-9]+$", replicate) ||
+      is.na(rep_number) ||
+      rep_number < 1L
+    ) {
+      add_issue(
+        "error",
+        sample,
+        "replicate",
+        "Replicate must be a positive integer."
+      )
+    }
+
+    if (is_control_row) {
+      if (nzchar(control)) {
+        add_issue(
+          "error",
+          sample,
+          "control_sample",
+          "An assay-control row cannot itself reference another control."
+        )
+      }
+
+      next
+    }
+
+    # If this experiment has no matched assay-control libraries, do not
+    # validate control_sample at all.
+    if (identical(control_mode, "none")) {
+      next
+    }
+
+    core_ready <- (
+      nzchar(mark) &&
+      nzchar(condition) &&
+      nzchar(replicate) &&
+      target_class %in% valid_classes
+    )
+
+    if (!core_ready) {
+      next
+    }
+
+    if (!nzchar(control)) {
+      candidates <- which(
+        tolower(trimws(work$target_class)) == "control"
+      )
+
+      if (nzchar(cell_type)) {
+        candidates <- candidates[
+          trimws(work$cell_type[candidates]) == cell_type
+        ]
+      }
+
+      # Prefer condition-specific controls only when they exist.
+      if (
+        length(candidates) &&
+        nzchar(condition)
+      ) {
+        same_condition <- candidates[
+          nzchar(trimws(work$condition[candidates])) &
+          trimws(work$condition[candidates]) == condition
+        ]
+
+        if (length(same_condition)) {
+          candidates <- same_condition
+        }
+      }
+
+      # Shared IgG controls are commonly replicate-specific.
+      if (
+        length(candidates) &&
+        nzchar(replicate)
+      ) {
+        same_replicate <- candidates[
+          trimws(work$replicate[candidates]) == replicate
+        ]
+
+        if (length(same_replicate)) {
+          candidates <- same_replicate
+        }
+      }
+
+      message <- if (length(candidates) > 1L) {
+        paste0(
+          "No control is selected and ",
+          length(candidates),
+          " possible assay controls remain after matching."
+        )
+      } else if (length(candidates) == 1L) {
+        paste0(
+          "A unique matching assay control exists (",
+          work$sample[[candidates]],
+          ") but has not been assigned."
+        )
+      } else {
+        "No matching assay control is available for this target."
+      }
+
+      add_issue(
+        "error",
+        sample,
+        "control_sample",
+        message
+      )
+
+      next
+    }
+
+    control_index <- match(
+      control,
+      work$sample
+    )
+
+    if (is.na(control_index)) {
+      add_issue(
+        "error",
+        sample,
+        "control_sample",
+        paste0(
+          "Control sample '",
+          control,
+          "' is not an included sample."
+        )
+      )
+
+      next
+    }
+
+    if (
+      tolower(
+        trimws(
+          work$target_class[[control_index]]
+        )
+      ) != "control"
+    ) {
+      add_issue(
+        "error",
+        sample,
+        "control_sample",
+        paste0(
+          "'",
+          control,
+          "' exists but is not marked as an assay control."
+        )
+      )
+    }
+
+    if (
+      nzchar(cell_type) &&
+      nzchar(trimws(work$cell_type[[control_index]])) &&
+      cell_type != trimws(work$cell_type[[control_index]])
+    ) {
+      add_issue(
+        "warning",
+        sample,
+        "control_sample",
+        "Target and assay control have different cell types."
+      )
+    }
+
+    # A blank condition on IgG is intentional: it means shared control.
+    control_condition <- trimws(
+      work$condition[[control_index]]
+    )
+
+    if (
+      nzchar(condition) &&
+      nzchar(control_condition) &&
+      condition != control_condition
+    ) {
+      add_issue(
+        "warning",
+        sample,
+        "control_sample",
+        "Target and assay control have different biological conditions."
+      )
+    }
+  }
+
+  target_rows <- work[
+    tolower(trimws(work$target_class)) != "control",
+    ,
+    drop = FALSE
+  ]
+
+  control_rows <- work[
+    tolower(trimws(work$target_class)) == "control",
+    ,
+    drop = FALSE
+  ]
+
+  complete_targets <- target_rows[
+    nzchar(trimws(target_rows$mark)) &
+    nzchar(trimws(target_rows$condition)) &
+    nzchar(trimws(target_rows$replicate)),
+    ,
+    drop = FALSE
+  ]
+
+  if (NROW(complete_targets)) {
+    group_key <- paste(
+      ifelse(
+        nzchar(trimws(complete_targets$cell_type)),
+        trimws(complete_targets$cell_type),
+        "all samples"
+      ),
+      trimws(complete_targets$mark),
+      trimws(complete_targets$condition),
+      sep = " | "
+    )
+
+    group_counts <- table(group_key)
+
+    low_rep <- names(
+      group_counts[
+        group_counts < 2L
+      ]
+    )
+
+    for (group in low_rep) {
+      add_issue(
+        "warning",
+        "",
+        "replicate",
+        paste0(
+          "DiffBind readiness: ",
+          group,
+          " has only ",
+          unname(group_counts[[group]]),
+          " target replicate."
+        )
+      )
+    }
+  }
+
+  list(
+    data = df,
+    issues = issues,
+    summary = list(
+      total = NROW(df),
+      included = length(included),
+      targets = NROW(target_rows),
+      controls = NROW(control_rows),
+      errors = sum(issues$severity == "error"),
+      warnings = sum(issues$severity == "warning")
+    )
+  )
+}
+
+
+cutrun_sample_name_tokens <- function(
+  samples,
+  separator = "_",
+  drop_illumina_suffix = TRUE
+) {
+  samples <- as.character(samples %||% character(0))
+
+  if (!length(samples)) {
+    return(list(
+      samples = character(0),
+      tokens = list(),
+      max_tokens = 0L
+    ))
+  }
+
+  cores <- trimws(samples)
+
+  if (isTRUE(drop_illumina_suffix)) {
+    cores <- sub(
+      "_S[0-9]+(?:_.*)?$",
+      "",
+      cores,
+      perl = TRUE,
+      ignore.case = TRUE
+    )
+  }
+
+  tokens <- lapply(
+    cores,
+    function(x) {
+      out <- unlist(
+        strsplit(
+          x,
+          separator,
+          fixed = TRUE
+        ),
+        use.names = FALSE
+      )
+
+      trimws(out)
+    }
+  )
+
+  list(
+    samples = samples,
+    cores = cores,
+    tokens = tokens,
+    max_tokens = if (length(tokens)) {
+      max(lengths(tokens))
+    } else {
+      0L
+    }
+  )
+}
+
+
+cutrun_name_mapping_destinations <- function(df) {
+  extra <- setdiff(
+    names(df),
+    c(
+      "include",
+      "sample",
+      "filename",
+      "status",
+      "target_class",
+      "seacr_stringency",
+      "control_sample"
+    )
+  )
+
+  core <- c(
+    "Ignore" = "__ignore__",
+    "Cell type" = "cell_type",
+    "Condition" = "condition",
+    "Mark / target" = "mark",
+    "Replicate" = "replicate"
+  )
+
+  extra <- setdiff(
+    extra,
+    unname(core)
+  )
+
+  if (length(extra)) {
+    extras <- stats::setNames(
+      extra,
+      paste0(
+        "Extra metadata: ",
+        gsub("_", " ", extra)
+      )
+    )
+
+    c(core, extras)
+  } else {
+    core
+  }
+}
+
+
+cutrun_apply_sample_name_mapping <- function(
+  df,
+  destinations,
+  separator = "_",
+  drop_illumina_suffix = TRUE,
+  split_first_trailing_replicate = TRUE,
+  overwrite = FALSE
+) {
+  df <- cutrun_design_prepare(df)
+
+  if (!NROW(df)) {
+    return(df)
+  }
+
+  parsed <- cutrun_sample_name_tokens(
+    df$sample,
+    separator = separator,
+    drop_illumina_suffix = drop_illumina_suffix
+  )
+
+  destinations <- as.character(
+    destinations %||% character(0)
+  )
+
+  set_value <- function(
+    row,
+    column,
+    value
+  ) {
+    if (
+      !nzchar(column) ||
+      identical(column, "__ignore__") ||
+      !nzchar(value)
+    ) {
+      return()
+    }
+
+    if (!column %in% names(df)) {
+      df[[column]] <<- rep("", NROW(df))
+    }
+
+    current <- trimws(
+      as.character(
+        df[[column]][[row]] %||% ""
+      )
+    )
+
+    if (
+      isTRUE(overwrite) ||
+      !nzchar(current)
+    ) {
+      df[[column]][[row]] <<- value
+    }
+  }
+
+  for (i in seq_len(NROW(df))) {
+    tokens <- parsed$tokens[[i]]
+
+    if (!length(tokens)) {
+      next
+    }
+
+    first_token <- tolower(
+      trimws(tokens[[1]])
+    )
+
+    assay_control_name <- first_token %in% c(
+      "igg",
+      "input",
+      "control"
+    )
+
+    # --------------------------------------------
+    # Assay controls get explicit handling.
+    #
+    # IgG_IR_1_S25 becomes:
+    #   mark       IgG
+    #   cell_type  IR
+    #   condition  blank
+    #   replicate  1
+    # --------------------------------------------
+
+    if (assay_control_name) {
+      df$mark[[i]] <- tokens[[1]]
+      df$target_class[[i]] <- "control"
+      df$condition[[i]] <- ""
+      df$control_sample[[i]] <- ""
+
+      if (length(tokens) >= 2L) {
+        # Respect the user's token-2 mapping if it maps to cell_type
+        # or another metadata field.
+        if (length(destinations) >= 2L) {
+          set_value(
+            i,
+            destinations[[2]],
+            trimws(tokens[[2]])
+          )
+        }
+      }
+
+      numeric_tokens <- tokens[
+        grepl(
+          "^[0-9]+$",
+          tokens
+        )
+      ]
+
+      if (length(numeric_tokens) == 1L) {
+        df$replicate[[i]] <- numeric_tokens[[1]]
+      }
+
+      next
+    }
+
+    # --------------------------------------------
+    # Ordinary biological samples.
+    # --------------------------------------------
+
+    for (j in seq_along(tokens)) {
+      if (j > length(destinations)) {
+        next
+      }
+
+      destination <- destinations[[j]]
+      value <- trimws(tokens[[j]])
+
+      if (
+        j == 1L &&
+        isTRUE(split_first_trailing_replicate)
+      ) {
+        hit <- regmatches(
+          value,
+          regexec(
+            "^(.*?)([0-9]+)$",
+            value,
+            perl = TRUE
+          )
+        )[[1]]
+
+        if (
+          length(hit) == 3L &&
+          nzchar(trimws(hit[[2]]))
+        ) {
+          value <- trimws(hit[[2]])
+
+          set_value(
+            i,
+            "replicate",
+            hit[[3]]
+          )
+        }
+      }
+
+      set_value(
+        i,
+        destination,
+        value
+      )
+    }
+  }
+
+  infer_cutrun_metadata(df)
+}
+
+
+cutrun_design_has_assay_controls <- function(df) {
+  df <- cutrun_design_prepare(df)
+
+  if (!NROW(df)) {
+    return(FALSE)
+  }
+
+  any(
+    df$include &
+    tolower(
+      trimws(
+        df$target_class
+      )
+    ) == "control"
+  )
+}
+
+
+cutrun_default_control_mode <- function(df) {
+  if (cutrun_design_has_assay_controls(df)) {
+    "matched"
+  } else {
+    "none"
+  }
+}
+
+
+cutrun_import_design_table <- function(path) {
+  if (
+    !nzchar(path %||% "") ||
+    !file.exists(path)
+  ) {
+    stop("Imported design file is missing.")
+  }
+
+  extension <- tolower(
+    tools::file_ext(path)
+  )
+
+  if (!extension %in% c(
+    "csv",
+    "tsv",
+    "txt"
+  )) {
+    stop(
+      "CUT&RUN design import supports CSV, TSV, and TXT files."
+    )
+  }
+
+  df <- if (identical(extension, "csv")) {
+    utils::read.csv(
+      path,
+      stringsAsFactors = FALSE,
+      check.names = FALSE
+    )
+  } else {
+    utils::read.delim(
+      path,
+      stringsAsFactors = FALSE,
+      check.names = FALSE
+    )
+  }
+
+  if (!NROW(df)) {
+    stop(
+      "Imported CUT&RUN design contains no rows."
+    )
+  }
+
+  clean_column <- function(x) {
+    x <- tolower(trimws(x))
+    x <- gsub("[^a-z0-9]+", "_", x)
+    gsub("^_+|_+$", "", x)
+  }
+
+  names(df) <- make.unique(
+    vapply(
+      names(df),
+      clean_column,
+      character(1)
+    ),
+    sep = "_"
+  )
+
+  if (
+    !"sample" %in% names(df) &&
+    "sample_id" %in% names(df)
+  ) {
+    names(df)[
+      names(df) == "sample_id"
+    ] <- "sample"
+  }
+
+  if (!"filename" %in% names(df)) {
+    if ("fastq_1" %in% names(df)) {
+      fastq_1 <- as.character(df$fastq_1)
+
+      fastq_2 <- if (
+        "fastq_2" %in% names(df)
+      ) {
+        as.character(df$fastq_2)
+      } else {
+        rep("", NROW(df))
+      }
+
+      df$filename <- ifelse(
+        nzchar(trimws(fastq_2)),
+        paste(
+          fastq_1,
+          fastq_2,
+          sep = ","
+        ),
+        fastq_1
+      )
+    } else {
+      stop(
+        "Imported design must contain filename, or fastq_1/fastq_2 columns."
+      )
+    }
+  }
+
+  if (!"sample" %in% names(df)) {
+    stop(
+      "Imported design must contain sample or sample_id."
+    )
+  }
+
+  if (!"include" %in% names(df)) {
+    df$include <- TRUE
+  }
+
+  if (!"status" %in% names(df)) {
+    df$status <- "imported"
+  }
+
+  cutrun_design_prepare(
+    df,
+    infer_missing = TRUE
+  )
+}
+
+
+cutrun_design_builder_ui <- function(
+  df,
+  project
+) {
+  div(
+    class = "cutrun-design-builder",
+
+    tags$style(
+      HTML("
+        .cutrun-design-builder {
+          padding: 4px 0 18px 0;
+        }
+
+        .cutrun-design-summary {
+          display: grid;
+          grid-template-columns: repeat(6, minmax(110px, 1fr));
+          gap: 10px;
+          margin: 12px 0 18px 0;
+        }
+
+        .cutrun-design-metric {
+          border: 1px solid #d8e1ea;
+          border-radius: 9px;
+          padding: 12px 14px;
+          background: #fff;
+        }
+
+        .cutrun-design-metric strong {
+          display: block;
+          font-size: 20px;
+          margin-bottom: 2px;
+        }
+
+        .cutrun-design-table-shell {
+          border: 1px solid #d8e1ea;
+          border-radius: 10px;
+          padding: 16px;
+          background: #fff;
+          margin-bottom: 18px;
+          overflow-x: auto;
+        }
+
+        .cutrun-design-panel {
+          border: 1px solid #d8e1ea;
+          border-radius: 10px;
+          padding: 18px;
+          background: #fff;
+          min-height: 170px;
+          margin-bottom: 16px;
+        }
+
+        .cutrun-design-panel h4 {
+          margin-top: 0;
+        }
+
+        .cutrun-validation-error {
+          color: #a61b1b;
+        }
+
+        .cutrun-validation-warning {
+          color: #8a5a00;
+        }
+
+        @media (max-width: 1000px) {
+          .cutrun-design-summary {
+            grid-template-columns:
+              repeat(3, minmax(110px, 1fr));
+          }
+        }
+      ")
+    ),
+
+    uiOutput(
+      "cutrun_design_summary_ui"
+    ),
+
+    uiOutput(
+      "cutrun_name_mapper_ui"
+    ),
+
+    div(
+      class = "cutrun-design-table-shell",
+
+      tags$h4("Samples"),
+
+      tags$p(
+        class = "muted small-note",
+        "Filename parsing proposes only conservative missing metadata. Review biological fields before running either CUT&RUN backend."
+      ),
+
+      design_matrix_ui(
+        df,
+        project
+      )
+    ),
+
+    fluidRow(
+      column(
+        6,
+        uiOutput(
+          "cutrun_design_validation_ui"
+        )
+      ),
+
+      column(
+        6,
+        uiOutput(
+          "cutrun_bulk_edit_ui"
+        )
+      )
+    )
+  )
+}
+
+
 
 infer_atac_metadata <- function(df) {
   if (!NROW(df) || !"sample" %in% names(df)) return(df)
@@ -4209,6 +5512,87 @@ status_signature <- function(status) {
 }
 
 project_status <- function(project, jobs = NULL, progress = NULL, active_states = NULL) {
+  # Backend-aware nf-core CUT&RUN status.
+  if (
+    !is.null(project) &&
+    is_nfcore_cutrun_project(project)
+  ) {
+    nf_status <- tryCatch(
+      cutrun_nfcore_run_status(
+        project,
+        run_id = "nfcore_cutandrun"
+      ),
+      error = function(e) {
+        list(
+          state = "STATUS_ERROR",
+          has_submission = FALSE,
+          active_children = 0L,
+          error = conditionMessage(e)
+        )
+      }
+    )
+
+    state <- toupper(
+      nf_status$state %||% "NOT_STARTED"
+    )
+
+    display_status <- switch(
+      state,
+      "NOT_STARTED" = "Not started",
+      "SUBMITTED" = "Active",
+      "PENDING" = "Active",
+      "CONFIGURING" = "Active",
+      "RUNNING" = "Active",
+      "COMPLETING" = "Active",
+      "COMPLETED" = "Complete",
+      "CANCELLED" = "Cancelled",
+      "FAILED" = "Partial",
+      "INCOMPLETE" = "Likely failed",
+      "TIMEOUT" = "Likely failed",
+      "OUT_OF_MEMORY" = "Likely failed",
+      "STATUS_ERROR" = "Likely failed",
+      "Not started"
+    )
+
+    active_children <- suppressWarnings(
+      as.integer(nf_status$active_children %||% 0L)
+    )
+
+    if (
+      is.na(active_children) ||
+      active_children < 0L
+    ) {
+      active_children <- 0L
+    }
+
+    detail <- c(
+      paste("Nextflow:", state),
+      if (active_children > 0L) {
+        paste(active_children, "active Slurm task(s)")
+      },
+      if (nzchar(nf_status$error %||% "")) {
+        nf_status$error
+      }
+    )
+
+    return(
+      data.frame(
+        step = "nf-core/cutandrun",
+        status = display_status,
+        input = paste0(
+          "nf-core/cutandrun ",
+          CUTRUN_NFCORE_VERSION
+        ),
+        detail = paste(
+          detail,
+          collapse = " | "
+        ),
+        stringsAsFactors = FALSE,
+        check.names = FALSE
+      )
+    )
+  }
+
   data_dir <- project$data_dir
   design <- project$design_matrix_path
   if (is.null(jobs)) jobs <- job_history(project)
@@ -4546,13 +5930,1400 @@ scrna_stage_step <- function(stage = "inspect") {
   value
 }
 
+
+# -------------------------------------------------------------------------
+# nf-core/cutandrun live progress
+# -------------------------------------------------------------------------
+
+cutrun_nfcore_progress_stage_order <- function() {
+  c(
+    "Input & setup",
+    "Preprocessing",
+    "Alignment",
+    "Deduplication & QC",
+    "Signal preparation",
+    "Peak calling",
+    "Peak QC",
+    "Reports",
+    "Other workflow tasks"
+  )
+}
+
+
+cutrun_nfcore_progress_paths <- function(project) {
+  run_dir <- file.path(
+    project$data_dir,
+    "nfcore_cutandrun"
+  )
+
+  list(
+    run_dir = run_dir,
+    internal_dir = file.path(
+      run_dir,
+      ".codespring"
+    ),
+    log_dir = file.path(
+      run_dir,
+      ".codespring",
+      "logs"
+    ),
+    trace = file.path(
+      run_dir,
+      ".codespring",
+      "logs",
+      "trace.tsv"
+    ),
+    samplesheet = file.path(
+      run_dir,
+      ".codespring",
+      "samplesheet.csv"
+    ),
+    sample_mapping = file.path(
+      run_dir,
+      ".codespring",
+      "sample_mapping.tsv"
+    )
+  )
+}
+
+
+cutrun_nfcore_progress_col <- function(
+  df,
+  candidates
+) {
+  if (!NROW(df) && !length(names(df))) {
+    return("")
+  }
+
+  actual <- names(df)
+  lower <- tolower(actual)
+
+  hit <- match(
+    tolower(candidates),
+    lower,
+    nomatch = 0L
+  )
+
+  hit <- hit[hit > 0L]
+
+  if (!length(hit)) {
+    return("")
+  }
+
+  actual[[hit[[1]]]]
+}
+
+
+cutrun_nfcore_progress_stage <- function(
+  process
+) {
+  x <- toupper(
+    trimws(
+      as.character(
+        process %||% ""
+      )
+    )
+  )
+
+  if (
+    grepl(
+      paste(
+        c(
+          "INPUT_CHECK",
+          "SAMPLESHEET_CHECK",
+          "PREPARE_GENOME",
+          "TARGET_CHROMSIZES",
+          "GETCHROMSIZES",
+          "GTF2BED",
+          "SAMTOOLS_FAIDX",
+          "CUSTOM_GETCHROMSIZES"
+        ),
+        collapse = "|"
+      ),
+      x
+    )
+  ) {
+    return("Input & setup")
+  }
+
+  if (
+    grepl(
+      paste(
+        c(
+          "TRIMGALORE",
+          "TRIM_GALORE",
+          "CUTADAPT",
+          "FASTQC",
+          "PRESEQ"
+        ),
+        collapse = "|"
+      ),
+      x
+    )
+  ) {
+    return("Preprocessing")
+  }
+
+  if (
+    grepl(
+      paste(
+        c(
+          "BOWTIE2",
+          "TARGET_ALIGN",
+          "ALIGN_BOWTIE"
+        ),
+        collapse = "|"
+      ),
+      x
+    )
+  ) {
+    return("Alignment")
+  }
+
+  if (
+    grepl(
+      paste(
+        c(
+          "MARKDUP",
+          "MARK_DUPLICATES",
+          "PICARD",
+          "FLAGSTAT",
+          "IDXSTATS",
+          "SAMTOOLS_STATS",
+          "SAMTOOLS_SORT",
+          "SAMTOOLS_INDEX"
+        ),
+        collapse = "|"
+      ),
+      x
+    )
+  ) {
+    return("Deduplication & QC")
+  }
+
+  if (
+    grepl(
+      paste(
+        c(
+          "BAMCOVERAGE",
+          "BAM_COVERAGE",
+          "BAMTOBED",
+          "BEDGRAPH",
+          "BIGWIG",
+          "DEEPTOOLS",
+          "NORMALIS"
+        ),
+        collapse = "|"
+      ),
+      x
+    )
+  ) {
+    return("Signal preparation")
+  }
+
+  if (
+    grepl(
+      paste(
+        c(
+          "SEACR",
+          "MACS2",
+          "PEAKCALL",
+          "PEAK_CALL"
+        ),
+        collapse = "|"
+      ),
+      x
+    )
+  ) {
+    return("Peak calling")
+  }
+
+  if (
+    grepl(
+      paste(
+        c(
+          "FRIP",
+          "PEAK_QC",
+          "PEAKQC",
+          "CONSENSUS",
+          "REPRODUC",
+          "IDR"
+        ),
+        collapse = "|"
+      ),
+      x
+    )
+  ) {
+    return("Peak QC")
+  }
+
+  if (
+    grepl(
+      paste(
+        c(
+          "MULTIQC",
+          "DUMPSOFTWAREVERSIONS",
+          "SOFTWAREVERSIONS",
+          "REPORT"
+        ),
+        collapse = "|"
+      ),
+      x
+    )
+  ) {
+    return("Reports")
+  }
+
+  "Other workflow tasks"
+}
+
+
+cutrun_nfcore_progress_status_class <- function(
+  status
+) {
+  x <- toupper(
+    trimws(
+      as.character(
+        status %||% ""
+      )
+    )
+  )
+
+  x <- sub(
+    "\\+.*$",
+    "",
+    x
+  )
+
+  if (
+    x %in% c(
+      "COMPLETED",
+      "CACHED"
+    )
+  ) {
+    return("complete")
+  }
+
+  if (
+    x %in% c(
+      "RUNNING",
+      "PENDING",
+      "SUBMITTED",
+      "CONFIGURING",
+      "COMPLETING",
+      "NEW"
+    )
+  ) {
+    return("active")
+  }
+
+  if (
+    x %in% c(
+      "FAILED",
+      "ABORTED",
+      "CANCELLED",
+      "TIMEOUT",
+      "OUT_OF_MEMORY",
+      "NODE_FAIL",
+      "BOOT_FAIL",
+      "PREEMPTED"
+    )
+  ) {
+    return("failed")
+  }
+
+  "waiting"
+}
+
+
+cutrun_nfcore_read_trace <- function(
+  project
+) {
+  path <- cutrun_nfcore_progress_paths(
+    project
+  )$trace
+
+  if (
+    !file.exists(path) ||
+    dir.exists(path)
+  ) {
+    return(
+      data.frame(
+        label = character(),
+        stage = character(),
+        task_status = character(),
+        status_class = character(),
+        stringsAsFactors = FALSE,
+        check.names = FALSE
+      )
+    )
+  }
+
+  trace <- tryCatch(
+    read.delim(
+      path,
+      header = TRUE,
+      sep = "\t",
+      quote = "",
+      comment.char = "",
+      stringsAsFactors = FALSE,
+      check.names = FALSE,
+      fill = TRUE
+    ),
+    error = function(e) data.frame()
+  )
+
+  if (!NROW(trace)) {
+    return(
+      data.frame(
+        label = character(),
+        stage = character(),
+        task_status = character(),
+        status_class = character(),
+        stringsAsFactors = FALSE,
+        check.names = FALSE
+      )
+    )
+  }
+
+  process_col <- cutrun_nfcore_progress_col(
+    trace,
+    c(
+      "process",
+      "name"
+    )
+  )
+
+  status_col <- cutrun_nfcore_progress_col(
+    trace,
+    c(
+      "status",
+      "state"
+    )
+  )
+
+  label_cols <- intersect(
+    c(
+      process_col,
+      cutrun_nfcore_progress_col(
+        trace,
+        c("name")
+      ),
+      cutrun_nfcore_progress_col(
+        trace,
+        c("tag")
+      )
+    ),
+    names(trace)
+  )
+
+  label_cols <- unique(
+    label_cols[
+      nzchar(label_cols)
+    ]
+  )
+
+  labels <- if (length(label_cols)) {
+    apply(
+      trace[
+        ,
+        label_cols,
+        drop = FALSE
+      ],
+      1L,
+      function(x) {
+        paste(
+          x[
+            !is.na(x) &
+              nzchar(
+                trimws(
+                  as.character(x)
+                )
+              )
+          ],
+          collapse = " "
+        )
+      }
+    )
+  } else {
+    rep(
+      "",
+      NROW(trace)
+    )
+  }
+
+  process_values <- if (
+    nzchar(process_col)
+  ) {
+    as.character(
+      trace[[process_col]]
+    )
+  } else {
+    labels
+  }
+
+  task_status <- if (
+    nzchar(status_col)
+  ) {
+    as.character(
+      trace[[status_col]]
+    )
+  } else {
+    rep(
+      "",
+      NROW(trace)
+    )
+  }
+
+  data.frame(
+    label = labels,
+    stage = vapply(
+      process_values,
+      cutrun_nfcore_progress_stage,
+      character(1)
+    ),
+    task_status = task_status,
+    status_class = vapply(
+      task_status,
+      cutrun_nfcore_progress_status_class,
+      character(1)
+    ),
+    stringsAsFactors = FALSE,
+    check.names = FALSE
+  )
+}
+
+
+cutrun_nfcore_active_child_tasks <- function(
+  status
+) {
+  jobs <- status$child_jobs %||%
+    data.frame()
+
+  if (!is.data.frame(jobs) || !NROW(jobs)) {
+    return(
+      data.frame(
+        label = character(),
+        stage = character(),
+        task_status = character(),
+        status_class = character(),
+        stringsAsFactors = FALSE,
+        check.names = FALSE
+      )
+    )
+  }
+
+  name_col <- cutrun_nfcore_progress_col(
+    jobs,
+    c(
+      "job_name",
+      "name",
+      "job",
+      "JobName"
+    )
+  )
+
+  state_col <- cutrun_nfcore_progress_col(
+    jobs,
+    c(
+      "slurm_state",
+      "state",
+      "State"
+    )
+  )
+
+  labels <- if (nzchar(name_col)) {
+    as.character(
+      jobs[[name_col]]
+    )
+  } else {
+    rep(
+      "Active nf-core task",
+      NROW(jobs)
+    )
+  }
+
+  states <- if (nzchar(state_col)) {
+    as.character(
+      jobs[[state_col]]
+    )
+  } else {
+    rep(
+      "RUNNING",
+      NROW(jobs)
+    )
+  }
+
+  classes <- vapply(
+    states,
+    cutrun_nfcore_progress_status_class,
+    character(1)
+  )
+
+  keep <- classes == "active"
+
+  data.frame(
+    label = labels[keep],
+    stage = vapply(
+      labels[keep],
+      cutrun_nfcore_progress_stage,
+      character(1)
+    ),
+    task_status = states[keep],
+    status_class = classes[keep],
+    stringsAsFactors = FALSE,
+    check.names = FALSE
+  )
+}
+
+
+cutrun_nfcore_stage_state <- function(
+  rows
+) {
+  if (!NROW(rows)) {
+    return("Waiting")
+  }
+
+  classes <- as.character(
+    rows$status_class
+  )
+
+  # A failed attempt may remain in trace.tsv while Nextflow retries it.
+  # If anything in this stage is currently active, the stage is still
+  # running. The separate Failed count continues to expose the failure.
+  if (any(classes == "active")) {
+    return("Running")
+  }
+
+  if (any(classes == "failed")) {
+    return("Failed")
+  }
+
+  if (
+    length(classes) &&
+    all(classes == "complete")
+  ) {
+    return("Complete")
+  }
+
+  if (any(classes == "complete")) {
+    return("Partial")
+  }
+
+  "Waiting"
+}
+
+cutrun_nfcore_normalized_key <- function(
+  x
+) {
+  gsub(
+    "[^a-z0-9]+",
+    "",
+    tolower(
+      as.character(
+        x %||% ""
+      )
+    )
+  )
+}
+
+
+cutrun_nfcore_sample_aliases <- function(
+  project
+) {
+  design <- tryCatch(
+    project_design_df(project),
+    error = function(e) data.frame()
+  )
+
+  if (
+    !NROW(design) ||
+    !"sample" %in% names(design)
+  ) {
+    return(list())
+  }
+
+  if ("include" %in% names(design)) {
+    include <- vapply(
+      design$include,
+      as_design_bool,
+      logical(1)
+    )
+
+    design <- design[
+      include,
+      ,
+      drop = FALSE
+    ]
+  }
+
+  samples <- unique(
+    trimws(
+      as.character(
+        design$sample
+      )
+    )
+  )
+
+  samples <- samples[
+    nzchar(samples)
+  ]
+
+  aliases <- setNames(
+    lapply(
+      samples,
+      function(sample) sample
+    ),
+    samples
+  )
+
+  paths <- cutrun_nfcore_progress_paths(
+    project
+  )
+
+  # Use the CodeSpring mapping file when present.
+  if (
+    file.exists(paths$sample_mapping) &&
+    !dir.exists(paths$sample_mapping)
+  ) {
+    mapping <- tryCatch(
+      read.delim(
+        paths$sample_mapping,
+        header = TRUE,
+        sep = "\t",
+        stringsAsFactors = FALSE,
+        check.names = FALSE
+      ),
+      error = function(e) data.frame()
+    )
+
+    if (NROW(mapping)) {
+      original_col <- cutrun_nfcore_progress_col(
+        mapping,
+        c(
+          "sample",
+          "codespring_sample",
+          "sample_id"
+        )
+      )
+
+      alias_cols <- names(mapping)[
+        grepl(
+          "group|nfcore|alias",
+          tolower(
+            names(mapping)
+          )
+        )
+      ]
+
+      if (
+        nzchar(original_col) &&
+        length(alias_cols)
+      ) {
+        for (i in seq_len(NROW(mapping))) {
+          original <- trimws(
+            as.character(
+              mapping[[original_col]][[i]]
+            )
+          )
+
+          if (!original %in% samples) {
+            next
+          }
+
+          extra <- unlist(
+            mapping[
+              i,
+              alias_cols,
+              drop = FALSE
+            ],
+            use.names = FALSE
+          )
+
+          extra <- trimws(
+            as.character(extra)
+          )
+
+          extra <- extra[
+            !is.na(extra) &
+              nzchar(extra)
+          ]
+
+          aliases[[original]] <- unique(
+            c(
+              aliases[[original]],
+              extra
+            )
+          )
+        }
+      }
+    }
+  }
+
+  # Fall back to deriving group aliases from the generated nf-core
+  # samplesheet by matching the original FASTQ names.
+  if (
+    file.exists(paths$samplesheet) &&
+    !dir.exists(paths$samplesheet)
+  ) {
+    sheet <- tryCatch(
+      read.csv(
+        paths$samplesheet,
+        stringsAsFactors = FALSE,
+        check.names = FALSE
+      ),
+      error = function(e) data.frame()
+    )
+
+    if (NROW(sheet)) {
+      group_col <- cutrun_nfcore_progress_col(
+        sheet,
+        c("group")
+      )
+
+      replicate_col <- cutrun_nfcore_progress_col(
+        sheet,
+        c("replicate")
+      )
+
+      fastq_cols <- intersect(
+        c(
+          "fastq_1",
+          "fastq_2"
+        ),
+        names(sheet)
+      )
+
+      if (
+        nzchar(group_col) &&
+        length(fastq_cols)
+      ) {
+        for (i in seq_len(NROW(sheet))) {
+          fastq_text <- paste(
+            unlist(
+              sheet[
+                i,
+                fastq_cols,
+                drop = FALSE
+              ],
+              use.names = FALSE
+            ),
+            collapse = " "
+          )
+
+          fastq_key <- cutrun_nfcore_normalized_key(
+            fastq_text
+          )
+
+          for (sample in samples) {
+            sample_key <- cutrun_nfcore_normalized_key(
+              sample
+            )
+
+            if (
+              !nzchar(sample_key) ||
+              !grepl(
+                sample_key,
+                fastq_key,
+                fixed = TRUE
+              )
+            ) {
+              next
+            }
+
+            group <- trimws(
+              as.character(
+                sheet[[group_col]][[i]]
+              )
+            )
+
+            extras <- group
+
+            if (
+              nzchar(replicate_col) &&
+              nzchar(group)
+            ) {
+              replicate <- trimws(
+                as.character(
+                  sheet[[replicate_col]][[i]]
+                )
+              )
+
+              if (nzchar(replicate)) {
+                extras <- c(
+                  extras,
+                  paste0(
+                    group,
+                    "_",
+                    replicate
+                  )
+                )
+              }
+            }
+
+            aliases[[sample]] <- unique(
+              c(
+                aliases[[sample]],
+                extras[
+                  nzchar(extras)
+                ]
+              )
+            )
+          }
+        }
+      }
+    }
+  }
+
+  aliases
+}
+
+
+cutrun_nfcore_task_sample <- function(
+  label,
+  aliases
+) {
+  if (!length(aliases)) {
+    return("")
+  }
+
+  label_key <- cutrun_nfcore_normalized_key(
+    label
+  )
+
+  if (!nzchar(label_key)) {
+    return("")
+  }
+
+  best_sample <- ""
+  best_length <- 0L
+
+  for (sample in names(aliases)) {
+    candidates <- unique(
+      c(
+        sample,
+        aliases[[sample]]
+      )
+    )
+
+    keys <- unique(
+      vapply(
+        candidates,
+        cutrun_nfcore_normalized_key,
+        character(1)
+      )
+    )
+
+    keys <- keys[
+      nzchar(keys)
+    ]
+
+    for (key in keys) {
+      if (
+        nchar(key) > best_length &&
+        grepl(
+          key,
+          label_key,
+          fixed = TRUE
+        )
+      ) {
+        best_sample <- sample
+        best_length <- nchar(key)
+      }
+    }
+  }
+
+  best_sample
+}
+
+
+cutrun_nfcore_progress_snapshot <- function(
+  project
+) {
+  status <- tryCatch(
+    cutrun_nfcore_run_status(
+      project
+    ),
+    error = function(e) {
+      list(
+        state = "STATUS_ERROR",
+        controller_alive = FALSE,
+        controller_pid = "",
+        active_children = 0L,
+        child_jobs = data.frame(),
+        error = conditionMessage(e)
+      )
+    }
+  )
+
+  trace <- cutrun_nfcore_read_trace(
+    project
+  )
+
+  children <- cutrun_nfcore_active_child_tasks(
+    status
+  )
+
+  tasks <- rbind(
+    trace,
+    children
+  )
+
+  stages <- cutrun_nfcore_progress_stage_order()
+
+  stage_summary <- do.call(
+    rbind,
+    lapply(
+      stages,
+      function(stage) {
+        rows <- tasks[
+          tasks$stage == stage,
+          ,
+          drop = FALSE
+        ]
+
+        completed <- sum(
+          rows$status_class == "complete"
+        )
+
+        active <- sum(
+          rows$status_class == "active"
+        )
+
+        failed <- sum(
+          rows$status_class == "failed"
+        )
+
+        data.frame(
+          stage = stage,
+          status = cutrun_nfcore_stage_state(
+            rows
+          ),
+          completed = completed,
+          active = active,
+          failed = failed,
+          observed = NROW(rows),
+          stringsAsFactors = FALSE,
+          check.names = FALSE
+        )
+      }
+    )
+  )
+
+  current_stage <- ""
+
+  active_stage <- stage_summary$stage[
+    stage_summary$status == "Running"
+  ]
+
+  if (length(active_stage)) {
+    current_stage <- active_stage[[1]]
+  } else {
+    waiting_stage <- stage_summary$stage[
+      stage_summary$status %in%
+        c(
+          "Waiting",
+          "Partial"
+        )
+    ]
+
+    if (length(waiting_stage)) {
+      current_stage <- waiting_stage[[1]]
+    }
+  }
+
+  aliases <- cutrun_nfcore_sample_aliases(
+    project
+  )
+
+  if (NROW(tasks)) {
+    tasks$sample <- vapply(
+      tasks$label,
+      cutrun_nfcore_task_sample,
+      character(1),
+      aliases = aliases
+    )
+  } else {
+    tasks$sample <- character()
+  }
+
+  active_children <- suppressWarnings(
+    as.integer(
+      status$active_children %||% 0L
+    )
+  )
+
+  if (
+    is.na(active_children) ||
+    active_children < 0L
+  ) {
+    active_children <- 0L
+  }
+
+  list(
+    workflow_state = toupper(
+      as.character(
+        status$state %||%
+          "NOT_STARTED"
+      )
+    ),
+    controller_alive = isTRUE(
+      status$controller_alive
+    ),
+    controller_pid = as.character(
+      status$controller_pid %||% ""
+    ),
+    active_children = active_children,
+    current_stage = current_stage,
+    completed_tasks = sum(
+      trace$status_class == "complete"
+    ),
+    failed_tasks = sum(
+      trace$status_class == "failed"
+    ),
+    trace_tasks = NROW(trace),
+    stages = stage_summary,
+    tasks = tasks,
+    aliases = aliases,
+    error = as.character(
+      status$error %||% ""
+    )
+  )
+}
+
+
+cutrun_nfcore_workflow_label <- function(
+  state
+) {
+  switch(
+    toupper(
+      as.character(
+        state %||% ""
+      )
+    ),
+    "NOT_STARTED" = "Not started",
+    "PENDING" = "Starting",
+    "RUNNING" = "Running",
+    "CONFIGURING" = "Starting",
+    "COMPLETING" = "Finishing",
+    "COMPLETED" = "Complete",
+    "FAILED" = "Failed",
+    "CANCELLED" = "Cancelled",
+    "TIMEOUT" = "Timed out",
+    "OUT_OF_MEMORY" = "Failed",
+    "STATUS_ERROR" = "Status error",
+    as.character(
+      state %||% "Unknown"
+    )
+  )
+}
+
+
+cutrun_nfcore_progress_overview_ui <- function(
+  snapshot
+) {
+  stages <- snapshot$stages
+
+  visible_stages <- stages[
+    stages$stage !=
+      "Other workflow tasks" |
+      stages$observed > 0L,
+    ,
+    drop = FALSE
+  ]
+
+  controller_text <- if (
+    isTRUE(snapshot$controller_alive)
+  ) {
+    if (
+      nzchar(
+        snapshot$controller_pid
+      )
+    ) {
+      paste(
+        "Running · PID",
+        snapshot$controller_pid
+      )
+    } else {
+      "Running"
+    }
+  } else {
+    "Not active"
+  }
+
+  current_stage <- if (
+    nzchar(
+      snapshot$current_stage
+    )
+  ) {
+    snapshot$current_stage
+  } else {
+    "—"
+  }
+
+  div(
+    class = "cutrun-nfcore-progress-view",
+
+    div(
+      class = "well well-sm",
+      fluidRow(
+        column(
+          3,
+          tags$strong("Workflow"),
+          tags$div(
+            cutrun_nfcore_workflow_label(
+              snapshot$workflow_state
+            )
+          )
+        ),
+        column(
+          3,
+          tags$strong("Current stage"),
+          tags$div(
+            current_stage
+          )
+        ),
+        column(
+          2,
+          tags$strong("Slurm tasks"),
+          tags$div(
+            snapshot$active_children,
+            " active"
+          )
+        ),
+        column(
+          2,
+          tags$strong("Completed"),
+          tags$div(
+            snapshot$completed_tasks,
+            " tasks"
+          )
+        ),
+        column(
+          2,
+          tags$strong("Failed"),
+          tags$div(
+            snapshot$failed_tasks,
+            " tasks"
+          )
+        )
+      ),
+
+      tags$div(
+        class = "muted small-note",
+        paste(
+          "Nextflow controller:",
+          controller_text
+        )
+      ),
+
+      if (
+        nzchar(
+          snapshot$error
+        )
+      ) {
+        tags$div(
+          class = "text-danger",
+          snapshot$error
+        )
+      } else {
+        NULL
+      }
+    ),
+
+    tags$h4(
+      "Workflow stages"
+    ),
+
+    tags$div(
+      class = "table-responsive",
+      tags$table(
+        class = "table table-condensed table-hover",
+        tags$thead(
+          tags$tr(
+            tags$th("Stage"),
+            tags$th("Status"),
+            tags$th("Completed"),
+            tags$th("Active"),
+            tags$th("Failed")
+          )
+        ),
+        tags$tbody(
+          lapply(
+            seq_len(
+              NROW(
+                visible_stages
+              )
+            ),
+            function(i) {
+              row <- visible_stages[
+                i,
+                ,
+                drop = FALSE
+              ]
+
+              tags$tr(
+                tags$td(
+                  row$stage[[1]]
+                ),
+                tags$td(
+                  row$status[[1]]
+                ),
+                tags$td(
+                  row$completed[[1]]
+                ),
+                tags$td(
+                  row$active[[1]]
+                ),
+                tags$td(
+                  row$failed[[1]]
+                )
+              )
+            }
+          )
+        )
+      )
+    )
+  )
+}
+
+
+cutrun_nfcore_sample_progress_ui <- function(
+  snapshot
+) {
+  samples <- names(
+    snapshot$aliases
+  )
+
+  if (!length(samples)) {
+    return(
+      div(
+        class = "empty-box",
+        "No CUT&RUN samples are available for progress tracking."
+      )
+    )
+  }
+
+  tasks <- snapshot$tasks
+
+  sample_stages <- c(
+    "Preprocessing",
+    "Alignment",
+    "Deduplication & QC",
+    "Signal preparation",
+    "Peak calling"
+  )
+
+  short_labels <- c(
+    "Prep",
+    "Align",
+    "Dedup",
+    "Signal",
+    "Peaks"
+  )
+
+  symbol_for <- function(
+    sample,
+    stage
+  ) {
+    rows <- tasks[
+      tasks$sample == sample &
+        tasks$stage == stage,
+      ,
+      drop = FALSE
+    ]
+
+    state <- cutrun_nfcore_stage_state(
+      rows
+    )
+
+    switch(
+      state,
+      "Complete" = "\u2713",
+      "Running" = "\u25cf",
+      "Failed" = "!",
+      "Partial" = "\u25d0",
+      "\u2014"
+    )
+  }
+
+  div(
+    class = "table-responsive",
+    tags$table(
+      class = "table table-condensed table-hover",
+      tags$thead(
+        tags$tr(
+          tags$th("Sample"),
+          lapply(
+            short_labels,
+            tags$th
+          )
+        )
+      ),
+      tags$tbody(
+        lapply(
+          samples,
+          function(sample) {
+            values <- vapply(
+              sample_stages,
+              function(stage) {
+                symbol_for(
+                  sample,
+                  stage
+                )
+              },
+              character(1)
+            )
+
+            tags$tr(
+              tags$td(
+                sample
+              ),
+              lapply(
+                values,
+                function(value) {
+                  tags$td(
+                    style = "text-align:center;",
+                    value
+                  )
+                }
+              )
+            )
+          }
+        )
+      )
+    ),
+
+    tags$p(
+      class = "muted small-note",
+      "\u2713 complete \u00b7 \u25cf running \u00b7 \u25d0 partial \u00b7 ! failed \u00b7 \u2014 not reached"
+    )
+  )
+}
+
+
 all_pipeline_steps <- function() {
-  unique(c(rna_pipeline_order(), scrna_pipeline_order(), cutrun_pipeline_order(), atac_pipeline_order(), chip_pipeline_order()))
+  unique(c(
+    rna_pipeline_order(),
+    scrna_pipeline_order(),
+    cutrun_pipeline_order(),
+    "nf-core/cutandrun",
+    atac_pipeline_order(),
+    chip_pipeline_order()
+  ))
 }
 
 pipeline_order <- function(project = NULL) {
   if (!is.null(project) && is_scrna_project(project)) return(scrna_pipeline_order(project))
-  if (!is.null(project) && is_cutrun_project(project)) return(cutrun_pipeline_order())
+  if (!is.null(project) && is_cutrun_project(project)) {
+    if (is_nfcore_cutrun_project(project)) {
+      return(c(
+        "nf-core/cutandrun",
+        "Differential Peaks"
+      ))
+    }
+    return(cutrun_pipeline_order())
+  }
   if (!is.null(project) && is_atac_project(project)) return(atac_pipeline_order())
   if (!is.null(project) && is_chip_project(project)) return(chip_pipeline_order())
   if (!is.null(project) && isTRUE(project$counts_only)) return(c("Design matrix", "DESeq2", "GSEA"))
@@ -4809,6 +7580,10 @@ metric_file_to_named_list <- function(path) {
 }
 
 cutrun_alignment_summary_table <- function(project) {
+  if (is_nfcore_cutrun_project(project)) {
+    return(cutrun_nfcore_alignment_summary_table(project))
+  }
+
   summary_path <- file.path(project$data_dir, "bowtie2_summary", "cutrun_alignment_summary.txt")
   saved <- safe_read_table(summary_path, 5000)
   files <- if (dir.exists(file.path(project$data_dir, "bowtie2"))) {
@@ -5224,6 +7999,153 @@ cutrun_signal_track_table <- function(project) {
 }
 
 genome_browser_track_catalog <- function(project) {
+
+  # nf-core/cutandrun stores signal and peak outputs under its own
+  # published results tree rather than the native CodeSpring folders.
+  if (is_nfcore_cutrun_project(project)) {
+    inventory <- cutrun_nfcore_output_inventory(project)
+
+    if (!NROW(inventory)) {
+      return(data.frame())
+    }
+
+    rows <- list()
+
+    add_track <- function(
+      sample,
+      path,
+      kind,
+      format,
+      label
+    ) {
+      path <- trimws(as.character(path %||% ""))
+
+      if (
+        !nzchar(path) ||
+        !file.exists(path) ||
+        dir.exists(path) ||
+        file_size_for(path) <= 0
+      ) {
+        return(NULL)
+      }
+
+      data.frame(
+        sample = as.character(sample),
+        kind = kind,
+        format = format,
+        label = label,
+        path = normalizePath(
+          path,
+          winslash = "/",
+          mustWork = TRUE
+        ),
+        stringsAsFactors = FALSE,
+        check.names = FALSE
+      )
+    }
+
+    for (i in seq_len(NROW(inventory))) {
+      sample <- as.character(
+        inventory$sample[[i]]
+      )
+
+      signal <- add_track(
+        sample = sample,
+        path = inventory$bigwig[[i]],
+        kind = "signal",
+        format = "bigwig",
+        label = paste(
+          sample,
+          "CPM signal",
+          sep = " — "
+        )
+      )
+
+      if (!is.null(signal)) {
+        rows[[length(rows) + 1L]] <- signal
+      }
+
+      seacr <- add_track(
+        sample = sample,
+        path = inventory$seacr_peaks[[i]],
+        kind = "peaks",
+        format = "bed",
+        label = paste(
+          sample,
+          "SEACR peaks",
+          sep = " — "
+        )
+      )
+
+      if (!is.null(seacr)) {
+        rows[[length(rows) + 1L]] <- seacr
+      }
+
+      macs_path <- trimws(
+        as.character(
+          inventory$macs2_peaks[[i]] %||% ""
+        )
+      )
+
+      if (nzchar(macs_path)) {
+        ext <- tolower(
+          tools::file_ext(macs_path)
+        )
+
+        macs_format <- if (
+          identical(ext, "narrowpeak")
+        ) {
+          "narrowPeak"
+        } else if (
+          identical(ext, "broadpeak")
+        ) {
+          "broadPeak"
+        } else {
+          "bed"
+        }
+
+        macs2 <- add_track(
+          sample = sample,
+          path = macs_path,
+          kind = "peaks",
+          format = macs_format,
+          label = paste(
+            sample,
+            "MACS2 peaks",
+            sep = " — "
+          )
+        )
+
+        if (!is.null(macs2)) {
+          rows[[length(rows) + 1L]] <- macs2
+        }
+      }
+    }
+
+    if (!length(rows)) {
+      return(data.frame())
+    }
+
+    catalog <- do.call(
+      rbind,
+      rows
+    )
+
+    catalog <- catalog[
+      !duplicated(catalog$path),
+      ,
+      drop = FALSE
+    ]
+
+    catalog$label <- make.unique(
+      catalog$label,
+      sep = " — "
+    )
+
+    rownames(catalog) <- NULL
+
+    return(catalog)
+  }
   signal_root <- file.path(project$data_dir, "bowtie2")
   signal_files <- if (dir.exists(signal_root)) {
     list.files(signal_root, pattern = "\\.(bw|bigwig)$", recursive = TRUE, full.names = TRUE, ignore.case = TRUE)
@@ -6598,6 +9520,23 @@ cutrun_qc_samples <- function(project) {
 cutrun_qc_report_path <- function(project, sample, read = c("R1", "R2"), report = c("fastqc", "screen"), trimmed = TRUE) {
   read <- match.arg(read)
   report <- match.arg(report)
+
+  # nf-core/cutandrun publishes its own FastQC results.
+  # Do not look in the native CodeSpring fastqc directories.
+  if (is_nfcore_cutrun_project(project)) {
+    if (identical(report, "screen")) {
+      return("")
+    }
+
+    return(
+      cutrun_nfcore_fastqc_path(
+        project,
+        sample,
+        read = read,
+        trimmed = trimmed
+      )
+    )
+  }
   base_dir <- file.path(project$data_dir, if (isTRUE(trimmed)) "fastqc_cutadapt" else "fastqc")
   design <- project_design_df(project)
   filenames <- character(0)
@@ -6631,8 +9570,37 @@ cutrun_qc_report_path <- function(project, sample, read = c("R1", "R2"), report 
 }
 
 cutrun_qc_report_ui <- function(project, sample, read, report, trimmed) {
-  if (!nzchar(sample %||% "")) return(div(class = "empty-box", "No sample selected."))
-  path <- cutrun_qc_report_path(project, sample, read, report, trimmed)
+  if (!nzchar(sample %||% "")) {
+    return(
+      div(
+        class = "empty-box",
+        "No sample selected."
+      )
+    )
+  }
+
+  if (
+    is_nfcore_cutrun_project(project) &&
+    identical(report, "screen")
+  ) {
+    return(
+      div(
+        class = "empty-box",
+        paste(
+          "FastQ Screen is not produced by nf-core/cutandrun.",
+          "Use the FastQC reports and MultiQC summary instead."
+        )
+      )
+    )
+  }
+
+  path <- cutrun_qc_report_path(
+    project,
+    sample,
+    read,
+    report,
+    trimmed
+  )
   if (!file.exists(path)) {
     mode <- if (isTRUE(trimmed)) "trimmed" else "raw"
     label <- if (identical(report, "fastqc")) "FastQC" else "FastQ Screen"
@@ -6717,6 +9685,11 @@ cutrun_results_explorer_ui <- function() {
                   sidebarPanel(width = 3, uiOutput("cutrun_fragment_sample_ui"), tags$hr(), helpText("Picard insert-size distribution for the selected paired-end library.")),
                   mainPanel(width = 9, uiOutput("cutrun_fragment_size_ui"))
                 )
+              ),
+              tabPanel(
+                "Signal QC",
+                br(),
+                uiOutput("cutrun_signal_qc_ui")
               ),
               tabPanel("Peak QC",
                 br(),
@@ -8704,6 +11677,65 @@ cutrun_peak_source_catalog <- function(project) {
 # Shared-overlap outputs are intentionally added only here—not to the overlap
 # generator itself—so overlap results cannot recursively become overlap inputs.
 cutrun_diffbind_peak_source_catalog <- function(project) {
+  if (is_nfcore_cutrun_project(project)) {
+    design <- cutrun_target_design(
+      project,
+      include_controls = FALSE
+    )
+
+    samples <- if (
+      NROW(design) &&
+      "sample" %in% names(design)
+    ) {
+      trimws(as.character(design$sample))
+    } else {
+      character(0)
+    }
+
+    samples <- samples[nzchar(samples)]
+
+    paths <- vapply(
+      samples,
+      function(sample) {
+        tryCatch(
+          cutrun_nfcore_peak_path(
+            project,
+            sample,
+            "SEACR"
+          ),
+          error = function(e) ""
+        )
+      },
+      character(1)
+    )
+
+    present <- nzchar(paths) &
+      file.exists(paths) &
+      vapply(
+        paths,
+        file_size_for,
+        numeric(1)
+      ) > 0
+
+    completed <- sum(present)
+
+    return(
+      data.frame(
+        source_id = "nfcore_seacr_stringent",
+        tool = "SEACR",
+        setting = "stringent",
+        label = paste0(
+          "nf-core SEACR — stringent (",
+          completed,
+          "/",
+          length(samples),
+          " non-empty target samples)"
+        ),
+        stringsAsFactors = FALSE,
+        check.names = FALSE
+      )
+    )
+  }
   sources <- cutrun_peak_source_catalog(project)
   overlap_root <- file.path(project$data_dir, "peak_overlap")
   overlap_sets <- if (dir.exists(overlap_root)) {
@@ -8737,6 +11769,41 @@ cutrun_diffbind_peak_source_catalog <- function(project) {
 }
 
 cutrun_peak_source_file <- function(project, source_id, sample, sources = NULL) {
+  if (is_nfcore_cutrun_project(project)) {
+    source_id <- trimws(
+      as.character(source_id %||% "")
+    )
+
+    if (!identical(
+      source_id,
+      "nfcore_seacr_stringent"
+    )) {
+      return("")
+    }
+
+    path <- tryCatch(
+      cutrun_nfcore_peak_path(
+        project,
+        sample,
+        "SEACR"
+      ),
+      error = function(e) ""
+    )
+
+    path <- trimws(
+      as.character(path %||% "")
+    )
+
+    if (
+      !nzchar(path) ||
+      !file.exists(path) ||
+      file_size_for(path) <= 0
+    ) {
+      return("")
+    }
+
+    return(path)
+  }
   if (is.null(sources)) sources <- cutrun_peak_source_catalog(project)
   source <- sources[sources$source_id == source_id, , drop = FALSE]
   if (!NROW(source)) return("")
@@ -9836,6 +12903,15 @@ cutrun_alignment_values <- function(project, sample) {
 }
 
 cutrun_bowtie2_signal_bam <- function(project, sample) {
+  if (is_nfcore_cutrun_project(project)) {
+    return(
+      cutrun_nfcore_bam_path(
+        project,
+        sample
+      )
+    )
+  }
+
   metrics <- cutrun_alignment_values(project, sample)
   suffix <- if (identical(metrics[["dedup_mode"]], "dedup")) "Aligned.sortedByCoord_removeDup.out.bam" else "Aligned.sortedByCoord.out.bam"
   file.path(project$data_dir, "bowtie2", sample, paste0(sample, suffix))
@@ -10088,7 +13164,9 @@ cutrun_diffbind_sample_sheet <- function(project, reference_condition, min_repli
   rows <- lapply(seq_len(NROW(design)), function(i) {
     sample <- as.character(design$sample[[i]])
     metrics <- cutrun_alignment_values(project, sample)
-    use_spikein <- identical(track, "spikein")
+    use_spikein <-
+      !is_nfcore_cutrun_project(project) &&
+      identical(track, "spikein")
     data.frame(
       SampleID = sample,
       CellType = trimws(as.character(design$cell_type[[i]] %||% "all")),
@@ -11778,6 +14856,22 @@ run_step_meta <- function(project = NULL) {
       "Review or complete sample metadata for the uploaded count matrix.",
       "Run differential expression with the selected DESeq2 model.",
       "Run pathway analysis from the matching DESeq2 result."
+    )
+  } else if (
+    !is.null(project) &&
+    is_cutrun_project(project) &&
+    is_nfcore_cutrun_project(project)
+  ) {
+    c(
+      paste0(
+        "Run nf-core/cutandrun ",
+        CUTRUN_NFCORE_VERSION,
+        " for QC, alignment, signal generation, peak calling, and reporting."
+      ),
+      paste(
+        "Run CodeSpring DiffBind/DESeq2 downstream using completed",
+        "nf-core BAMs and stringent SEACR peaks."
+      )
     )
   } else if (!is.null(project) && is_cutrun_project(project)) {
     c(
@@ -14185,7 +17279,7 @@ ui <- fluidPage(
         tabPanel("Run Pipeline", br(), h3("Run Pipeline"),
                  tags$p(class = "muted", "Each tool has its own settings. Jobs are submitted with SLURM sbatch and keep running after this app or browser is closed. If a path or design matrix check fails before sbatch, the app writes a pre-submit error log instead of submitting an empty job."),
                  uiOutput("run_resource_strip"),
-                 uiOutput("run_pipeline_stepper"),
+                 uiOutput("run_pipeline_stepper_backend_wrapper"),
                  uiOutput("run_step_cards"),
                  br(),
                  verbatimTextOutput("run_output")),
@@ -14200,7 +17294,7 @@ ui <- fluidPage(
                  h4("Sample Progress"),
                  uiOutput("sample_progress_matrix_ui")),
         tabPanel("Results Explorer", uiOutput("native_results_ui")),
-        tabPanel("Logs", br(), h3("Logs"), uiOutput("log_file_ui"), tags$pre(class = "log-viewer", textOutput("selected_log_text"))),
+        tabPanel("Logs", br(), uiOutput("cutrun_nfcore_logs_ui"), h3("Logs"), uiOutput("log_file_ui"), tags$pre(class = "log-viewer", textOutput("selected_log_text"))),
         tabPanel("Methods", br(),
                  h3("Methods Documentation"),
                  tags$p(class = "muted", "Project-level methods, reference genome, tool usage, and detected versions where available."),
@@ -14232,6 +17326,22 @@ ui <- function(request) {
     )
   )
 }
+# -------------------------------------------------------------------------
+# nf-core/cutandrun Results Explorer backend adapters
+#
+# Loaded only after all native CUT&RUN result helpers are defined so the
+# adapter can preserve and wrap their native implementations safely.
+# -------------------------------------------------------------------------
+source(
+  file.path(
+    APP_ROOT,
+    "R",
+    "cutrun_nfcore_results.R"
+  ),
+  local = TRUE
+)
+
+
 
 server <- function(input, output, session) {
   projects <- reactiveVal(discover_projects())
@@ -15717,6 +18827,22 @@ server <- function(input, output, session) {
         uiOutput("new_species_ui"),
         uiOutput("new_genome_version_ui"),
         if (!identical(new_analysis_key, "scrna")) radioButtons("new_paired_end", "Reads", choices = c("Paired-end" = "paired", "Single-end" = "single"), selected = "paired") else NULL,
+        if (identical(new_analysis_key, "cutrun")) tagList(
+          radioButtons(
+            "new_cutrun_backend",
+            "Pipeline backend",
+            choices = c(
+              "nf-core/cutandrun — recommended" = "nfcore",
+              "CodeSpring native — existing implementation" = "native"
+            ),
+            selected = "nfcore"
+          ),
+          tags$p(
+            class = "muted small-note",
+            "nf-core/cutandrun is recommended for new projects. ",
+            "CodeSpring native remains available as a fallback."
+          )
+        ) else NULL,
         NULL
       ),
       if (!scrna_example_selected) radioButtons(
@@ -16278,6 +19404,21 @@ server <- function(input, output, session) {
   })
 
   output$design_matrix_help_ui <- renderUI({
+    if (is_cutrun_project(current_project())) {
+      return(
+        div(
+          class = "read-source-note",
+          tags$strong("CUT&RUN experimental design"),
+          tags$p(
+            "Each included row is one biological sample. FASTQ filenames may be detected automatically, but cell type, target/mark, condition, replicate, target class, and matched control remain explicit experimental metadata."
+          ),
+          tags$p(
+            class = "muted small-note",
+            "Use inference as a starting point, bulk-edit large groups of samples, then review validation before running native or nf-core CUT&RUN."
+          )
+        )
+      )
+    }
     if (is_scrna_project(current_project())) {
       manifest <- scrna_manifest(current_project())
       if (!scrna_uses_input_manifest(current_project())) {
@@ -16313,11 +19454,33 @@ server <- function(input, output, session) {
   output$design_editor_heading <- renderUI({
     if (is_scrna_project(current_project())) {
       h3(if (scrna_uses_input_manifest(current_project())) "Single-cell Sample Design" else "Single-cell Input")
-    } else h3("Design Matrix Builder")
+    } else if (is_cutrun_project(current_project())) {
+      h3("CUT&RUN Sample Design")
+    } else {
+      h3("Design Matrix Builder")
+    }
   })
 
   output$metadata_columns_control_ui <- renderUI({
     p <- current_project()
+
+    if (is_cutrun_project(p)) {
+      return(
+        tagList(
+          tags$p(
+            class = "muted small-note",
+            tags$strong("Core CUT&RUN fields are fixed: "),
+            "cell_type, mark, target_class, seacr_stringency, condition, replicate, control_sample."
+          ),
+          textInput(
+            "metadata_cols",
+            "Optional extra metadata columns",
+            value = isolate(input$metadata_cols) %||% "",
+            placeholder = "e.g. donor, genotype, batch"
+          )
+        )
+      )
+    }
     if (is_scrna_project(p) && !scrna_uses_input_manifest(p)) return(NULL)
     is_single_scrna_input <- is_scrna_project(p) && NROW(scrna_manifest(p)) <= 1L
     label <- "Add metadata columns"
@@ -16327,6 +19490,69 @@ server <- function(input, output, session) {
   })
 
   output$design_matrix_actions_ui <- renderUI({
+    p <- current_project()
+
+    if (is_cutrun_project(p)) {
+      return(
+        tagList(
+          div(
+            class = "button-row",
+            actionButton(
+              "scan_fastqs",
+              "Scan FASTQs",
+              class = "btn-primary"
+            ),
+            actionButton(
+              "cutrun_infer_metadata",
+              "Infer missing fields",
+              class = "btn-default"
+            ),
+            actionButton(
+              "cutrun_auto_match_controls",
+              "Auto-match controls",
+              class = "btn-default"
+            ),
+            actionButton(
+              "cutrun_validate_design",
+              "Validate",
+              class = "btn-default"
+            )
+          ),
+
+          div(
+            style = "margin-top:10px;",
+            fileInput(
+              "cutrun_import_design",
+              "Import design CSV / TSV",
+              accept = c(
+                ".csv",
+                ".tsv",
+                ".txt"
+              ),
+              width = "100%"
+            )
+          ),
+
+          div(
+            class = "button-row",
+            actionButton(
+              "add_metadata_col",
+              "Update extra metadata",
+              class = "btn-default"
+            ),
+            actionButton(
+              "add_design_rows",
+              "Add blank row",
+              class = "btn-default"
+            ),
+            downloadButton(
+              "download_cutrun_design",
+              "Export current TSV"
+            )
+          )
+        )
+      )
+    }
     if (is_scrna_project(current_project())) {
       if (!scrna_uses_input_manifest(current_project())) {
         return(div(class = "button-row", actionButton("enable_scrna_manifest", "Add multiple inputs / integration", class = "btn-default")))
@@ -16583,6 +19809,1073 @@ server <- function(input, output, session) {
     parse_metadata_cols(input$metadata_cols, current_project())
   })
 
+  output$cutrun_name_mapper_ui <- renderUI({
+    p <- current_project()
+
+    if (!is_cutrun_project(p)) {
+      return(NULL)
+    }
+
+    df <- cutrun_design_prepare(
+      design_state()
+    )
+
+    if (!NROW(df)) {
+      return(NULL)
+    }
+
+    parsed <- cutrun_sample_name_tokens(
+      df$sample,
+      separator = "_",
+      drop_illumina_suffix = TRUE
+    )
+
+    max_tokens <- min(
+      6L,
+      parsed$max_tokens
+    )
+
+    if (max_tokens < 1L) {
+      return(NULL)
+    }
+
+    destinations <-
+      cutrun_name_mapping_destinations(df)
+
+    default_destination <- function(i) {
+      if (i == 1L) {
+        "condition"
+      } else if (i == 2L) {
+        "cell_type"
+      } else if (i == 3L) {
+        "mark"
+      } else {
+        "__ignore__"
+      }
+    }
+
+    token_controls <- lapply(
+      seq_len(max_tokens),
+      function(i) {
+        example <- ""
+
+        for (tokens in parsed$tokens) {
+          if (
+            length(tokens) >= i &&
+            nzchar(tokens[[i]])
+          ) {
+            example <- tokens[[i]]
+            break
+          }
+        }
+
+        selectInput(
+          paste0(
+            "cutrun_name_token_",
+            i,
+            "_dest"
+          ),
+          paste0(
+            "Token ",
+            i,
+            if (nzchar(example)) {
+              paste0(
+                " — example: ",
+                example
+              )
+            } else {
+              ""
+            }
+          ),
+          choices = destinations,
+          selected = selected_choice(
+            input[[
+              paste0(
+                "cutrun_name_token_",
+                i,
+                "_dest"
+              )
+            ]],
+            destinations,
+            default_destination(i)
+          ),
+          selectize = FALSE
+        )
+      }
+    )
+
+    control_default <-
+      cutrun_default_control_mode(df)
+
+    div(
+      class = "cutrun-design-panel",
+
+      tags$h4(
+        "Parse sample names"
+      ),
+
+      tags$p(
+        class = "muted small-note",
+        "Define the meaning of underscore-separated sample-name tokens. Nothing is applied until you click Apply mapping."
+      ),
+
+      tags$p(
+        tags$strong("Example: "),
+        code(
+          df$sample[[1]]
+        )
+      ),
+
+      fluidRow(
+        column(
+          7,
+          token_controls
+        ),
+
+        column(
+          5,
+
+          checkboxInput(
+            "cutrun_name_split_first_rep",
+            "Split trailing number from token 1 into replicate",
+            value = if (
+              is.null(
+                input$cutrun_name_split_first_rep
+              )
+            ) {
+              TRUE
+            } else {
+              isTRUE(
+                input$cutrun_name_split_first_rep
+              )
+            }
+          ),
+
+          tags$p(
+            class = "muted small-note",
+            "Example: 2wks1 → condition 2wks + replicate 1; Control2 → condition Control + replicate 2."
+          ),
+
+          checkboxInput(
+            "cutrun_name_overwrite",
+            "Overwrite existing non-blank metadata",
+            value = FALSE
+          ),
+
+          radioButtons(
+            "cutrun_control_mode",
+            "Assay controls",
+            choices = c(
+              "Matched IgG/input controls are present" =
+                "matched",
+              "No matched IgG/input control libraries" =
+                "none"
+            ),
+            selected = selected_choice(
+              input$cutrun_control_mode,
+              c("matched", "none"),
+              control_default
+            )
+          ),
+
+          tags$p(
+            class = "muted small-note",
+            "Biological groups named Control1/Control2 are not assay controls unless their mark is IgG/input/control."
+          )
+        )
+      ),
+
+      uiOutput(
+        "cutrun_name_parse_preview_ui"
+      ),
+
+      div(
+        class = "button-row",
+        actionButton(
+          "cutrun_apply_name_mapping",
+          "Apply mapping to all samples",
+          class = "btn-primary"
+        )
+      )
+    )
+  })
+
+
+  cutrun_name_mapping_values <- reactive({
+    p <- current_project()
+
+    if (!is_cutrun_project(p)) {
+      return(character(0))
+    }
+
+    df <- cutrun_design_prepare(
+      design_state()
+    )
+
+    parsed <- cutrun_sample_name_tokens(
+      df$sample,
+      separator = "_",
+      drop_illumina_suffix = TRUE
+    )
+
+    max_tokens <- min(
+      6L,
+      parsed$max_tokens
+    )
+
+    if (!max_tokens) {
+      return(character(0))
+    }
+
+    vapply(
+      seq_len(max_tokens),
+      function(i) {
+        input[[
+          paste0(
+            "cutrun_name_token_",
+            i,
+            "_dest"
+          )
+        ]] %||% "__ignore__"
+      },
+      character(1)
+    )
+  })
+
+
+  cutrun_name_mapping_preview <- reactive({
+    p <- current_project()
+
+    if (!is_cutrun_project(p)) {
+      return(data.frame())
+    }
+
+    df <- cutrun_design_prepare(
+      design_state()
+    )
+
+    if (!NROW(df)) {
+      return(data.frame())
+    }
+
+    mapped <- cutrun_apply_sample_name_mapping(
+      df,
+      destinations =
+        cutrun_name_mapping_values(),
+      split_first_trailing_replicate =
+        isTRUE(
+          input$cutrun_name_split_first_rep
+        ),
+      overwrite = isTRUE(
+        input$cutrun_name_overwrite
+      )
+    )
+
+    columns <- intersect(
+      c(
+        "sample",
+        "cell_type",
+        "mark",
+        "condition",
+        "replicate",
+        "target_class"
+      ),
+      names(mapped)
+    )
+
+    utils::head(
+      mapped[
+        ,
+        columns,
+        drop = FALSE
+      ],
+      8L
+    )
+  })
+
+
+  output$cutrun_name_parse_preview_ui <-
+    renderUI({
+      preview <-
+        cutrun_name_mapping_preview()
+
+      if (!NROW(preview)) {
+        return(NULL)
+      }
+
+      tags$div(
+        style = "margin-top:14px;",
+        tags$strong(
+          "Preview — first 8 samples"
+        ),
+        tags$div(
+          style = "overflow-x:auto; margin-top:8px;",
+          tags$table(
+            class =
+              "table table-condensed table-bordered",
+            tags$thead(
+              tags$tr(
+                lapply(
+                  names(preview),
+                  function(column) {
+                    tags$th(
+                      gsub(
+                        "_",
+                        " ",
+                        column
+                      )
+                    )
+                  }
+                )
+              )
+            ),
+            tags$tbody(
+              lapply(
+                seq_len(NROW(preview)),
+                function(i) {
+                  tags$tr(
+                    lapply(
+                      names(preview),
+                      function(column) {
+                        tags$td(
+                          as.character(
+                            preview[[column]][[i]]
+                          )
+                        )
+                      }
+                    )
+                  )
+                }
+              )
+            )
+          )
+        )
+      )
+    })
+
+
+  observeEvent(
+    input$cutrun_apply_name_mapping,
+    {
+      p <- current_project()
+
+      if (!is_cutrun_project(p)) {
+        return()
+      }
+
+      mapped <-
+        cutrun_apply_sample_name_mapping(
+          design_state(),
+          destinations =
+            cutrun_name_mapping_values(),
+          split_first_trailing_replicate =
+            isTRUE(
+              input$cutrun_name_split_first_rep
+            ),
+          overwrite = isTRUE(
+            input$cutrun_name_overwrite
+          )
+        )
+
+      design_state(mapped)
+
+      if (
+        identical(
+          input$cutrun_control_mode %||%
+            "matched",
+          "matched"
+        )
+      ) {
+        design_state(
+          cutrun_auto_match_controls(
+            mapped
+          )
+        )
+      }
+
+      showNotification(
+        "Sample-name mapping applied. Review the design and validation before saving.",
+        type = "message",
+        duration = 5
+      )
+    },
+    ignoreInit = TRUE
+  )
+
+
+  cutrun_design_check <- reactive({
+    p <- current_project()
+
+    if (!is_cutrun_project(p)) {
+      return(NULL)
+    }
+
+    cutrun_design_validation(
+      design_state(),
+      control_mode =
+        input$cutrun_control_mode %||%
+        cutrun_default_control_mode(
+          design_state()
+        )
+    )
+  })
+
+
+  output$cutrun_design_summary_ui <- renderUI({
+    check <- cutrun_design_check()
+
+    if (is.null(check)) {
+      return(NULL)
+    }
+
+    summary <- check$summary
+
+    metric <- function(
+      value,
+      label
+    ) {
+      div(
+        class = "cutrun-design-metric",
+        tags$strong(value),
+        tags$span(
+          class = "muted small-note",
+          label
+        )
+      )
+    }
+
+    div(
+      class = "cutrun-design-summary",
+      metric(
+        summary$total,
+        "Detected rows"
+      ),
+      metric(
+        summary$included,
+        "Included"
+      ),
+      metric(
+        summary$targets,
+        "Targets"
+      ),
+      metric(
+        summary$controls,
+        "Controls"
+      ),
+      metric(
+        summary$errors,
+        "Errors"
+      ),
+      metric(
+        summary$warnings,
+        "Warnings"
+      )
+    )
+  })
+
+
+  output$cutrun_design_validation_ui <- renderUI({
+    check <- cutrun_design_check()
+
+    if (is.null(check)) {
+      return(NULL)
+    }
+
+    issues <- check$issues
+
+    if (!NROW(issues)) {
+      return(
+        div(
+          class = "cutrun-design-panel",
+          tags$h4("Validation"),
+          tags$p(
+            tags$strong("Ready"),
+            " — no CUT&RUN design problems were detected."
+          )
+        )
+      )
+    }
+
+    errors <- issues[
+      issues$severity == "error",
+      ,
+      drop = FALSE
+    ]
+
+    warnings <- issues[
+      issues$severity == "warning",
+      ,
+      drop = FALSE
+    ]
+
+    issue_items <- function(
+      table,
+      class_name
+    ) {
+      if (!NROW(table)) {
+        return(NULL)
+      }
+
+      shown <- utils::head(
+        table,
+        12L
+      )
+
+      tagList(
+        tags$ul(
+          lapply(
+            seq_len(NROW(shown)),
+            function(i) {
+              label <- paste(
+                c(
+                  shown$sample[[i]],
+                  shown$field[[i]]
+                )[
+                  nzchar(
+                    c(
+                      shown$sample[[i]],
+                      shown$field[[i]]
+                    )
+                  )
+                ],
+                collapse = " · "
+              )
+
+              tags$li(
+                class = class_name,
+                if (nzchar(label)) {
+                  tags$strong(
+                    paste0(
+                      label,
+                      ": "
+                    )
+                  )
+                },
+                shown$message[[i]]
+              )
+            }
+          )
+        ),
+
+        if (NROW(table) > 12L) {
+          tags$p(
+            class = "muted small-note",
+            paste(
+              NROW(table) - 12L,
+              "additional issue(s) are not shown."
+            )
+          )
+        }
+      )
+    }
+
+    div(
+      class = "cutrun-design-panel",
+      tags$h4("Validation"),
+
+      if (NROW(errors)) {
+        tagList(
+          tags$p(
+            tags$strong(
+              paste(
+                NROW(errors),
+                "error(s)"
+              )
+            )
+          ),
+          issue_items(
+            errors,
+            "cutrun-validation-error"
+          )
+        )
+      },
+
+      if (NROW(warnings)) {
+        tagList(
+          tags$p(
+            tags$strong(
+              paste(
+                NROW(warnings),
+                "warning(s)"
+              )
+            )
+          ),
+          issue_items(
+            warnings,
+            "cutrun-validation-warning"
+          )
+        )
+      }
+    )
+  })
+
+
+  output$cutrun_bulk_edit_ui <- renderUI({
+    p <- current_project()
+
+    if (!is_cutrun_project(p)) {
+      return(NULL)
+    }
+
+    df <- cutrun_design_prepare(
+      design_state()
+    )
+
+    filter_field <- input$cutrun_bulk_filter_field %||%
+      "__all__"
+
+    filter_choices <- if (
+      identical(
+        filter_field,
+        "__all__"
+      )
+    ) {
+      c(
+        "All included rows" = "__all__"
+      )
+    } else if (
+      filter_field %in% names(df)
+    ) {
+      values <- sort(
+        unique(
+          trimws(
+            as.character(
+              df[[filter_field]]
+            )
+          )
+        )
+      )
+
+      values <- values[
+        nzchar(values)
+      ]
+
+      stats::setNames(
+        values,
+        values
+      )
+    } else {
+      character(0)
+    }
+
+    set_fields <- c(
+      "Cell type" = "cell_type",
+      "Mark / target" = "mark",
+      "Target class" = "target_class",
+      "SEACR stringency" = "seacr_stringency",
+      "Condition" = "condition",
+      "Replicate" = "replicate",
+      "Control sample" = "control_sample",
+      "Include" = "include"
+    )
+
+    div(
+      class = "cutrun-design-panel",
+
+      tags$h4("Bulk edit"),
+
+      tags$p(
+        class = "muted small-note",
+        "Apply one value to many rows without editing cells individually."
+      ),
+
+      selectInput(
+        "cutrun_bulk_filter_field",
+        "Rows",
+        choices = c(
+          "All included rows" = "__all__",
+          "Sample" = "sample",
+          "Cell type" = "cell_type",
+          "Mark" = "mark",
+          "Condition" = "condition",
+          "Target class" = "target_class"
+        ),
+        selected = filter_field,
+        selectize = FALSE
+      ),
+
+      if (!identical(
+        filter_field,
+        "__all__"
+      )) {
+        selectInput(
+          "cutrun_bulk_filter_value",
+          "Exact value",
+          choices = filter_choices,
+          selected = selected_choice(
+            input$cutrun_bulk_filter_value,
+            filter_choices
+          ),
+          selectize = TRUE
+        )
+      },
+
+      selectInput(
+        "cutrun_bulk_set_field",
+        "Field to change",
+        choices = set_fields,
+        selected = selected_choice(
+          input$cutrun_bulk_set_field,
+          set_fields,
+          "condition"
+        ),
+        selectize = FALSE
+      ),
+
+      textInput(
+        "cutrun_bulk_set_value",
+        "New value",
+        value = input$cutrun_bulk_set_value %||% "",
+        placeholder = "Enter value; blank clears the field"
+      ),
+
+      actionButton(
+        "cutrun_apply_bulk_edit",
+        "Apply bulk edit",
+        class = "btn-primary"
+      )
+    )
+  })
+
+
+  observeEvent(
+    input$cutrun_infer_metadata,
+    {
+      p <- current_project()
+
+      if (!is_cutrun_project(p)) {
+        return()
+      }
+
+      design_state(
+        infer_cutrun_metadata(
+          cutrun_design_prepare(
+            design_state()
+          )
+        )
+      )
+
+      showNotification(
+        "Filled CUT&RUN fields that could be inferred from sample names. Existing non-blank metadata was preserved.",
+        type = "message",
+        duration = 5
+      )
+    },
+    ignoreInit = TRUE
+  )
+
+
+  observeEvent(
+    input$cutrun_auto_match_controls,
+    {
+      if (
+        identical(
+          input$cutrun_control_mode %||%
+            cutrun_default_control_mode(
+              design_state()
+            ),
+          "none"
+        )
+      ) {
+        showNotification(
+          "Assay controls are disabled for this experiment. Change Assay controls to matched IgG/input controls before auto-matching.",
+          type = "warning",
+          duration = 6
+        )
+        return()
+      }
+
+
+      p <- current_project()
+
+      if (!is_cutrun_project(p)) {
+        return()
+      }
+
+      before <- design_state()
+
+      after <- cutrun_auto_match_controls(
+        before
+      )
+
+      design_state(after)
+
+      assigned_before <- sum(
+        nzchar(
+          trimws(
+            before$control_sample %||%
+              character(0)
+          )
+        )
+      )
+
+      assigned_after <- sum(
+        nzchar(
+          trimws(
+            after$control_sample %||%
+              character(0)
+          )
+        )
+      )
+
+      showNotification(
+        paste(
+          "Control matching complete.",
+          max(
+            0L,
+            assigned_after -
+              assigned_before
+          ),
+          "new assignment(s) made."
+        ),
+        type = "message",
+        duration = 5
+      )
+    },
+    ignoreInit = TRUE
+  )
+
+
+  observeEvent(
+    input$cutrun_validate_design,
+    {
+      p <- current_project()
+
+      if (!is_cutrun_project(p)) {
+        return()
+      }
+
+      check <- cutrun_design_validation(
+        design_state(),
+        control_mode =
+          input$cutrun_control_mode %||%
+          cutrun_default_control_mode(
+            design_state()
+          )
+      )
+
+      if (check$summary$errors > 0L) {
+        showNotification(
+          paste(
+            check$summary$errors,
+            "CUT&RUN design error(s) remain.",
+            check$summary$warnings,
+            "warning(s)."
+          ),
+          type = "error",
+          duration = 7
+        )
+      } else if (
+        check$summary$warnings > 0L
+      ) {
+        showNotification(
+          paste(
+            "Design is runnable with",
+            check$summary$warnings,
+            "warning(s)."
+          ),
+          type = "warning",
+          duration = 7
+        )
+      } else {
+        showNotification(
+          "CUT&RUN design validation passed.",
+          type = "message",
+          duration = 5
+        )
+      }
+    },
+    ignoreInit = TRUE
+  )
+
+
+  observeEvent(
+    input$cutrun_import_design,
+    {
+      p <- current_project()
+
+      if (
+        !is_cutrun_project(p) ||
+        is.null(
+          input$cutrun_import_design
+        )
+      ) {
+        return()
+      }
+
+      result <- tryCatch(
+        {
+          imported <- cutrun_import_design_table(
+            input$cutrun_import_design$datapath
+          )
+
+          design_state(imported)
+
+          paste(
+            "Imported",
+            NROW(imported),
+            "CUT&RUN design row(s)."
+          )
+        },
+        error = function(e) {
+          paste(
+            "ERROR:",
+            conditionMessage(e)
+          )
+        }
+      )
+
+      showNotification(
+        result,
+        type = if (
+          startsWith(
+            result,
+            "ERROR:"
+          )
+        ) {
+          "error"
+        } else {
+          "message"
+        },
+        duration = 7
+      )
+    },
+    ignoreInit = TRUE
+  )
+
+
+  observeEvent(
+    input$cutrun_apply_bulk_edit,
+    {
+      p <- current_project()
+
+      if (!is_cutrun_project(p)) {
+        return()
+      }
+
+      df <- cutrun_design_prepare(
+        design_state()
+      )
+
+      filter_field <- input$cutrun_bulk_filter_field %||%
+        "__all__"
+
+      if (identical(
+        filter_field,
+        "__all__"
+      )) {
+        rows <- which(df$include)
+      } else {
+        filter_value <- input$cutrun_bulk_filter_value %||%
+          ""
+
+        if (
+          !filter_field %in% names(df) ||
+          !nzchar(filter_value)
+        ) {
+          showNotification(
+            "Choose a valid set of rows to bulk edit.",
+            type = "error"
+          )
+          return()
+        }
+
+        rows <- which(
+          trimws(
+            as.character(
+              df[[filter_field]]
+            )
+          ) ==
+            trimws(filter_value)
+        )
+      }
+
+      if (!length(rows)) {
+        showNotification(
+          "No rows match the selected bulk-edit filter.",
+          type = "warning"
+        )
+        return()
+      }
+
+      field <- input$cutrun_bulk_set_field %||%
+        ""
+
+      if (!field %in% names(df)) {
+        showNotification(
+          "Choose a field to edit.",
+          type = "error"
+        )
+        return()
+      }
+
+      value <- as.character(
+        input$cutrun_bulk_set_value %||%
+          ""
+      )
+
+      if (identical(
+        field,
+        "include"
+      )) {
+        df[[field]][rows] <-
+          as_design_bool(value)
+      } else {
+        df[[field]][rows] <-
+          value
+      }
+
+      design_state(df)
+
+      showNotification(
+        paste(
+          "Updated",
+          length(rows),
+          "row(s)."
+        ),
+        type = "message",
+        duration = 4
+      )
+    },
+    ignoreInit = TRUE
+  )
+
+
+  output$download_cutrun_design <- downloadHandler(
+    filename = function() {
+      paste0(
+        clean_name(
+          current_project()$name %||%
+            "cutrun"
+        ),
+        "_design_matrix.tsv"
+      )
+    },
+
+    content = function(file) {
+      p <- current_project()
+
+      if (!is_cutrun_project(p)) {
+        stop(
+          "The selected project is not CUT&RUN."
+        )
+      }
+
+      df <- cutrun_design_prepare(
+        design_state()
+      )
+
+      utils::write.table(
+        df,
+        file,
+        sep = "\t",
+        row.names = FALSE,
+        quote = FALSE
+      )
+    }
+  )
+
+
   observeEvent(input$scan_fastqs, {
     p <- current_project()
     is_cutrun <- is_cutrun_project(p); is_atac <- is_atac_project(p); is_chip <- is_chip_project(p)
@@ -16628,7 +20921,22 @@ server <- function(input, output, session) {
     updateActionButton(session, "save_design", label = if (is_scrna_project(p)) "Save sample design" else "Save design_matrix.txt")
     scrna_manifest_state(if (is_scrna_project(p)) scrna_manifest(p) else data.frame())
     metadata <- if (is_scrna_project(p) && NROW(scrna_manifest(p)) <= 1L) character(0) else default_metadata_cols(p)
-    updateTextInput(session, "metadata_cols", value = paste(metadata, collapse = ", "))
+    metadata_input <- if (is_cutrun_project(p)) {
+      extras <- setdiff(
+        project_metadata_cols(p),
+        default_metadata_cols(p)
+      )
+      paste(extras, collapse = ", ")
+    } else {
+      paste(metadata, collapse = ", ")
+    }
+
+    updateTextInput(
+      session,
+      "metadata_cols",
+      value = metadata_input
+    )
+
     df <- design_editor_from_project(p, metadata)
     if (is_cutrun_project(p)) df <- infer_cutrun_metadata(df)
     design_state(df)
@@ -16638,13 +20946,36 @@ server <- function(input, output, session) {
     if (!identical(input$project_id, "__new__")) return()
     p <- current_project()
     metadata <- default_metadata_cols(p)
-    updateTextInput(session, "metadata_cols", value = paste(metadata, collapse = ", "))
+    updateTextInput(
+      session,
+      "metadata_cols",
+      value = if (is_cutrun_project(p)) "" else paste(metadata, collapse = ", ")
+    )
+
     df <- design_editor_from_project(p, metadata)
     if (is_cutrun_project(p)) df <- infer_cutrun_metadata(df)
     design_state(df)
   }, ignoreInit = TRUE)
 
   output$design_editor_ui <- renderUI({
+    p <- current_project()
+
+    if (is_cutrun_project(p)) {
+      df <- design_state()
+
+      if (!NROW(df)) {
+        df <- blank_design_matrix_rows(
+          default_metadata_cols(p)
+        )
+      }
+
+      return(
+        cutrun_design_builder_ui(
+          df,
+          p
+        )
+      )
+    }
     if (is_scrna_project(current_project())) {
       if (!scrna_uses_input_manifest(current_project())) {
         return(div(class = "empty-box", "This project has one input. No manifest editing is needed."))
@@ -16768,10 +21099,66 @@ server <- function(input, output, session) {
   })
 
   observe({
-    invalidateLater(PROGRESS_REFRESH_MS, session)
-    if ((input$web_main_tabs %||% "") %in% c("Progress", "Run Pipeline", "Results Explorer")) {
-      jobs <- isolate(job_history_state())
-      if (length(active_job_state_map_from_jobs(jobs))) safe_refresh_progress_now("auto refresh")
+    invalidateLater(
+      PROGRESS_REFRESH_MS,
+      session
+    )
+
+    if (
+      !(input$web_main_tabs %||% "") %in%
+        c(
+          "Progress",
+          "Run Pipeline",
+          "Results Explorer"
+        )
+    ) {
+      return()
+    }
+
+    if (!isTRUE(existing_project_selected())) {
+      return()
+    }
+
+    p <- isolate(
+      current_project()
+    )
+
+    if (is_nfcore_cutrun_project(p)) {
+      # nf-core children live outside CodeSpring's native jobs.tsv.
+      # Always refresh while an nf-core CUT&RUN status page is open;
+      # cutrun_nfcore_run_status() and trace.tsv are the sources of truth.
+      progress_refresh(
+        Sys.time()
+      )
+
+      if (
+        exists(
+          "cutrun_nfcore_status_refresh",
+          inherits = TRUE
+        )
+      ) {
+        cutrun_nfcore_status_refresh(
+          Sys.time()
+        )
+      }
+
+      return()
+    }
+
+    jobs <- isolate(
+      job_history_state()
+    )
+
+    if (
+      length(
+        active_job_state_map_from_jobs(
+          jobs
+        )
+      )
+    ) {
+      safe_refresh_progress_now(
+        "auto refresh"
+      )
     }
   })
 
@@ -16786,7 +21173,32 @@ server <- function(input, output, session) {
   }, ignoreInit = TRUE)
 
   output$progress_updated <- renderText({
-    paste("Auto-refreshes active jobs every", PROGRESS_REFRESH_MS / 1000, "seconds. Last checked:", format(progress_refresh(), "%Y-%m-%d %H:%M:%S"))
+    p <- if (
+      isTRUE(existing_project_selected())
+    ) {
+      current_project()
+    } else {
+      NULL
+    }
+
+    source_text <- if (
+      !is.null(p) &&
+      is_nfcore_cutrun_project(p)
+    ) {
+      "Auto-refreshes Nextflow trace and tagged Slurm tasks every"
+    } else {
+      "Auto-refreshes active jobs every"
+    }
+
+    paste(
+      source_text,
+      PROGRESS_REFRESH_MS / 1000,
+      "seconds. Last checked:",
+      format(
+        progress_refresh(),
+        "%Y-%m-%d %H:%M:%S"
+      )
+    )
   })
 
   progress_status <- reactive({
@@ -16798,17 +21210,96 @@ server <- function(input, output, session) {
   })
 
   observeEvent(input$refresh_progress, {
-    safe_refresh_progress_now("manual refresh")
+    if (
+      isTRUE(existing_project_selected()) &&
+      is_nfcore_cutrun_project(
+        current_project()
+      )
+    ) {
+      progress_refresh(
+        Sys.time()
+      )
+
+      if (
+        exists(
+          "cutrun_nfcore_status_refresh",
+          inherits = TRUE
+        )
+      ) {
+        cutrun_nfcore_status_refresh(
+          Sys.time()
+        )
+      }
+
+      return()
+    }
+
+    safe_refresh_progress_now(
+      "manual refresh"
+    )
   })
 
   output$pipeline_stepper <- renderUI({
-    if (!isTRUE(existing_project_selected())) return(div(class = "empty-box", "Select or create a project to see pipeline progress."))
-    pipeline_stepper_ui(current_project(), progress_status())
+    if (!isTRUE(existing_project_selected())) {
+      return(
+        div(
+          class = "empty-box",
+          "Select or create a project to see pipeline progress."
+        )
+      )
+    }
+
+    p <- current_project()
+
+    if (is_nfcore_cutrun_project(p)) {
+      progress_refresh()
+
+      snapshot <- cutrun_nfcore_progress_snapshot(
+        p
+      )
+
+      return(
+        cutrun_nfcore_progress_overview_ui(
+          snapshot
+        )
+      )
+    }
+
+    pipeline_stepper_ui(
+      p,
+      progress_status()
+    )
   })
 
   output$sample_progress_matrix_ui <- renderUI({
-    if (!isTRUE(existing_project_selected())) return(div(class = "empty-box", "Select or create a project to see sample progress."))
-    sample_progress_matrix_ui(sample_progress_state())
+    if (!isTRUE(existing_project_selected())) {
+      return(
+        div(
+          class = "empty-box",
+          "Select or create a project to see sample progress."
+        )
+      )
+    }
+
+    p <- current_project()
+
+    if (is_nfcore_cutrun_project(p)) {
+      progress_refresh()
+
+      snapshot <- cutrun_nfcore_progress_snapshot(
+        p
+      )
+
+      return(
+        cutrun_nfcore_sample_progress_ui(
+          snapshot
+        )
+      )
+    }
+
+    sample_progress_matrix_ui(
+      sample_progress_state()
+    )
   })
 
   output$rna_overview_sample_progress_ui <- renderUI({
@@ -16857,11 +21348,45 @@ server <- function(input, output, session) {
             tags$p(class = "status-path", if (is_cutrun_project(p) || is_atac_project(p) || is_chip_project(p)) ref$bowtie2_index else ref$gtf),
             if (is_cutrun_project(p) || is_atac_project(p) || is_chip_project(p)) tags$p(class = "status-path", ref$chrom_sizes) else NULL
         ),
-        div(class = "resource-card flowchart-card",
-            if (file.exists(FLOWCHART_PATH)) tags$img(src = file.path("codespring_flowchart", basename(FLOWCHART_PATH))) else tags$p("Pipeline flowchart")
-        )
+        if (!is_nfcore_cutrun_project(p)) {
+          div(
+            class = "resource-card flowchart-card",
+            if (file.exists(FLOWCHART_PATH)) {
+              tags$img(
+                src = file.path(
+                  "codespring_flowchart",
+                  basename(FLOWCHART_PATH)
+                )
+              )
+            } else {
+              tags$p("Pipeline flowchart")
+            }
+          )
+        } else NULL
     )
   })
+
+  output$run_pipeline_stepper_backend_wrapper <- renderUI({
+    if (!isTRUE(existing_project_selected())) {
+      return(uiOutput("run_pipeline_stepper"))
+    }
+
+    p <- current_project()
+
+    # ONLY nf-core CUT&RUN suppresses the native Run Pipeline step strip.
+    # Native CUT&RUN and every other analysis continue using the
+    # existing run_pipeline_stepper unchanged.
+    if (
+      !is.null(p) &&
+      is_cutrun_project(p) &&
+      is_nfcore_cutrun_project(p)
+    ) {
+      return(NULL)
+    }
+
+    uiOutput("run_pipeline_stepper")
+  })
+
 
   output$run_step_cards <- renderUI({
     run_cards_refresh()
@@ -16937,6 +21462,180 @@ server <- function(input, output, session) {
       ))
     }
     if (is_cutrun_project(p)) {
+
+      if (is_nfcore_cutrun_project(p)) {
+        return(
+          div(
+            class = "cutrun-nfcore-run-page",
+
+            tags$style(
+              HTML("
+                .cutrun-nfcore-run-page {
+                  padding: 16px 18px 30px 18px;
+                }
+
+                .cutrun-nfcore-run-page .tool-panel {
+                  padding: 20px 22px !important;
+                  margin-bottom: 18px;
+                  border-radius: 10px;
+                }
+
+                .cutrun-nfcore-run-page .read-source-note {
+                  padding: 18px 20px !important;
+                  margin-bottom: 18px;
+                  border-radius: 10px;
+                }
+
+                .cutrun-nfcore-run-page .row {
+                  margin-left: -10px;
+                  margin-right: -10px;
+                }
+
+                .cutrun-nfcore-run-page [class*='col-'] {
+                  padding-left: 10px;
+                  padding-right: 10px;
+                }
+
+                .cutrun-nfcore-run-page h3,
+                .cutrun-nfcore-run-page h4 {
+                  margin-top: 0;
+                }
+
+                .cutrun-nfcore-run-page p {
+                  line-height: 1.45;
+                }
+
+                .cutrun-nfcore-run-page .cutrun-nfcore-task-line {
+                  overflow-wrap: anywhere;
+                  word-break: break-word;
+                  padding: 5px 0;
+                  margin: 0;
+                  border-bottom: 1px solid #edf1f5;
+                }
+
+                .cutrun-nfcore-log-card {
+                  margin: 14px 16px 24px 16px;
+                  padding: 20px 22px;
+                  border: 1px solid #d9e1ea;
+                  border-radius: 10px;
+                  background: #fff;
+                }
+
+                .cutrun-nfcore-log-card pre {
+                  max-height: 65vh;
+                  overflow: auto;
+                  white-space: pre-wrap;
+                  overflow-wrap: anywhere;
+                  padding: 14px 16px;
+                  border-radius: 8px;
+                }
+              ")
+            ),
+
+            div(
+              class = "read-source-note",
+              tags$h3("nf-core/cutandrun"),
+              tags$p(
+                "Complete CUT&RUN processing through the validated nf-core workflow."
+              ),
+              tags$p(
+                class = "muted small-note",
+                paste0(
+                  "nf-core/cutandrun ",
+                  CUTRUN_NFCORE_VERSION,
+                  " · Nextflow ",
+                  CUTRUN_NFCORE_NEXTFLOW_VERSION,
+                  " · ",
+                  cutrun_reference_resources(p)$label
+                )
+              )
+            ),
+
+            br(),
+
+            fluidRow(
+              column(
+                width = 5,
+
+                div(
+                  class = "tool-panel",
+
+                  tags$h4("Run settings"),
+
+                  selectInput(
+                    "cutrun_nfcore_seacr_stringency",
+                    "SEACR stringency",
+                    choices = c(
+                      "Stringent — recommended" = "stringent",
+                      "Relaxed" = "relaxed"
+                    ),
+                    selected = selected_choice(
+                      input$cutrun_nfcore_seacr_stringency,
+                      c("stringent", "relaxed"),
+                      "stringent"
+                    ),
+                    selectize = FALSE
+                  ),
+
+                  checkboxInput(
+                    "cutrun_nfcore_include_macs2",
+                    "Also run MACS2",
+                    value = isTRUE(
+                      input$cutrun_nfcore_include_macs2
+                    )
+                  ),
+
+                  tags$p(
+                    class = "muted small-note",
+                    "SEACR is the primary peak caller. MACS2 is optional."
+                  ),
+
+                  tags$p(
+                    class = "muted small-note",
+                    "The current nf-core integration uses CPM normalization."
+                  )
+                )
+              ),
+
+              column(
+                width = 7,
+
+                div(
+                  class = "tool-panel",
+
+                  tags$h4("Pipeline status"),
+
+                  uiOutput(
+                    "cutrun_nfcore_status_ui"
+                  ),
+
+                  uiOutput(
+                    "cutrun_nfcore_action_buttons_ui"
+                  ),
+
+                  textOutput(
+                    "cutrun_nfcore_message"
+                  )
+                )
+              )
+            ),
+
+            br(),
+
+            div(
+              class = "read-source-note",
+              tags$strong("Downstream analysis"),
+              tags$p(
+                "nf-core performs the primary CUT&RUN workflow. ",
+                "Differential binding remains a CodeSpring downstream step, ",
+                "so completed nf-core BAMs and peak calls will feed the same ",
+                "DiffBind analysis used by the native backend."
+              )
+            )
+          )
+        )
+      }
+
       normalization_choice <- isolate(cutrun_normalization_choice())
       return(div(class = "run-grid",
         tool_panel("Cutadapt", status, "Trim adapters and short reads from raw CUT&RUN FASTQs.",
@@ -18424,6 +23123,555 @@ server <- function(input, output, session) {
       updateCheckboxInput(session, "chip_bowtie2_use_trimmed", value = TRUE)
     }
   })
+  output$cutrun_nfcore_logs_ui <- renderUI({
+    p <- current_project()
+
+    if (
+      is.null(p) ||
+      !is_nfcore_cutrun_project(p)
+    ) {
+      return(NULL)
+    }
+
+    paths <- cutrun_nfcore_controller_paths(
+      p,
+      run_id = "nfcore_cutandrun"
+    )
+
+    log_choices <- c(
+      "Nextflow log" = paths$nextflow_log,
+      "Nextflow trace" = paths$trace_path,
+      "Controller stdout" = paths$stdout,
+      "Controller stderr" = paths$stderr,
+      "Runtime status" = paths$runtime_status,
+      "Active Slurm children" = paths$active_children,
+      "Submission record" = paths$submission_record
+    )
+
+    available <- log_choices[
+      file.exists(log_choices) &
+      !dir.exists(log_choices)
+    ]
+
+    div(
+      class = "cutrun-nfcore-log-card",
+
+      tags$h3("nf-core/cutandrun logs"),
+
+      tags$p(
+        class = "muted small-note",
+        "Live controller, Nextflow, trace, and scheduler information for this CUT&RUN run."
+      ),
+
+      if (!length(available)) {
+        div(
+          class = "empty-box",
+          "No nf-core/cutandrun logs have been written yet."
+        )
+      } else {
+        tagList(
+          selectInput(
+            "cutrun_nfcore_log_file",
+            "Log to view",
+            choices = available,
+            selected = unname(available[[1]]),
+            selectize = FALSE,
+            width = "100%"
+          ),
+
+          tags$p(
+            class = "muted small-note status-path",
+            textOutput(
+              "cutrun_nfcore_log_path",
+              inline = TRUE
+            )
+          ),
+
+          verbatimTextOutput(
+            "cutrun_nfcore_log_text"
+          )
+        )
+      }
+    )
+  })
+
+
+  output$cutrun_nfcore_log_path <- renderText({
+    p <- current_project()
+
+    if (
+      is.null(p) ||
+      !is_nfcore_cutrun_project(p)
+    ) {
+      return("")
+    }
+
+    input$cutrun_nfcore_log_file %||% ""
+  })
+
+
+  output$cutrun_nfcore_log_text <- renderText({
+    p <- current_project()
+
+    if (
+      is.null(p) ||
+      !is_nfcore_cutrun_project(p)
+    ) {
+      return("")
+    }
+
+    invalidateLater(
+      5000,
+      session
+    )
+
+    path <- input$cutrun_nfcore_log_file %||% ""
+
+    if (
+      !nzchar(path) ||
+      !file.exists(path) ||
+      dir.exists(path)
+    ) {
+      return(
+        "The selected nf-core log is not available yet."
+      )
+    }
+
+    lines <- tryCatch(
+      readLines(
+        path,
+        warn = FALSE
+      ),
+      error = function(e) {
+        paste(
+          "Could not read log:",
+          conditionMessage(e)
+        )
+      }
+    )
+
+    max_lines <- 500L
+
+    if (length(lines) > max_lines) {
+      lines <- c(
+        paste0(
+          "... showing the newest ",
+          max_lines,
+          " lines ..."
+        ),
+        tail(
+          lines,
+          max_lines
+        )
+      )
+    }
+
+    paste(
+      lines,
+      collapse = "\n"
+    )
+  })
+
+
+  cutrun_nfcore_message_state <- reactiveVal("")
+  cutrun_nfcore_status_refresh <- reactiveVal(Sys.time())
+
+  output$cutrun_nfcore_message <- renderText({
+    cutrun_nfcore_message_state()
+  })
+
+  cutrun_nfcore_live_status <- reactive({
+    cutrun_nfcore_status_refresh()
+
+    p <- current_project()
+
+    if (
+      is.null(p) ||
+      !is_nfcore_cutrun_project(p)
+    ) {
+      return(NULL)
+    }
+
+    invalidateLater(
+      5000,
+      session
+    )
+
+    tryCatch(
+      cutrun_nfcore_run_status(
+        p,
+        run_id = "nfcore_cutandrun"
+      ),
+      error = function(e) {
+        list(
+          state = "STATUS_ERROR",
+          has_submission = FALSE,
+          controller_pid = "",
+          controller_alive = FALSE,
+          active_children = 0L,
+          child_jobs = data.frame(),
+          run_dir = "",
+          output_dir = "",
+          error = conditionMessage(e)
+        )
+      }
+    )
+  })
+
+
+  output$cutrun_nfcore_status_ui <- renderUI({
+    p <- current_project()
+
+    if (
+      is.null(p) ||
+      !is_nfcore_cutrun_project(p)
+    ) {
+      return(NULL)
+    }
+
+    status <- cutrun_nfcore_live_status()
+
+    if (is.null(status)) {
+      return(NULL)
+    }
+
+    state <- toupper(
+      status$state %||% "NOT_STARTED"
+    )
+
+    state_label <- switch(
+      state,
+      "NOT_STARTED" = "Ready to run",
+      "SUBMITTED" = "Starting",
+      "PENDING" = "Queued",
+      "CONFIGURING" = "Starting",
+      "RUNNING" = "Running",
+      "COMPLETING" = "Finishing",
+      "COMPLETED" = "Completed",
+      "FAILED" = "Failed",
+      "INCOMPLETE" = "Incomplete",
+      "CANCELLED" = "Cancelled",
+      "TIMEOUT" = "Timed out",
+      "OUT_OF_MEMORY" = "Out of memory",
+      "STATUS_ERROR" = "Status unavailable",
+      state
+    )
+
+    child_jobs <- status$child_jobs
+
+    active_tasks_ui <- NULL
+
+    if (
+      is.data.frame(child_jobs) &&
+      NROW(child_jobs)
+    ) {
+      shown <- utils::head(
+        child_jobs,
+        8L
+      )
+
+      active_tasks_ui <- tagList(
+        tags$hr(),
+        tags$strong("Current Slurm tasks"),
+        lapply(
+          seq_len(NROW(shown)),
+          function(i) {
+            job_name <- if (
+              "job_name" %in% names(shown)
+            ) {
+              as.character(
+                shown$job_name[[i]]
+              )
+            } else {
+              "nf-core task"
+            }
+
+            job_state <- if (
+              "state" %in% names(shown)
+            ) {
+              as.character(
+                shown$state[[i]]
+              )
+            } else {
+              ""
+            }
+
+            elapsed <- if (
+              "elapsed" %in% names(shown)
+            ) {
+              as.character(
+                shown$elapsed[[i]]
+              )
+            } else {
+              ""
+            }
+
+            tags$p(
+              class = "muted small-note cutrun-nfcore-task-line",
+              paste(
+                c(
+                  job_name,
+                  job_state,
+                  elapsed
+                )[
+                  nzchar(
+                    c(
+                      job_name,
+                      job_state,
+                      elapsed
+                    )
+                  )
+                ],
+                collapse = " · "
+              )
+            )
+          }
+        )
+      )
+    }
+
+    div(
+      tags$h3(state_label),
+
+      if (identical(state, "NOT_STARTED")) {
+        tags$p(
+          class = "muted small-note",
+          "No nf-core/cutandrun run has been submitted for this project."
+        )
+      } else {
+        tagList(
+          tags$p(
+            class = "muted small-note",
+            paste0(
+              "Controller PID: ",
+              status$controller_pid %||%
+                "not available"
+            )
+          ),
+
+          tags$p(
+            class = "muted small-note",
+            paste0(
+              "Active Slurm tasks: ",
+              status$active_children %||% 0L
+            )
+          )
+        )
+      },
+
+      active_tasks_ui,
+
+      if (nzchar(status$run_dir %||% "")) {
+        tagList(
+          tags$hr(),
+          tags$p(
+            class = "muted small-note status-path",
+            paste(
+              "Run directory:",
+              status$run_dir
+            )
+          )
+        )
+      },
+
+      if (nzchar(status$error %||% "")) {
+        tags$p(
+          class = "text-danger",
+          status$error
+        )
+      }
+    )
+  })
+
+
+  output$cutrun_nfcore_action_buttons_ui <- renderUI({
+    p <- current_project()
+
+    if (
+      is.null(p) ||
+      !is_nfcore_cutrun_project(p)
+    ) {
+      return(NULL)
+    }
+
+    status <- cutrun_nfcore_live_status()
+
+    if (is.null(status)) {
+      return(NULL)
+    }
+
+    state <- toupper(
+      status$state %||% "NOT_STARTED"
+    )
+
+    if (identical(state, "NOT_STARTED")) {
+      return(
+        actionButton(
+          "run_cutrun_nfcore",
+          "Run nf-core/cutandrun",
+          class = "btn-primary"
+        )
+      )
+    }
+
+    active_children <- suppressWarnings(
+      as.integer(status$active_children %||% 0L)
+    )
+
+    if (
+      is.na(active_children) ||
+      active_children < 0L
+    ) {
+      active_children <- 0L
+    }
+
+    if (
+      isTRUE(status$has_submission) &&
+      !isTRUE(status$controller_alive) &&
+      active_children == 0L &&
+      state %in% c(
+        "FAILED",
+        "INCOMPLETE",
+        "CANCELLED",
+        "TIMEOUT",
+        "OUT_OF_MEMORY"
+      )
+    ) {
+      return(
+        actionButton(
+          "resume_cutrun_nfcore",
+          "Resume nf-core/cutandrun",
+          class = "btn-primary"
+        )
+      )
+    }
+
+    if (identical(state, "STATUS_ERROR")) {
+      return(
+        tags$p(
+          class = "text-danger",
+          "Run controls are unavailable until pipeline status can be read."
+        )
+      )
+    }
+
+    NULL
+  })
+
+
+  observeEvent(
+    input$run_cutrun_nfcore,
+    {
+      p <- current_project()
+
+      if (
+        is.null(p) ||
+        !is_nfcore_cutrun_project(p)
+      ) {
+        return()
+      }
+
+      cutrun_nfcore_message_state(
+        "Preparing nf-core/cutandrun submission..."
+      )
+
+      message <- tryCatch(
+        {
+          result <- cutrun_nfcore_submit_run(
+            project = p,
+            run_id = "nfcore_cutandrun",
+            normalisation_mode = "CPM",
+            include_macs2 = isTRUE(
+              input$cutrun_nfcore_include_macs2
+            ),
+            seacr_stringent =
+              input$cutrun_nfcore_seacr_stringency %||%
+              "stringent"
+          )
+
+          paste0(
+            "nf-core/cutandrun started successfully. ",
+            "Controller PID: ",
+            result$controller_pid
+          )
+        },
+        error = function(e) {
+          paste0(
+            "ERROR: ",
+            conditionMessage(e)
+          )
+        }
+      )
+
+      cutrun_nfcore_message_state(
+        message
+      )
+
+      cutrun_nfcore_status_refresh(
+        Sys.time()
+      )
+
+      run_cards_refresh(
+        Sys.time()
+      )
+    },
+    ignoreInit = TRUE
+  )
+
+
+  observeEvent(
+    input$resume_cutrun_nfcore,
+    {
+      p <- current_project()
+
+      if (
+        is.null(p) ||
+        !is_nfcore_cutrun_project(p)
+      ) {
+        return()
+      }
+
+      cutrun_nfcore_message_state(
+        "Resuming nf-core/cutandrun..."
+      )
+
+      message <- tryCatch(
+        {
+          result <- cutrun_nfcore_resume_run(
+            project = p,
+            run_id = "nfcore_cutandrun"
+          )
+
+          paste0(
+            "nf-core/cutandrun resumed successfully. ",
+            "Controller PID: ",
+            result$controller_pid
+          )
+        },
+        error = function(e) {
+          paste0(
+            "ERROR: ",
+            conditionMessage(e)
+          )
+        }
+      )
+
+      cutrun_nfcore_message_state(
+        message
+      )
+
+      cutrun_nfcore_status_refresh(
+        Sys.time()
+      )
+
+      run_cards_refresh(
+        Sys.time()
+      )
+    },
+    ignoreInit = TRUE
+  )
+
+
   observeEvent(input$run_cutrun_bowtie2, {
     trimmed <- isTRUE(input$cutrun_bowtie2_use_trimmed)
     normalization_choice <- isolate(cutrun_normalization_choice())
@@ -18866,6 +24114,16 @@ server <- function(input, output, session) {
     app <- native_results_app()
     tagList(app$ui)
   })
+
+  # Results Explorer is a dynamic UI inside a top-level tab.
+  # Keep the parent UI renderer active even while the tab is hidden;
+  # otherwise Shiny can leave it suspended after tab visibility changes.
+  outputOptions(
+    output,
+    "native_results_ui",
+    suspendWhenHidden = FALSE
+  )
+
 
   observeEvent(native_results_app(), {
     app <- native_results_app()
@@ -20869,47 +26127,472 @@ server <- function(input, output, session) {
     if (!length(paths)) return(data.frame())
     safe_read_table(paths[[which.max(file.info(paths)$mtime)]], 5000)
   }, page_length = 50)
+  output$cutrun_signal_qc_ui <- renderUI({
+    if (!isTRUE(existing_project_selected())) {
+      return(NULL)
+    }
+
+    p <- current_project()
+
+    if (!is_cutrun_project(p)) {
+      return(NULL)
+    }
+
+    if (!is_nfcore_cutrun_project(p)) {
+      return(
+        div(
+          class = "empty-box",
+          paste(
+            "Signal-level QC for native CUT&RUN is shown across",
+            "the Alignment, Fragment Size, and Peak QC tabs."
+          )
+        )
+      )
+    }
+
+    path <- cutrun_nfcore_multiqc_path(p)
+
+    if (
+      !nzchar(path %||% "") ||
+      !file.exists(path)
+    ) {
+      return(
+        div(
+          class = "empty-box",
+          paste(
+            "The nf-core MultiQC report is not available yet.",
+            "Signal QC will appear here after reporting completes."
+          )
+        )
+      )
+    }
+
+    tagList(
+      div(
+        class = "cutrun-section-heading",
+        tags$h4("nf-core signal QC"),
+        tags$p(
+          paste(
+            "Interactive QC summary generated by nf-core/cutandrun.",
+            "This includes alignment and deepTools reporting such as",
+            "sample correlation, PCA, and fingerprint QC when available."
+          )
+        )
+      ),
+      image_or_file_ui(
+        path,
+        "calc(100vh - 240px)"
+      )
+    )
+  })
+
+
   output$cutrun_signal_tracks <- render_csl_table({
+    p <- current_project()
+
+    if (is_nfcore_cutrun_project(p)) {
+      inventory <- cutrun_nfcore_output_inventory(p)
+
+      if (!NROW(inventory)) {
+        return(data.frame(
+          Message = "No published nf-core CUT&RUN signal outputs were detected yet.",
+          stringsAsFactors = FALSE
+        ))
+      }
+
+      show_path <- function(x) {
+        x <- as.character(x)
+        x[!nzchar(x)] <- "—"
+        x
+      }
+
+      result <- data.frame(
+        Sample = inventory$sample,
+        `nf-core group` = inventory$nfcore_group,
+        Replicate = inventory$replicate,
+        bigWig = show_path(inventory$bigwig),
+        bedGraph = show_path(inventory$bedgraph),
+        `SEACR peaks` = show_path(inventory$seacr_peaks),
+        `MACS2 peaks` = show_path(inventory$macs2_peaks),
+        stringsAsFactors = FALSE,
+        check.names = FALSE
+      )
+
+      return(result)
+    }
+
     progress_refresh()
     cutrun_signal_track_table(current_project())
   }, page_length = 50, scroll_y = "600px")
   output$cutrun_seacr_peak_ui <- renderUI({
-    req(identical(input$web_main_tabs %||% "", "Results Explorer"))
+    req(
+      identical(
+        input$web_main_tabs %||% "",
+        "Results Explorer"
+      )
+    )
+
     progress_refresh()
-    choices <- result_file_choices(current_project(), "seacr", "\\.bed$")
-    if (!length(choices)) return(div(class = "empty-box", "No SEACR peak BED files were found yet."))
-    paths <- unname(choices)
-    root <- file.path(current_project()$data_dir, "seacr")
-    methods <- vapply(paths, cutrun_seacr_peak_method, character(1), root = root)
-    available_methods <- sort(unique(methods))
-    selected_method <- selected_choice(input$cutrun_seacr_peak_method, available_methods, available_methods[[1]])
-    method_paths <- paths[methods == selected_method]
-    labels <- vapply(method_paths, function(path) paste(basename(dirname(path)), basename(path), sep = " — "), character(1))
+
+    p <- current_project()
+
+    if (is_nfcore_cutrun_project(p)) {
+      inventory <- cutrun_nfcore_output_inventory(
+        p
+      )
+
+      if (!NROW(inventory)) {
+        return(
+          div(
+            class = "empty-box",
+            "No nf-core SEACR peak BED files were found yet."
+          )
+        )
+      }
+
+      keep <- nzchar(
+        trimws(
+          as.character(
+            inventory$seacr_peaks
+          )
+        )
+      )
+
+      keep <- keep &
+        file.exists(
+          inventory$seacr_peaks
+        )
+
+      inventory <- inventory[
+        keep,
+        ,
+        drop = FALSE
+      ]
+
+      if (!NROW(inventory)) {
+        return(
+          div(
+            class = "empty-box",
+            "No nf-core SEACR peak BED files were found yet."
+          )
+        )
+      }
+
+      paths <- as.character(
+        inventory$seacr_peaks
+      )
+
+      labels <- paste0(
+        inventory$sample,
+        " — ",
+        basename(paths)
+      )
+
+      selected_path <- selected_choice(
+        input$cutrun_seacr_peak_file,
+        paths,
+        paths[[1]]
+      )
+
+      return(
+        tagList(
+          selectInput(
+            "cutrun_seacr_peak_method",
+            "SEACR method",
+            choices = c(
+              "nf-core SEACR" =
+                "nfcore_seacr"
+            ),
+            selected = "nfcore_seacr",
+            selectize = FALSE
+          ),
+
+          selectInput(
+            "cutrun_seacr_peak_file",
+            "SEACR sample",
+            choices = stats::setNames(
+              paths,
+              labels
+            ),
+            selected = selected_path,
+            selectize = FALSE
+          )
+        )
+      )
+    }
+
+    # Native CodeSpring CUT&RUN behavior remains unchanged.
+    choices <- result_file_choices(
+      p,
+      "seacr",
+      "\\.bed$"
+    )
+
+    if (!length(choices)) {
+      return(
+        div(
+          class = "empty-box",
+          "No SEACR peak BED files were found yet."
+        )
+      )
+    }
+
+    paths <- unname(
+      choices
+    )
+
+    root <- file.path(
+      p$data_dir,
+      "seacr"
+    )
+
+    methods <- vapply(
+      paths,
+      cutrun_seacr_peak_method,
+      character(1),
+      root = root
+    )
+
+    available_methods <- sort(
+      unique(
+        methods
+      )
+    )
+
+    selected_method <- selected_choice(
+      input$cutrun_seacr_peak_method,
+      available_methods,
+      available_methods[[1]]
+    )
+
+    method_paths <- paths[
+      methods == selected_method
+    ]
+
+    labels <- vapply(
+      method_paths,
+      function(path) {
+        paste(
+          basename(
+            dirname(path)
+          ),
+          basename(path),
+          sep = " — "
+        )
+      },
+      character(1)
+    )
+
     tagList(
-      selectInput("cutrun_seacr_peak_method", "SEACR method", choices = stats::setNames(available_methods, vapply(available_methods, cutrun_seacr_method_label, character(1))), selected = selected_method, selectize = FALSE),
-      selectInput("cutrun_seacr_peak_file", "SEACR sample", choices = stats::setNames(method_paths, labels), selected = selected_choice(input$cutrun_seacr_peak_file, method_paths, method_paths[[1]]), selectize = FALSE)
+      selectInput(
+        "cutrun_seacr_peak_method",
+        "SEACR method",
+        choices = stats::setNames(
+          available_methods,
+          vapply(
+            available_methods,
+            cutrun_seacr_method_label,
+            character(1)
+          )
+        ),
+        selected = selected_method,
+        selectize = FALSE
+      ),
+
+      selectInput(
+        "cutrun_seacr_peak_file",
+        "SEACR sample",
+        choices = stats::setNames(
+          method_paths,
+          labels
+        ),
+        selected = selected_choice(
+          input$cutrun_seacr_peak_file,
+          method_paths,
+          method_paths[[1]]
+        ),
+        selectize = FALSE
+      )
     )
   })
+
+
   output$cutrun_seacr_peak_table <- render_csl_table({
-    path <- validated_project_result_path(current_project(), input$cutrun_seacr_peak_file)
-    validate(need(nzchar(path), "Choose a SEACR peak file from the current project."))
-    safe_read_result_table(path, 5000)
+    p <- current_project()
+
+    path <- validated_project_result_path(
+      p,
+      input$cutrun_seacr_peak_file
+    )
+
+    validate(
+      need(
+        nzchar(path),
+        "Choose a SEACR peak file from the current project."
+      )
+    )
+
+    safe_read_result_table(
+      path,
+      5000
+    )
   }, page_length = 50)
+
+
   output$cutrun_seacr_peak_cards <- renderUI({
     progress_refresh()
-    path <- validated_project_result_path(current_project(), input$cutrun_seacr_peak_file)
-    if (!nzchar(path)) return(NULL)
-    peaks <- safe_read_result_table(path, 5000)
-    total_peaks <- cutrun_seacr_peak_total(path)
-    widths <- if (NROW(peaks) && all(c("start", "end") %in% names(peaks))) clean_metric_number(peaks$end) - clean_metric_number(peaks$start) else numeric(0)
-    widths <- widths[is.finite(widths) & widths > 0]
-    div(class = "cutrun-metric-grid compact",
-        cutrun_metric_card("Sample", basename(dirname(path)), basename(path), "blue"),
-        cutrun_metric_card("Total peaks", format_metric_value(total_peaks), "Preview shows up to 5,000", "green"),
-        cutrun_metric_card("Median width", if (length(widths)) paste0(format_metric_value(stats::median(widths)), " bp") else "—", "Native SEACR regions", "gold"),
-        cutrun_metric_card("File size", human_file_size(path), "BED output", "purple")
+
+    p <- current_project()
+
+    path <- validated_project_result_path(
+      p,
+      input$cutrun_seacr_peak_file
+    )
+
+    if (!nzchar(path)) {
+      return(NULL)
+    }
+
+    peaks <- safe_read_result_table(
+      path,
+      5000
+    )
+
+    total_peaks <- cutrun_seacr_peak_total(
+      path
+    )
+
+    widths <- if (
+      NROW(peaks) &&
+      all(
+        c(
+          "start",
+          "end"
+        ) %in% names(peaks)
+      )
+    ) {
+      clean_metric_number(
+        peaks$end
+      ) -
+        clean_metric_number(
+          peaks$start
+        )
+    } else {
+      numeric(0)
+    }
+
+    widths <- widths[
+      is.finite(widths) &
+        widths > 0
+    ]
+
+    sample_label <- basename(
+      dirname(path)
+    )
+
+    source_note <- basename(
+      path
+    )
+
+    width_note <- "SEACR regions"
+
+    if (is_nfcore_cutrun_project(p)) {
+      inventory <- cutrun_nfcore_output_inventory(
+        p
+      )
+
+      if (NROW(inventory)) {
+        normalize_result_path <- function(x) {
+          if (
+            is.na(x) ||
+            !nzchar(
+              trimws(
+                as.character(x)
+              )
+            )
+          ) {
+            return("")
+          }
+
+          normalizePath(
+            x,
+            winslash = "/",
+            mustWork = FALSE
+          )
+        }
+
+        selected_path <- normalize_result_path(
+          path
+        )
+
+        inventory_paths <- vapply(
+          inventory$seacr_peaks,
+          normalize_result_path,
+          character(1)
+        )
+
+        hit <- which(
+          inventory_paths ==
+            selected_path
+        )
+
+        if (length(hit) == 1L) {
+          sample_label <- as.character(
+            inventory$sample[[hit]]
+          )
+        }
+      }
+
+      width_note <- "nf-core SEACR regions"
+    }
+
+    div(
+      class = "cutrun-metric-grid compact",
+
+      cutrun_metric_card(
+        "Sample",
+        sample_label,
+        source_note,
+        "blue"
+      ),
+
+      cutrun_metric_card(
+        "Total peaks",
+        format_metric_value(
+          total_peaks
+        ),
+        "Preview shows up to 5,000",
+        "green"
+      ),
+
+      cutrun_metric_card(
+        "Median width",
+        if (length(widths)) {
+          paste0(
+            format_metric_value(
+              stats::median(widths)
+            ),
+            " bp"
+          )
+        } else {
+          "—"
+        },
+        width_note,
+        "gold"
+      ),
+
+      cutrun_metric_card(
+        "File size",
+        human_file_size(
+          path
+        ),
+        "BED output",
+        "purple"
+      )
     )
   })
+
+
   output$cutrun_peak_overlap_summary <- render_csl_table({
     progress_refresh()
     cutrun_peak_overlap_summary_table(current_project())
