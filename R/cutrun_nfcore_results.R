@@ -1093,3 +1093,291 @@ cutrun_nfcore_output_inventory <- function(
   result
 }
 
+cutrun_nfcore_alignment_summary_table <- function(project) {
+  paths <- cutrun_nfcore_submission_paths(project)
+
+  multiqc_dir <- file.path(
+    paths$output_dir,
+    "04_reporting",
+    "multiqc",
+    "multiqc_data"
+  )
+
+  read_multiqc <- function(filename) {
+    path <- file.path(multiqc_dir, filename)
+
+    if (!file.exists(path) || isTRUE(file.info(path)$size <= 0)) {
+      return(data.frame(stringsAsFactors = FALSE))
+    }
+
+    tryCatch(
+      utils::read.delim(
+        path,
+        header = TRUE,
+        sep = "\t",
+        quote = "",
+        comment.char = "",
+        check.names = FALSE,
+        stringsAsFactors = FALSE
+      ),
+      error = function(e) data.frame(stringsAsFactors = FALSE)
+    )
+  }
+
+  if (!file.exists(paths$mapping_path)) {
+    return(data.frame(stringsAsFactors = FALSE))
+  }
+
+  mapping <- tryCatch(
+    utils::read.delim(
+      paths$mapping_path,
+      header = TRUE,
+      sep = "\t",
+      quote = "",
+      comment.char = "",
+      check.names = FALSE,
+      stringsAsFactors = FALSE
+    ),
+    error = function(e) data.frame(stringsAsFactors = FALSE)
+  )
+
+  required <- c(
+    "codespring_sample",
+    "nfcore_group",
+    "replicate"
+  )
+
+  if (!NROW(mapping) || !all(required %in% names(mapping))) {
+    return(data.frame(stringsAsFactors = FALSE))
+  }
+
+  bowtie2 <- read_multiqc("multiqc_bowtie2.txt")
+  flagstat <- read_multiqc("multiqc_samtools_flagstat.txt")
+  general <- read_multiqc("multiqc_general_stats.txt")
+  picard <- read_multiqc("multiqc_picard_dups.txt")
+
+  exact_sample_row <- function(df, sample_id) {
+    if (!NROW(df) || !"Sample" %in% names(df)) {
+      return(data.frame(stringsAsFactors = FALSE))
+    }
+
+    hit <- which(as.character(df$Sample) == sample_id)
+
+    if (!length(hit)) {
+      return(df[0, , drop = FALSE])
+    }
+
+    df[hit[[1]], , drop = FALSE]
+  }
+
+  number_from <- function(row, column) {
+    if (!NROW(row) || !column %in% names(row)) {
+      return(NA_real_)
+    }
+
+    suppressWarnings(as.numeric(row[[column]][[1]]))
+  }
+
+  number_matching <- function(row, pattern) {
+    if (!NROW(row)) {
+      return(NA_real_)
+    }
+
+    columns <- grep(
+      pattern,
+      names(row),
+      value = TRUE
+    )
+
+    if (!length(columns)) {
+      return(NA_real_)
+    }
+
+    suppressWarnings(as.numeric(row[[columns[[1]]]][[1]]))
+  }
+
+  rows <- lapply(seq_len(NROW(mapping)), function(i) {
+    codespring_sample <- trimws(
+      as.character(mapping$codespring_sample[[i]])
+    )
+    nfcore_group <- trimws(
+      as.character(mapping$nfcore_group[[i]])
+    )
+    replicate <- trimws(
+      as.character(mapping$replicate[[i]])
+    )
+
+    if (
+      !nzchar(codespring_sample) ||
+      !nzchar(nfcore_group) ||
+      !nzchar(replicate)
+    ) {
+      return(NULL)
+    }
+
+    # Exact nf-core sample identifier, e.g.
+    # target__IR_Creb_2wks_R1
+    nfcore_sample <- paste0(
+      nfcore_group,
+      "_R",
+      replicate
+    )
+
+    bt <- exact_sample_row(bowtie2, nfcore_sample)
+    fs <- exact_sample_row(flagstat, nfcore_sample)
+    gs <- exact_sample_row(general, nfcore_sample)
+    pc <- exact_sample_row(picard, nfcore_sample)
+
+    overall_rate <- number_from(
+      bt,
+      "overall_alignment_rate"
+    )
+
+    paired_total <- number_from(
+      bt,
+      "paired_total"
+    )
+    paired_none <- number_from(
+      bt,
+      "paired_aligned_none"
+    )
+    total_reads <- number_from(
+      bt,
+      "total_reads"
+    )
+
+    # Bowtie2's paired-end count represents read pairs.
+    # Convert aligned pairs to mapped reads so this stays compatible
+    # with the native mapped_reads field.
+    mapped_reads <- NA_real_
+
+    if (
+      is.finite(paired_total) &&
+      is.finite(paired_none)
+    ) {
+      mapped_reads <- 2 * max(
+        0,
+        paired_total - paired_none
+      )
+    } else if (
+      is.finite(total_reads) &&
+      is.finite(overall_rate)
+    ) {
+      mapped_reads <- total_reads *
+        overall_rate / 100
+    }
+
+    read_pairs_examined <- number_from(
+      pc,
+      "READ_PAIRS_EXAMINED"
+    )
+
+    read_pair_duplicates <- number_from(
+      pc,
+      "READ_PAIR_DUPLICATES"
+    )
+
+    unpaired_examined <- number_from(
+      pc,
+      "UNPAIRED_READS_EXAMINED"
+    )
+
+    unpaired_duplicates <- number_from(
+      pc,
+      "UNPAIRED_READ_DUPLICATES"
+    )
+
+    nonduplicate_pairs <- if (
+      is.finite(read_pairs_examined) &&
+      is.finite(read_pair_duplicates)
+    ) {
+      max(
+        0,
+        read_pairs_examined - read_pair_duplicates
+      )
+    } else {
+      NA_real_
+    }
+
+    nonduplicate_unpaired <- if (
+      is.finite(unpaired_examined) &&
+      is.finite(unpaired_duplicates)
+    ) {
+      max(
+        0,
+        unpaired_examined - unpaired_duplicates
+      )
+    } else {
+      0
+    }
+
+    fragments_used <- if (
+      is.finite(nonduplicate_pairs)
+    ) {
+      nonduplicate_pairs + nonduplicate_unpaired
+    } else {
+      NA_real_
+    }
+
+    processed_mapped_reads <- if (
+      is.finite(nonduplicate_pairs)
+    ) {
+      (2 * nonduplicate_pairs) +
+        nonduplicate_unpaired
+    } else {
+      NA_real_
+    }
+
+    duplicate_fraction <- number_matching(
+      gs,
+      "PERCENT_DUPLICATION$"
+    )
+
+    properly_paired_pct <- number_matching(
+      gs,
+      "reads_properly_paired_percent$"
+    )
+
+    bedgraph <- tryCatch(
+      cutrun_nfcore_bedgraph_path(
+        project,
+        codespring_sample
+      ),
+      error = function(e) ""
+    )
+
+    if (!length(bedgraph) || is.na(bedgraph[[1]])) {
+      bedgraph <- ""
+    } else {
+      bedgraph <- as.character(bedgraph[[1]])
+    }
+
+    data.frame(
+      sample = codespring_sample,
+      mapped_reads = mapped_reads,
+      deduplicated_reads = processed_mapped_reads,
+      fragments_used_for_signal = fragments_used,
+      duplicate_fraction = duplicate_fraction,
+      normalization_mode = "CPM",
+      spikein_mapped_reads = "",
+      spikein_scale_factor = "",
+      normalized_bedgraph = bedgraph,
+      overall_alignment_rate = overall_rate,
+      properly_paired_percent = properly_paired_pct,
+      stringsAsFactors = FALSE,
+      check.names = FALSE
+    )
+  })
+
+  rows <- Filter(
+    Negate(is.null),
+    rows
+  )
+
+  if (!length(rows)) {
+    return(data.frame(stringsAsFactors = FALSE))
+  }
+
+  do.call(rbind, rows)
+}
+

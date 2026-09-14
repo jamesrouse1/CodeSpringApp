@@ -5546,7 +5546,7 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
       "COMPLETING" = "Active",
       "COMPLETED" = "Complete",
       "CANCELLED" = "Cancelled",
-      "FAILED" = "Likely failed",
+      "FAILED" = "Partial",
       "INCOMPLETE" = "Likely failed",
       "TIMEOUT" = "Likely failed",
       "OUT_OF_MEMORY" = "Likely failed",
@@ -7317,7 +7317,10 @@ pipeline_order <- function(project = NULL) {
   if (!is.null(project) && is_scrna_project(project)) return(scrna_pipeline_order(project))
   if (!is.null(project) && is_cutrun_project(project)) {
     if (is_nfcore_cutrun_project(project)) {
-      return("nf-core/cutandrun")
+      return(c(
+        "nf-core/cutandrun",
+        "Differential Peaks"
+      ))
     }
     return(cutrun_pipeline_order())
   }
@@ -7577,6 +7580,10 @@ metric_file_to_named_list <- function(path) {
 }
 
 cutrun_alignment_summary_table <- function(project) {
+  if (is_nfcore_cutrun_project(project)) {
+    return(cutrun_nfcore_alignment_summary_table(project))
+  }
+
   summary_path <- file.path(project$data_dir, "bowtie2_summary", "cutrun_alignment_summary.txt")
   saved <- safe_read_table(summary_path, 5000)
   files <- if (dir.exists(file.path(project$data_dir, "bowtie2"))) {
@@ -7992,6 +7999,153 @@ cutrun_signal_track_table <- function(project) {
 }
 
 genome_browser_track_catalog <- function(project) {
+
+  # nf-core/cutandrun stores signal and peak outputs under its own
+  # published results tree rather than the native CodeSpring folders.
+  if (is_nfcore_cutrun_project(project)) {
+    inventory <- cutrun_nfcore_output_inventory(project)
+
+    if (!NROW(inventory)) {
+      return(data.frame())
+    }
+
+    rows <- list()
+
+    add_track <- function(
+      sample,
+      path,
+      kind,
+      format,
+      label
+    ) {
+      path <- trimws(as.character(path %||% ""))
+
+      if (
+        !nzchar(path) ||
+        !file.exists(path) ||
+        dir.exists(path) ||
+        file_size_for(path) <= 0
+      ) {
+        return(NULL)
+      }
+
+      data.frame(
+        sample = as.character(sample),
+        kind = kind,
+        format = format,
+        label = label,
+        path = normalizePath(
+          path,
+          winslash = "/",
+          mustWork = TRUE
+        ),
+        stringsAsFactors = FALSE,
+        check.names = FALSE
+      )
+    }
+
+    for (i in seq_len(NROW(inventory))) {
+      sample <- as.character(
+        inventory$sample[[i]]
+      )
+
+      signal <- add_track(
+        sample = sample,
+        path = inventory$bigwig[[i]],
+        kind = "signal",
+        format = "bigwig",
+        label = paste(
+          sample,
+          "CPM signal",
+          sep = " — "
+        )
+      )
+
+      if (!is.null(signal)) {
+        rows[[length(rows) + 1L]] <- signal
+      }
+
+      seacr <- add_track(
+        sample = sample,
+        path = inventory$seacr_peaks[[i]],
+        kind = "peaks",
+        format = "bed",
+        label = paste(
+          sample,
+          "SEACR peaks",
+          sep = " — "
+        )
+      )
+
+      if (!is.null(seacr)) {
+        rows[[length(rows) + 1L]] <- seacr
+      }
+
+      macs_path <- trimws(
+        as.character(
+          inventory$macs2_peaks[[i]] %||% ""
+        )
+      )
+
+      if (nzchar(macs_path)) {
+        ext <- tolower(
+          tools::file_ext(macs_path)
+        )
+
+        macs_format <- if (
+          identical(ext, "narrowpeak")
+        ) {
+          "narrowPeak"
+        } else if (
+          identical(ext, "broadpeak")
+        ) {
+          "broadPeak"
+        } else {
+          "bed"
+        }
+
+        macs2 <- add_track(
+          sample = sample,
+          path = macs_path,
+          kind = "peaks",
+          format = macs_format,
+          label = paste(
+            sample,
+            "MACS2 peaks",
+            sep = " — "
+          )
+        )
+
+        if (!is.null(macs2)) {
+          rows[[length(rows) + 1L]] <- macs2
+        }
+      }
+    }
+
+    if (!length(rows)) {
+      return(data.frame())
+    }
+
+    catalog <- do.call(
+      rbind,
+      rows
+    )
+
+    catalog <- catalog[
+      !duplicated(catalog$path),
+      ,
+      drop = FALSE
+    ]
+
+    catalog$label <- make.unique(
+      catalog$label,
+      sep = " — "
+    )
+
+    rownames(catalog) <- NULL
+
+    return(catalog)
+  }
   signal_root <- file.path(project$data_dir, "bowtie2")
   signal_files <- if (dir.exists(signal_root)) {
     list.files(signal_root, pattern = "\\.(bw|bigwig)$", recursive = TRUE, full.names = TRUE, ignore.case = TRUE)
@@ -9531,6 +9685,11 @@ cutrun_results_explorer_ui <- function() {
                   sidebarPanel(width = 3, uiOutput("cutrun_fragment_sample_ui"), tags$hr(), helpText("Picard insert-size distribution for the selected paired-end library.")),
                   mainPanel(width = 9, uiOutput("cutrun_fragment_size_ui"))
                 )
+              ),
+              tabPanel(
+                "Signal QC",
+                br(),
+                uiOutput("cutrun_signal_qc_ui")
               ),
               tabPanel("Peak QC",
                 br(),
@@ -11518,6 +11677,65 @@ cutrun_peak_source_catalog <- function(project) {
 # Shared-overlap outputs are intentionally added only here—not to the overlap
 # generator itself—so overlap results cannot recursively become overlap inputs.
 cutrun_diffbind_peak_source_catalog <- function(project) {
+  if (is_nfcore_cutrun_project(project)) {
+    design <- cutrun_target_design(
+      project,
+      include_controls = FALSE
+    )
+
+    samples <- if (
+      NROW(design) &&
+      "sample" %in% names(design)
+    ) {
+      trimws(as.character(design$sample))
+    } else {
+      character(0)
+    }
+
+    samples <- samples[nzchar(samples)]
+
+    paths <- vapply(
+      samples,
+      function(sample) {
+        tryCatch(
+          cutrun_nfcore_peak_path(
+            project,
+            sample,
+            "SEACR"
+          ),
+          error = function(e) ""
+        )
+      },
+      character(1)
+    )
+
+    present <- nzchar(paths) &
+      file.exists(paths) &
+      vapply(
+        paths,
+        file_size_for,
+        numeric(1)
+      ) > 0
+
+    completed <- sum(present)
+
+    return(
+      data.frame(
+        source_id = "nfcore_seacr_stringent",
+        tool = "SEACR",
+        setting = "stringent",
+        label = paste0(
+          "nf-core SEACR — stringent (",
+          completed,
+          "/",
+          length(samples),
+          " non-empty target samples)"
+        ),
+        stringsAsFactors = FALSE,
+        check.names = FALSE
+      )
+    )
+  }
   sources <- cutrun_peak_source_catalog(project)
   overlap_root <- file.path(project$data_dir, "peak_overlap")
   overlap_sets <- if (dir.exists(overlap_root)) {
@@ -11551,6 +11769,41 @@ cutrun_diffbind_peak_source_catalog <- function(project) {
 }
 
 cutrun_peak_source_file <- function(project, source_id, sample, sources = NULL) {
+  if (is_nfcore_cutrun_project(project)) {
+    source_id <- trimws(
+      as.character(source_id %||% "")
+    )
+
+    if (!identical(
+      source_id,
+      "nfcore_seacr_stringent"
+    )) {
+      return("")
+    }
+
+    path <- tryCatch(
+      cutrun_nfcore_peak_path(
+        project,
+        sample,
+        "SEACR"
+      ),
+      error = function(e) ""
+    )
+
+    path <- trimws(
+      as.character(path %||% "")
+    )
+
+    if (
+      !nzchar(path) ||
+      !file.exists(path) ||
+      file_size_for(path) <= 0
+    ) {
+      return("")
+    }
+
+    return(path)
+  }
   if (is.null(sources)) sources <- cutrun_peak_source_catalog(project)
   source <- sources[sources$source_id == source_id, , drop = FALSE]
   if (!NROW(source)) return("")
@@ -12650,6 +12903,15 @@ cutrun_alignment_values <- function(project, sample) {
 }
 
 cutrun_bowtie2_signal_bam <- function(project, sample) {
+  if (is_nfcore_cutrun_project(project)) {
+    return(
+      cutrun_nfcore_bam_path(
+        project,
+        sample
+      )
+    )
+  }
+
   metrics <- cutrun_alignment_values(project, sample)
   suffix <- if (identical(metrics[["dedup_mode"]], "dedup")) "Aligned.sortedByCoord_removeDup.out.bam" else "Aligned.sortedByCoord.out.bam"
   file.path(project$data_dir, "bowtie2", sample, paste0(sample, suffix))
@@ -14594,6 +14856,22 @@ run_step_meta <- function(project = NULL) {
       "Review or complete sample metadata for the uploaded count matrix.",
       "Run differential expression with the selected DESeq2 model.",
       "Run pathway analysis from the matching DESeq2 result."
+    )
+  } else if (
+    !is.null(project) &&
+    is_cutrun_project(project) &&
+    is_nfcore_cutrun_project(project)
+  ) {
+    c(
+      paste0(
+        "Run nf-core/cutandrun ",
+        CUTRUN_NFCORE_VERSION,
+        " for QC, alignment, signal generation, peak calling, and reporting."
+      ),
+      paste(
+        "Run CodeSpring DiffBind/DESeq2 downstream using completed",
+        "nf-core BAMs and stringent SEACR peaks."
+      )
     )
   } else if (!is.null(project) && is_cutrun_project(project)) {
     c(
@@ -25849,6 +26127,66 @@ server <- function(input, output, session) {
     if (!length(paths)) return(data.frame())
     safe_read_table(paths[[which.max(file.info(paths)$mtime)]], 5000)
   }, page_length = 50)
+  output$cutrun_signal_qc_ui <- renderUI({
+    if (!isTRUE(existing_project_selected())) {
+      return(NULL)
+    }
+
+    p <- current_project()
+
+    if (!is_cutrun_project(p)) {
+      return(NULL)
+    }
+
+    if (!is_nfcore_cutrun_project(p)) {
+      return(
+        div(
+          class = "empty-box",
+          paste(
+            "Signal-level QC for native CUT&RUN is shown across",
+            "the Alignment, Fragment Size, and Peak QC tabs."
+          )
+        )
+      )
+    }
+
+    path <- cutrun_nfcore_multiqc_path(p)
+
+    if (
+      !nzchar(path %||% "") ||
+      !file.exists(path)
+    ) {
+      return(
+        div(
+          class = "empty-box",
+          paste(
+            "The nf-core MultiQC report is not available yet.",
+            "Signal QC will appear here after reporting completes."
+          )
+        )
+      )
+    }
+
+    tagList(
+      div(
+        class = "cutrun-section-heading",
+        tags$h4("nf-core signal QC"),
+        tags$p(
+          paste(
+            "Interactive QC summary generated by nf-core/cutandrun.",
+            "This includes alignment and deepTools reporting such as",
+            "sample correlation, PCA, and fingerprint QC when available."
+          )
+        )
+      ),
+      image_or_file_ui(
+        path,
+        "calc(100vh - 240px)"
+      )
+    )
+  })
+
+
   output$cutrun_signal_tracks <- render_csl_table({
     p <- current_project()
 

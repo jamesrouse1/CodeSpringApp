@@ -717,7 +717,8 @@ cutrun_nfcore_params <- function(
       seacr_norm = "non",
       seacr_stringent = seacr_stringent,
       consensus_peak_mode = "group",
-      replicate_threshold = 1L
+      replicate_threshold = 1L,
+      dt_calc_all_matrix = FALSE
     )
   )
 
@@ -1480,6 +1481,26 @@ cutrun_nfcore_resume_run <- function(
   # Nextflow refuses to overwrite an existing -with-trace file.
   # Preserve the previous attempt before starting -resume.
   cutrun_nfcore_archive_trace(paths)
+
+  # Resume reuses the existing controller bundle and params.json.
+  # Keep expensive optional all-sample deepTools reporting disabled,
+  # including for runs created before this default was changed.
+  if (file.exists(paths$params_path)) {
+    resume_params <- jsonlite::read_json(
+      paths$params_path,
+      simplifyVector = TRUE
+    )
+
+    resume_params$dt_calc_all_matrix <- FALSE
+
+    jsonlite::write_json(
+      resume_params,
+      paths$params_path,
+      auto_unbox = TRUE,
+      pretty = TRUE,
+      null = "null"
+    )
+  }
 
   values <- sarek_read_key_value_file(
     paths$submission_record
