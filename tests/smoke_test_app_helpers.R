@@ -2028,18 +2028,20 @@ write.table(
   ),
   scaling_summary_project$design_matrix_path, sep = "\t", row.names = FALSE, quote = FALSE
 )
-for (entry in list(c("Target1", "1.250"), c("IgG1", "0.800"))) {
+for (entry in list(c("Target1", "1.250", "12500"), c("IgG1", "0.800", "8000"))) {
   sample <- entry[[1]]
   summary_path <- file.path(scaling_summary_project$data_dir, "bowtie2", sample, paste0(sample, "_alignment_summary.txt"))
   dir.create(dirname(summary_path), recursive = TRUE, showWarnings = FALSE)
-  writeLines(c(paste0("sample\t", sample), paste0("spikein_scale_factor\t", entry[[2]])), summary_path)
+  writeLines(c(paste0("sample\t", sample), paste0("spikein_mapped_reads\t", entry[[3]]), paste0("spikein_scale_factor\t", entry[[2]])), summary_path)
 }
 scaling_summary <- app_env$cutrun_seacr_peak_summary_table(scaling_summary_project)
 assert(
   identical(scaling_summary[["IgG control"]], "IgG1") &&
+    identical(scaling_summary[["Sample E. coli Mapped Reads"]], "12500") &&
+    identical(scaling_summary[["IgG Control E. coli Mapped Reads"]], "8000") &&
     identical(scaling_summary[["Sample Scale Factor"]], "1.250") &&
     identical(scaling_summary[["IgG Control Scale Factor"]], "0.800"),
-  "CUT&RUN peak summary reports the matched IgG and both target and control scale factors"
+  "CUT&RUN peak summary reports matched IgG E. coli reads and scale factors alongside each target"
 )
 app_source_text <- paste(readLines(file.path(repo_root, "app.R"), warn = FALSE), collapse = "\n")
 assert(grepl("Select all samples", app_source_text, fixed = TRUE) && grepl("Clear selection", app_source_text, fixed = TRUE), "sample-level step selectors expose select-all and clear controls")
