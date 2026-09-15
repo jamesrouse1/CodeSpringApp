@@ -7680,7 +7680,8 @@ cutrun_seacr_peak_summary_table <- function(project) {
       if (column %in% names(design)) out[[label]] <- as.character(design[[column]])
     }
   }
-  out[["IgG control"]] <- vapply(samples, function(sample) cutrun_control_sample_for(project, sample), character(1))
+  matched_controls <- vapply(samples, function(sample) cutrun_control_sample_for(project, sample), character(1))
+  out[["IgG control"]] <- ifelse(nzchar(matched_controls), matched_controls, "No matched IgG control")
 
   if (NROW(frip) && all(c("sample", "seacr_run", "peak_count") %in% names(frip))) {
     runs <- sort(unique(trimws(as.character(frip$seacr_run))))
@@ -7727,21 +7728,32 @@ cutrun_seacr_peak_summary_table <- function(project) {
 
   alignment <- cutrun_alignment_summary_table(project)
   alignment_columns <- c(`Mapped Reads` = "mapped_reads", `Deduplicated Reads` = "deduplicated_reads", `Signal Fragments` = "fragments_used_for_signal")
+  spikein_not_generated <- "Not generated — run Bowtie2 with E. coli spike-in"
+  no_control <- !nzchar(matched_controls)
+  out[["Sample E. coli Mapped Reads"]] <- rep(spikein_not_generated, length(samples))
+  out[["IgG Control E. coli Mapped Reads"]] <- ifelse(no_control, "No matched IgG control", spikein_not_generated)
+  out[["Sample Scale Factor"]] <- rep(spikein_not_generated, length(samples))
+  out[["IgG Control Scale Factor"]] <- ifelse(no_control, "No matched IgG control", spikein_not_generated)
   if (NROW(alignment) && "sample" %in% names(alignment)) {
     alignment_samples <- trimws(as.character(alignment$sample))
     # Peak calling pairs each target with its matched IgG. Show the two
     # E. coli measurements side by side so the applied scaling is auditable
     # without opening individual Bowtie2 summaries.
     target_index <- match(samples, alignment_samples)
-    control_index <- match(as.character(out[["IgG control"]]), alignment_samples)
-    if ("spikein_mapped_reads" %in% names(alignment)) {
-      out[["Sample E. coli Mapped Reads"]] <- as.character(alignment$spikein_mapped_reads[target_index])
-      out[["IgG Control E. coli Mapped Reads"]] <- as.character(alignment$spikein_mapped_reads[control_index])
+    control_index <- match(matched_controls, alignment_samples)
+    alignment_value <- function(column, index, no_control = rep(FALSE, length(index))) {
+      out <- rep(spikein_not_generated, length(index))
+      out[no_control] <- "No matched IgG control"
+      if (!column %in% names(alignment)) return(out)
+      values <- trimws(as.character(alignment[[column]][index]))
+      has_value <- !is.na(index) & !is.na(values) & nzchar(values) & !tolower(values) %in% c("na", "nan")
+      out[has_value] <- values[has_value]
+      out
     }
-    if ("spikein_scale_factor" %in% names(alignment)) {
-      out[["Sample Scale Factor"]] <- as.character(alignment$spikein_scale_factor[target_index])
-      out[["IgG Control Scale Factor"]] <- as.character(alignment$spikein_scale_factor[control_index])
-    }
+    out[["Sample E. coli Mapped Reads"]] <- alignment_value("spikein_mapped_reads", target_index)
+    out[["IgG Control E. coli Mapped Reads"]] <- alignment_value("spikein_mapped_reads", control_index, no_control)
+    out[["Sample Scale Factor"]] <- alignment_value("spikein_scale_factor", target_index)
+    out[["IgG Control Scale Factor"]] <- alignment_value("spikein_scale_factor", control_index, no_control)
     for (label in names(alignment_columns)) {
       column <- alignment_columns[[label]]
       if (!column %in% names(alignment)) next
@@ -21730,10 +21742,11 @@ server <- function(input, output, session) {
           tags$p(class = "muted small-note", "Run after SEACR. Peak QC uses the normalization/stringency combination selected above and stores its outputs in a matching subfolder."),
           "run_cutrun_peakqc", "Submit Peak QC"),
         tool_panel(
-          "Peak-Calling Summary", status,
-          "Ravinder-style per-sample peak counts across every SEACR configuration, MACS2, and shared-overlap output.",
-          tagList(
-            tags$p(class = "muted small-note", "Columns are added automatically as new peak callers/settings are completed and are removed if their output folders are deleted."),
+      "Peak-Calling Summary", status,
+      "Ravinder-style per-sample peak counts across every SEACR configuration, MACS2, and shared-overlap output.",
+      tagList(
+        tags$p(class = "muted small-note", "Columns are added automatically as new peak callers/settings are completed and are removed if their output folders are deleted."),
+        tags$p(class = "muted small-note", "E. coli read counts and scale factors are created by Bowtie2 only when E. coli spike-in normalization is selected. A ‘Not generated’ entry means rerun Generate selected signal tracks in E. coli spike-in mode for that target and its matched IgG control."),
             uiOutput("cutrun_peak_calling_summary_job_ui"),
             downloadButton("download_cutrun_peak_calling_run_summary", "Download peak-calling summary (.xlsx)"), br(), br(),
             table_output("cutrun_peak_calling_run_summary")
