@@ -7726,12 +7726,22 @@ cutrun_seacr_peak_summary_table <- function(project) {
   }
 
   alignment <- cutrun_alignment_summary_table(project)
-  alignment_columns <- c(`E. coli Mapped Reads` = "spikein_mapped_reads", `Spike-in Scale Factor` = "spikein_scale_factor", `Mapped Reads` = "mapped_reads", `Deduplicated Reads` = "deduplicated_reads", `Signal Fragments` = "fragments_used_for_signal")
+  alignment_columns <- c(`E. coli Mapped Reads` = "spikein_mapped_reads", `Mapped Reads` = "mapped_reads", `Deduplicated Reads` = "deduplicated_reads", `Signal Fragments` = "fragments_used_for_signal")
   if (NROW(alignment) && "sample" %in% names(alignment)) {
+    alignment_samples <- trimws(as.character(alignment$sample))
+    # Peak calling pairs each target with its matched IgG. Show the two
+    # normalization factors side by side so the applied scaling is auditable
+    # without opening individual Bowtie2 summaries.
+    if ("spikein_scale_factor" %in% names(alignment)) {
+      target_index <- match(samples, alignment_samples)
+      control_index <- match(as.character(out[["IgG control"]]), alignment_samples)
+      out[["Sample Scale Factor"]] <- as.character(alignment$spikein_scale_factor[target_index])
+      out[["IgG Control Scale Factor"]] <- as.character(alignment$spikein_scale_factor[control_index])
+    }
     for (label in names(alignment_columns)) {
       column <- alignment_columns[[label]]
       if (!column %in% names(alignment)) next
-      index <- match(samples, trimws(as.character(alignment$sample)))
+      index <- match(samples, alignment_samples)
       out[[label]] <- as.character(alignment[[column]][index])
     }
   }

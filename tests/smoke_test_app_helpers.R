@@ -2015,6 +2015,32 @@ assert(
 )
 shared_project_summary <- app_env$cutrun_seacr_peak_summary_table(seacr_selector_project)
 assert(any(grepl("Shared Peaks:", names(shared_project_summary), fixed = TRUE)), "project peak summary automatically adds each shared-overlap peak count column")
+scaling_summary_project <- seacr_selector_project
+scaling_summary_project$data_dir <- file.path(root, "cutrun-scaling-summary", "data")
+scaling_summary_project$design_matrix_path <- file.path(scaling_summary_project$data_dir, "manifest", "design_matrix.txt")
+dir.create(dirname(scaling_summary_project$design_matrix_path), recursive = TRUE, showWarnings = FALSE)
+write.table(
+  data.frame(
+    sample = c("Target1", "IgG1"), cell_type = "Model", mark = c("Creb", "IgG"),
+    target = c("Creb", "IgG"), target_class = c("tf_or_other", "control"),
+    condition = "Vehicle", replicate = 1L, control_sample = c("IgG1", ""),
+    filename = c("Target1.fastq.gz", "IgG1.fastq.gz"), stringsAsFactors = FALSE
+  ),
+  scaling_summary_project$design_matrix_path, sep = "\t", row.names = FALSE, quote = FALSE
+)
+for (entry in list(c("Target1", "1.250"), c("IgG1", "0.800"))) {
+  sample <- entry[[1]]
+  summary_path <- file.path(scaling_summary_project$data_dir, "bowtie2", sample, paste0(sample, "_alignment_summary.txt"))
+  dir.create(dirname(summary_path), recursive = TRUE, showWarnings = FALSE)
+  writeLines(c(paste0("sample\t", sample), paste0("spikein_scale_factor\t", entry[[2]])), summary_path)
+}
+scaling_summary <- app_env$cutrun_seacr_peak_summary_table(scaling_summary_project)
+assert(
+  identical(scaling_summary[["IgG control"]], "IgG1") &&
+    identical(scaling_summary[["Sample Scale Factor"]], "1.250") &&
+    identical(scaling_summary[["IgG Control Scale Factor"]], "0.800"),
+  "CUT&RUN peak summary reports the matched IgG and both target and control scale factors"
+)
 app_source_text <- paste(readLines(file.path(repo_root, "app.R"), warn = FALSE), collapse = "\n")
 assert(grepl("Select all samples", app_source_text, fixed = TRUE) && grepl("Clear selection", app_source_text, fixed = TRUE), "sample-level step selectors expose select-all and clear controls")
 assert(grepl("cslRestoreToolPanels", app_source_text, fixed = TRUE) && grepl("server = TRUE", app_source_text, fixed = TRUE), "pipeline panels preserve open state and tables use server-side rendering")
