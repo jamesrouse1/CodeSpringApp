@@ -3736,6 +3736,16 @@ results_design_matrix_path <- function(project) {
   file.path(project$data_dir, "manifest", "design_matrix.txt")
 }
 
+trim_design_text <- function(df, columns = names(df)) {
+  columns <- intersect(columns, names(df))
+  for (column in columns) {
+    if (is.character(df[[column]]) || is.factor(df[[column]])) {
+      df[[column]] <- trimws(as.character(df[[column]]))
+    }
+  }
+  df
+}
+
 write_design_matrix <- function(project, df, metadata_cols) {
   if (!"include" %in% names(df)) df$include <- TRUE
   metadata_cols <- unique(metadata_cols[nzchar(metadata_cols)])
@@ -3745,6 +3755,10 @@ write_design_matrix <- function(project, df, metadata_cols) {
   df <- ensure_design_metadata_columns(df, metadata_cols)
   keep <- df[vapply(df$include, as_design_bool, logical(1)), , drop = FALSE]
   if (!NROW(keep)) stop("No samples are included.")
+  # Spreadsheet edits commonly leave an invisible leading/trailing space in a
+  # treatment or batch value. Normalize text before saving so group selection,
+  # DESeq2 contrasts, and count-column matching all use the same identifiers.
+  keep <- trim_design_text(keep, c("sample", metadata_cols, "filename"))
   keep$filename <- trimws(as.character(keep$filename %||% ""))
   blank_filename <- !nzchar(keep$filename)
   if (any(blank_filename)) stop("Every included row needs a FASTQ filename. Missing for row(s): ", paste(which(blank_filename), collapse = ", "))
@@ -3797,7 +3811,10 @@ project_design_df <- function(project) {
   if (!NROW(df) && is_cutrun_project(project)) df <- cutrun_inferred_result_design(project)
   if (!NROW(df)) return(data.frame())
   if (!"sample" %in% names(df)) names(df)[1] <- "sample"
-  df
+  # Also normalize older or externally supplied design matrices at read time.
+  # This prevents a trailing space from silently omitting a sample or splitting
+  # one biological group into two levels during RNA-seq analysis.
+  trim_design_text(df)
 }
 
 design_editor_from_project <- function(project, metadata_cols = NULL) {
@@ -3879,6 +3896,7 @@ deseq_design_for_column <- function(project, compare_col, model_cols = character
   }, logical(1))]
   if (!"filename" %in% names(df)) df$filename <- df$sample
   keep <- df[, c("sample", model_cols, compare_col, "filename"), drop = FALSE]
+  keep <- trim_design_text(keep)
   model_slug <- if (length(model_cols)) paste(clean_name(model_cols), collapse = "_") else "unadjusted"
   out_dir <- file.path(project$data_dir, "manifest", paste0("deseq2_", clean_name(compare_col, "comparison"), "__", model_slug))
   dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
@@ -3965,7 +3983,7 @@ write_counts_only_design <- function(samples, output_path, uploaded_design = NUL
     design <- read_uploaded_table(uploaded_design)
     if (!NROW(design)) stop("The uploaded design matrix is empty.")
     if (!"sample" %in% names(design)) names(design)[1] <- "sample"
-    design$sample <- trimws(as.character(design$sample))
+    design <- trim_design_text(design)
     missing <- setdiff(samples, design$sample)
     extra <- setdiff(design$sample, samples)
     if (length(missing)) stop("Design matrix is missing count sample(s): ", paste(missing, collapse = ", "))

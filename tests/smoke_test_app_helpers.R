@@ -2286,8 +2286,8 @@ counts_design <- app_env$write_counts_only_design(
   metadata_cols = "treatment, batch"
 )
 counts_design_df <- read.delim(counts_design, check.names = FALSE)
-counts_design_df$treatment <- c("Control", "Control", "Treated")
-counts_design_df$batch <- c("B1", "B2", "B1")
+counts_design_df$treatment <- c("Control ", "Control", "Treated ")
+counts_design_df$batch <- c("B1 ", "B2", "B1")
 write.table(counts_design_df, counts_design, sep = "\t", row.names = FALSE, quote = FALSE)
 counts_project <- list(
   id = "rna/counts-only", name = "counts-only", analysis_key = "rna", analysis = "RNA-seq",
@@ -2298,6 +2298,11 @@ assert(identical(app_env$pipeline_order(counts_project), c("Design matrix", "DES
 modeled_design <- app_env$deseq_design_for_column(counts_project, "treatment", "batch")
 modeled_df <- read.delim(modeled_design, check.names = FALSE)
 assert(identical(names(modeled_df), c("sample", "batch", "treatment", "filename")), "selected covariates are retained and the comparison variable is modeled last")
+assert(
+  identical(as.character(modeled_df$treatment), c("Control", "Control", "Treated")) &&
+    identical(as.character(modeled_df$batch), c("B1", "B2", "B1")),
+  "RNA-seq DESeq2 designs trim spreadsheet whitespace from treatment and covariate values"
+)
 dir.create(file.path(counts_only_root, "deseq2"), recursive = TRUE, showWarnings = FALSE)
 writeLines(
   "DESCRIPTION\tS1\tS2\tS3",
