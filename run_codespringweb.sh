@@ -199,6 +199,7 @@ install_optional_r_package_if_missing() {
 install_r_package_if_missing "DT"
 install_r_package_if_missing "base64enc"
 install_r_package_if_missing "ggplot2"
+install_r_package_if_missing "pheatmap"
 install_optional_r_package_if_missing "plotly"
 
 current_user() {
