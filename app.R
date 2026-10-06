@@ -22241,6 +22241,16 @@ server <- function(input, output, session) {
       ),
       numericInput("scrna_cluster_resolution", "Clustering resolution", value = input$scrna_cluster_resolution %||% tutorial$cluster_resolution %||% 0.6, min = 0.05, max = 5, step = 0.05),
       tags$p(class = "muted small-note", "Default resolution is 0.6 (PBMC 3K: 0.5). Raise it for more, smaller clusters; lower it for fewer, broader clusters. Review markers and sample composition before choosing a final resolution."),
+      if (!is.null(tutorial)) tags$figure(
+        class = "read-source-note",
+        tags$figcaption(tags$strong("PBMC 3K resolution comparison")),
+        tags$img(
+          src = "pbmc3k_resolution_comparison.png",
+          alt = "Four PBMC 3K UMAP panels with identical coordinates and clustering resolutions 0.2, 0.5, 0.8, and 1.2.",
+          style = "max-width: 100%; height: auto;"
+        ),
+        tags$p(class = "muted small-note", "The UMAP coordinates are identical in all four panels; only the cluster partition changes. Resolution 0.5 is the tutorial default.")
+      ),
       tags$details(tags$summary("Advanced clustering and Harmony settings"),
         numericInput("scrna_seed", "Random seed", value = input$scrna_seed %||% 1234, min = 1, step = 1),
         numericInput("scrna_harmony_theta", "Harmony diversity penalty (theta)", value = input$scrna_harmony_theta %||% 2, min = 0, max = 20, step = 0.5),
