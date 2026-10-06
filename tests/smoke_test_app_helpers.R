@@ -77,7 +77,7 @@ owner_path_pattern <- "(/grid/bsr/home/rouse|/home/rouse|/Users/rouse|rouse@bamd
 assert(!any(grepl(owner_path_pattern, runtime_text, ignore.case = TRUE)), "runtime code contains no hardcoded rouse home, login, or server path")
 scrna_step_meta <- app_env$run_step_meta(list(analysis_key = "scrna", analysis = "scRNA-seq", counts_only = FALSE))
 assert(
-  identical(as.character(scrna_step_meta$step), c("Input inspection", "QC & doublets", "Normalize & PCA", "UMAP & clustering", "Annotate & markers", "Signature scoring", "Differential expression", "Pathway analysis")) && NROW(scrna_step_meta) == 8L,
+  identical(as.character(scrna_step_meta$step), c("Input inspection", "QC & doublets", "PCA preview", "Normalize & PCA", "UMAP & clustering", "Annotate & markers", "Signature scoring", "Differential expression", "Pathway analysis")) && NROW(scrna_step_meta) == 9L,
   "single-cell run-step metadata exposes the complete checkpointed analysis workflow"
 )
 assert(

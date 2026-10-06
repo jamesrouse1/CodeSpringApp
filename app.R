@@ -5620,7 +5620,7 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
     fastq_manifest <- tryCatch(scrna_fastq_manifest(project), error = function(e) data.frame())
     has_fastq <- NROW(fastq_manifest) > 0L
     stages <- scrna_pipeline_order(project)
-    stage_keys <- c("inspect", "qc", "preprocess", "cluster", "annotate", "score", "differential", "pathway")
+    stage_keys <- c("inspect", "qc", "pca_preview", "preprocess", "cluster", "annotate", "score", "differential", "pathway")
     marker <- file.path(out_dir, paste0("_STAGE_", toupper(stage_keys), "_COMPLETE"))
     if (has_fastq) marker <- c(file.path(data_dir, "cellranger"), marker)
     detected <- safe_read_table(file.path(out_dir, "tables", "input_processing_detected.tsv"), 10000)
@@ -5932,7 +5932,7 @@ chip_pipeline_order <- function() {
 }
 
 scrna_pipeline_order <- function(project = NULL) {
-  steps <- c("Alignment & counting", "Input inspection", "QC & doublets", "Normalize & PCA", "UMAP & clustering", "Annotate & markers", "Signature scoring", "Differential expression", "Pathway analysis")
+  steps <- c("Alignment & counting", "Input inspection", "QC & doublets", "PCA preview", "Normalize & PCA", "UMAP & clustering", "Annotate & markers", "Signature scoring", "Differential expression", "Pathway analysis")
   if (!is.null(project)) {
     has_fastq <- tryCatch(NROW(scrna_fastq_manifest(project)) > 0L, error = function(e) FALSE)
     if (!has_fastq) steps <- setdiff(steps, "Alignment & counting")
@@ -5942,7 +5942,7 @@ scrna_pipeline_order <- function(project = NULL) {
 
 scrna_stage_step <- function(stage = "inspect") {
   stage <- tolower(trimws(as.character(stage %||% "inspect")))
-  labels <- c(inspect = "Input inspection", qc = "QC & doublets", preprocess = "Normalize & PCA", cluster = "UMAP & clustering", annotate = "Annotate & markers", score = "Signature scoring", differential = "Differential expression", pathway = "Pathway analysis")
+  labels <- c(inspect = "Input inspection", qc = "QC & doublets", pca_preview = "PCA preview", preprocess = "Normalize & PCA", cluster = "UMAP & clustering", annotate = "Annotate & markers", score = "Signature scoring", differential = "Differential expression", pathway = "Pathway analysis")
   value <- unname(labels[[stage]])
   if (is.null(value) || !nzchar(value)) stop("Unknown scRNA stage: ", stage)
   value
@@ -13683,7 +13683,7 @@ scrna_stage_resource_options <- function(stage, input_bytes = 0, engine = "auto"
   stage <- tolower(trimws(as.character(stage %||% "inspect")))
   engine <- tolower(trimws(as.character(engine %||% "auto")))
   tier <- scrna_resource_tier(input_bytes)
-  heavy <- stage %in% c("preprocess", "cluster", "annotate")
+  heavy <- stage %in% c("pca_preview", "preprocess", "cluster", "annotate")
   light <- stage %in% c("inspect", "pathway")
   profile <- if (heavy && identical(engine, "scanpy")) switch(tier,
     small = c(cpus = 16L, memory_gb = 128L), medium = c(cpus = 20L, memory_gb = 160L),
@@ -14266,7 +14266,7 @@ submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto
   qsub <- file.path(SCRIPTS_DIR, "singleCellRNAseq", "qsub_scrna_pipeline.sh")
   runner <- file.path(SCRIPTS_DIR, "singleCellRNAseq", "scrna_pipeline.sh")
   if (!file.exists(qsub) || !file.exists(runner)) return(record_preflight_failure(project, step_label, "CodeSpringLab single-cell runner scripts were not found. Update CodeSpringLab, then try again.", "scrna"))
-  prior_map <- c(qc = "inspect", preprocess = "qc", cluster = "preprocess", annotate = "cluster", score = "annotate", differential = "annotate", pathway = "differential")
+  prior_map <- c(qc = "inspect", pca_preview = "qc", preprocess = "pca_preview", cluster = "preprocess", annotate = "cluster", score = "annotate", differential = "annotate", pathway = "differential")
   prior <- unname(prior_map[stage]) %||% ""
   prior_marker <- if (nzchar(prior)) file.path(out_dir, paste0("_STAGE_", toupper(prior), "_COMPLETE")) else ""
   if (nzchar(prior_marker) && !file.exists(prior_marker)) return(record_preflight_failure(project, step_label, paste0("Complete ", scrna_stage_step(prior), " before submitting this stage."), "scrna"))
@@ -14892,6 +14892,7 @@ run_step_meta <- function(project = NULL) {
     descriptions <- c(
       "Inspect the supplied object or matrix and record detected counts, reductions, clusters, and annotations.",
       "Filter cells and genes, calculate QC metrics, and detect/remove doublets while preserving raw counts.",
+      "Calculate a provisional PCA elbow plot from post-QC cells before choosing the final number of principal components.",
       "Normalize, select highly variable genes, scale, and calculate PCA from the QC-passed checkpoint.",
       "Apply optional technical-batch integration, then calculate neighbors, UMAP, and clusters.",
       "Add a named annotation metadata field, calculate cluster markers, and write exact composition tables.",
@@ -21471,7 +21472,8 @@ server <- function(input, output, session) {
         if (has_fastq_inputs) tool_panel("Alignment & counting", status, "Align and quantify each 10x gene-expression FASTQ sample with Cell Ranger before single-cell QC.", uiOutput("scrna_cellranger_settings_ui"), "run_scrna_cellranger", "Run alignment & counting", show_sample_progress = TRUE) else NULL,
         if (!reuse_existing || show_rebuild) tool_panel("Input inspection", status, "Validate the raw-count input, create an unfiltered QC preview, and report any existing analysis state only when the input is an RDS or H5AD object.", tagList(uiOutput("scrna_inspect_settings_ui"), uiOutput("scrna_input_state_ui"), tags$p(class = "muted small-note", "The input is read only. This first job creates the unfiltered QC plots and auto-fills editable, distribution-aware starting cutoffs for review.")), "run_scrna_inspect", "Inspect input & show QC plots", show_sample_progress = FALSE) else NULL,
         if (!reuse_existing || show_rebuild) tool_panel("QC & doublets", status, "Review the unfiltered QC plots below, choose biologically appropriate cutoffs, then filter cells and record predicted doublets.", tagList(uiOutput("scrna_pre_qc_plot_ui"), uiOutput("scrna_qc_settings_ui"), uiOutput("scrna_post_qc_plot_ui"), tags$p(class = "muted small-note", "The same applied cutoffs are drawn on the before- and after-filter plots. Doublet calls are saved whether or not predicted doublets are removed.")), "run_scrna_qc", "Run QC & doublets", show_sample_progress = FALSE) else NULL,
-        if (!reuse_existing || show_rebuild) tool_panel("Normalize & PCA", status, "Normalize retained cells, identify variable genes, scale, and calculate PCA. PCA outputs appear here as soon as this step finishes.", tagList(uiOutput("scrna_preprocess_settings_ui"), uiOutput("scrna_pca_output_ui")), "run_scrna_preprocess", "Run normalization & PCA", show_sample_progress = FALSE) else NULL,
+        if (!reuse_existing || show_rebuild) tool_panel("PCA preview", status, "Use the post-QC cells to create an elbow plot before choosing principal components for the final analysis.", tagList(tags$p(class = "muted small-note", "The preview calculates up to 50 PCs with the selected normalization. It does not create a final UMAP, clustering, or processed object."), uiOutput("scrna_pca_output_ui")), "run_scrna_pca_preview", "Create PCA elbow plot", show_sample_progress = FALSE) else NULL,
+        if (!reuse_existing || show_rebuild) tool_panel("Normalize & PCA", status, "Choose principal components from the elbow plot, then normalize retained cells, identify variable genes, scale, and calculate the final PCA.", uiOutput("scrna_preprocess_settings_ui"), "run_scrna_preprocess", "Run normalization & PCA", show_sample_progress = FALSE) else NULL,
         if (!reuse_existing || show_rebuild) tool_panel("UMAP & clustering", status, if (NROW(scrna_manifest(p)) <= 1L) "Review the initial embedding, then calculate neighbors, UMAP, and clusters." else "Compare the uncorrected embedding first. Optionally correct a technical batch, then calculate neighbors, UMAP, and clusters.", tagList(uiOutput("scrna_preintegration_umap_ui"), uiOutput("scrna_cluster_settings_ui"), uiOutput("scrna_umap_output_ui")), "run_scrna_cluster", "Run UMAP & clustering", show_sample_progress = FALSE) else NULL,
         tool_panel("Annotate & markers", status, "Use the project's saved post-UMAP object to add a named annotation metadata field.", uiOutput("scrna_annotation_settings_ui"), "run_scrna_annotate", "Run annotation", show_sample_progress = FALSE, button_ui = uiOutput("scrna_annotation_run_button_ui")),
         tool_panel("Signature scoring", status, "Score one or more named gene signatures on normalized expression and store every score as reusable cell metadata in the processed object.", tagList(uiOutput("scrna_signature_settings_ui"), uiOutput("scrna_run_signature_umap_ui")), "run_scrna_score", "Run signature scoring", show_sample_progress = FALSE),
@@ -23081,7 +23083,7 @@ server <- function(input, output, session) {
         max_percent_mt = input$scrna_max_percent_mt %||% 20,
         qc_preset = if (pbmc_example) "pbmc3k" else "",
         min_cells_per_gene = input$scrna_min_cells_per_gene %||% 3,
-        n_pcs = if (identical(stage, "cluster")) input$scrna_cluster_n_pcs %||% input$scrna_n_pcs %||% tutorial_umap$n_pcs %||% 30 else input$scrna_n_pcs %||% tutorial_umap$n_pcs %||% 30,
+        n_pcs = if (identical(stage, "pca_preview")) 50 else if (identical(stage, "cluster")) input$scrna_cluster_n_pcs %||% input$scrna_n_pcs %||% tutorial_umap$n_pcs %||% 30 else input$scrna_n_pcs %||% tutorial_umap$n_pcs %||% 30,
         n_neighbors = if (identical(stage, "cluster")) input$scrna_cluster_n_neighbors %||% input$scrna_n_neighbors %||% tutorial_umap$n_neighbors %||% 15 else input$scrna_n_neighbors %||% tutorial_umap$n_neighbors %||% 15,
         umap_min_dist = if (identical(stage, "cluster")) input$scrna_cluster_umap_min_dist %||% input$scrna_umap_min_dist %||% tutorial_umap$min_dist %||% 0.3 else input$scrna_umap_min_dist %||% tutorial_umap$min_dist %||% 0.3,
         umap_spread = input$scrna_umap_spread %||% 1,
@@ -23144,6 +23146,7 @@ server <- function(input, output, session) {
     )
   }
   observeEvent(input$run_scrna_inspect, submit_scrna_stage("inspect"), ignoreInit = TRUE)
+  observeEvent(input$run_scrna_pca_preview, submit_scrna_stage("pca_preview"), ignoreInit = TRUE)
   observeEvent(input$scrna_show_rebuild_steps, {
     run_cards_refresh(Sys.time())
   }, ignoreInit = TRUE)
