@@ -376,8 +376,10 @@ assert(
   identical(pbmc_local_umap, list(n_neighbors = 20L, min_dist = 0.3, n_pcs = 10L)) &&
     identical(pbmc_global_umap, list(n_neighbors = 30L, min_dist = 0.6, n_pcs = 10L)) &&
     grepl('numericInput("scrna_n_neighbors"', app_text, fixed = TRUE) &&
+    grepl('numericInput("scrna_cluster_n_neighbors"', app_text, fixed = TRUE) &&
+    grepl('input$scrna_n_pcs %||% tutorial_umap$n_pcs', app_text, fixed = TRUE) &&
     grepl('How to adjust normalization and UMAP settings', app_text, fixed = TRUE),
-  "the PBMC example keeps editable embedding fields while retaining distinct Local/Global presets"
+  "the PBMC example keeps editable UMAP fields in both stages while retaining distinct Local/Global presets"
 )
 dir.create(file.path(pbmc_manifest_dir, "scrna", "tables"), recursive = TRUE)
 utils::write.table(

@@ -22105,6 +22105,9 @@ server <- function(input, output, session) {
       updateNumericInput(session, "scrna_n_neighbors", value = defaults$n_neighbors)
       updateNumericInput(session, "scrna_umap_min_dist", value = defaults$min_dist)
       if (!is.na(n_pcs)) updateNumericInput(session, "scrna_n_pcs", value = n_pcs)
+      updateNumericInput(session, "scrna_cluster_n_neighbors", value = defaults$n_neighbors)
+      updateNumericInput(session, "scrna_cluster_umap_min_dist", value = defaults$min_dist)
+      if (!is.na(n_pcs)) updateNumericInput(session, "scrna_cluster_n_pcs", value = n_pcs)
     }, once = TRUE)
     scrna_umap_defaults_applied(stamp)
   }, ignoreInit = FALSE)
@@ -22195,7 +22198,12 @@ server <- function(input, output, session) {
       integration_controls,
       tags$h4("UMAP parameters"),
       radioButtons("scrna_cluster_umap_focus", "Emphasize", choices = c("Local structure (nearby subpopulations)" = "local", "Global structure (broader population relationships)" = "global"), selected = input$scrna_umap_focus %||% "local", inline = TRUE),
-      tags$p(class = "muted small-note", if (multiple_inputs) "Neighbors, minimum distance, and PCA dimensions were selected during Normalize & PCA and used for the pre-integration sample UMAP. Changing emphasis here updates those values for this final UMAP and clustering run." else "Neighbors, minimum distance, and PCA dimensions are shared with the initial UMAP. Changing emphasis here updates them for this final UMAP and clustering run."),
+      tags$p(class = "muted small-note", if (multiple_inputs) "These settings replace the initial pre-integration values for this final UMAP and clustering run." else "These settings replace the initial UMAP values for this final UMAP and clustering run."),
+      fluidRow(
+        column(4, numericInput("scrna_cluster_n_neighbors", "Neighbors", value = input$scrna_cluster_n_neighbors %||% input$scrna_n_neighbors %||% tutorial$n_neighbors %||% 15, min = 2, max = 200, step = 1)),
+        column(4, numericInput("scrna_cluster_umap_min_dist", "Minimum distance", value = input$scrna_cluster_umap_min_dist %||% input$scrna_umap_min_dist %||% tutorial$umap_min_dist %||% 0.3, min = 0, max = 2, step = 0.05)),
+        column(4, numericInput("scrna_cluster_n_pcs", "Principal components", value = input$scrna_cluster_n_pcs %||% input$scrna_n_pcs %||% tutorial$n_pcs %||% 30, min = 5, max = 100, step = 1))
+      ),
       numericInput("scrna_cluster_resolution", "Clustering resolution", value = input$scrna_cluster_resolution %||% tutorial$cluster_resolution %||% 0.6, min = 0.05, max = 5, step = 0.05),
       tags$p(class = "muted small-note", "Default resolution is 0.6 (PBMC 3K: 0.5). Raise it for more, smaller clusters; lower it for fewer, broader clusters. Review markers and sample composition before choosing a final resolution."),
       tags$details(tags$summary("Advanced clustering and Harmony settings"),
@@ -23067,9 +23075,9 @@ server <- function(input, output, session) {
         max_percent_mt = input$scrna_max_percent_mt %||% 20,
         qc_preset = if (pbmc_example) "pbmc3k" else "",
         min_cells_per_gene = input$scrna_min_cells_per_gene %||% 3,
-        n_pcs = tutorial_umap$n_pcs %||% input$scrna_n_pcs %||% 30,
-        n_neighbors = tutorial_umap$n_neighbors %||% input$scrna_n_neighbors %||% 15,
-        umap_min_dist = tutorial_umap$min_dist %||% input$scrna_umap_min_dist %||% 0.3,
+        n_pcs = if (identical(stage, "cluster")) input$scrna_cluster_n_pcs %||% input$scrna_n_pcs %||% tutorial_umap$n_pcs %||% 30 else input$scrna_n_pcs %||% tutorial_umap$n_pcs %||% 30,
+        n_neighbors = if (identical(stage, "cluster")) input$scrna_cluster_n_neighbors %||% input$scrna_n_neighbors %||% tutorial_umap$n_neighbors %||% 15 else input$scrna_n_neighbors %||% tutorial_umap$n_neighbors %||% 15,
+        umap_min_dist = if (identical(stage, "cluster")) input$scrna_cluster_umap_min_dist %||% input$scrna_umap_min_dist %||% tutorial_umap$min_dist %||% 0.3 else input$scrna_umap_min_dist %||% tutorial_umap$min_dist %||% 0.3,
         umap_spread = input$scrna_umap_spread %||% 1,
         umap_metric = input$scrna_umap_metric %||% "euclidean",
         umap_init_pos = input$scrna_umap_init_pos %||% "spectral",
