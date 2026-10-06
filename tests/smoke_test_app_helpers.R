@@ -511,6 +511,12 @@ utils::write.table(
 embedding_views <- app_env$scrna_embedding_view_choices(embedding_project)
 unintegrated_embedding <- app_env$scrna_embedding_table(embedding_project, columns = c("cluster", "condition", "sample_id", "cell_type"), max_points = Inf, view = "unintegrated")
 assert(identical(unname(embedding_views), c("integrated", "unintegrated")), "interactive UMAP offers integrated and unintegrated coordinates when both tables exist")
+utils::write.table(
+  data.frame(cell = c("c1", "c2"), UMAP_1 = c(-10, -20), UMAP_2 = c(-30, -40), sample_id = c("s1", "s2")),
+  file.path(embedding_test_root, "scrna", "tables", "initial_umap_coordinates.tsv"), sep = "\t", row.names = FALSE, quote = FALSE
+)
+initial_embedding <- app_env$scrna_embedding_table(embedding_project, max_points = Inf, view = "unintegrated")
+assert(identical(initial_embedding$UMAP_1, c(-10, -20)), "single-input projects prefer the initial UMAP filename while retaining legacy pre-integration output support")
 assert(grepl("scrna_embedding_stamp()", app_text, fixed = TRUE), "interactive UMAP watches coordinate outputs independently of scheduler state")
 assert(!grepl('restore_scrna_embedding', app_text, fixed = TRUE), "the explorer never asks users to rebuild an existing UMAP")
 assert(grepl('itemsizing = "constant"', app_text, fixed = TRUE) && grepl('legend = list(x = 1.02', app_text, fixed = TRUE), "interactive UMAP keeps categorical legend symbols visible and reserves a fixed legend column")

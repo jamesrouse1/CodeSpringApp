@@ -15463,7 +15463,11 @@ write_scrna_manual_cluster_mapping <- function(project, annotation_name, assignm
 }
 
 scrna_embedding_candidate_paths <- function(project, view = "integrated") {
-  file <- if (identical(tolower(view %||% "integrated"), "unintegrated")) "preintegration_umap_coordinates.tsv" else "umap_coordinates.tsv"
+  files <- if (identical(tolower(view %||% "integrated"), "unintegrated")) {
+    # A single input has no integration step. Prefer its clearer new filename,
+    # but retain the legacy name as a fallback for already-completed projects.
+    if (NROW(scrna_manifest(project)) <= 1L) c("initial_umap_coordinates.tsv", "preintegration_umap_coordinates.tsv") else c("preintegration_umap_coordinates.tsv", "initial_umap_coordinates.tsv")
+  } else "umap_coordinates.tsv"
   data_dir <- normalizePath(project$data_dir %||% "", winslash = "/", mustWork = FALSE)
   configured_root <- scrna_output_dir(project)
   canonical_root <- file.path(project$results_root %||% DEFAULT_RESULTS_ROOT, project$name %||% project$label, "data", "scrna")
@@ -15481,7 +15485,7 @@ scrna_embedding_candidate_paths <- function(project, view = "integrated") {
     file.path(dirname(data_dir), "data", "scrna"),
     file.path(dirname(data_dir), "scrna")
   ))
-  file.path(output_roots, "tables", file)
+  unlist(lapply(files, function(file) file.path(output_roots, "tables", file)), use.names = FALSE)
 }
 
 scrna_embedding_path <- function(project, view = "integrated") {
@@ -15520,7 +15524,8 @@ scrna_embedding_view_choices <- function(project) {
     unintegrated = scrna_embedding_path(project, "unintegrated")
   )
   ready <- vapply(paths, function(path) file.exists(path) && file_size_for(path) > 0, logical(1))
-  labels <- c(integrated = "Integrated / final UMAP", unintegrated = "Unintegrated UMAP (before correction)")
+  unintegrated_label <- if (NROW(scrna_manifest(project)) <= 1L) "Initial UMAP" else "Unintegrated UMAP (before correction)"
+  labels <- c(integrated = "Integrated / final UMAP", unintegrated = unintegrated_label)
   stats::setNames(names(paths)[ready], labels[names(paths)[ready]])
 }
 
@@ -21461,7 +21466,7 @@ server <- function(input, output, session) {
         if (!reuse_existing || show_rebuild) tool_panel("Input inspection", status, "Validate the raw-count input, create an unfiltered QC preview, and report any existing analysis state only when the input is an RDS or H5AD object.", tagList(uiOutput("scrna_inspect_settings_ui"), uiOutput("scrna_input_state_ui"), tags$p(class = "muted small-note", "The input is read only. This first job creates the unfiltered QC plots and auto-fills editable, distribution-aware starting cutoffs for review.")), "run_scrna_inspect", "Inspect input & show QC plots", show_sample_progress = FALSE) else NULL,
         if (!reuse_existing || show_rebuild) tool_panel("QC & doublets", status, "Review the unfiltered QC plots below, choose biologically appropriate cutoffs, then filter cells and record predicted doublets.", tagList(uiOutput("scrna_pre_qc_plot_ui"), uiOutput("scrna_qc_settings_ui"), uiOutput("scrna_post_qc_plot_ui"), tags$p(class = "muted small-note", "The same applied cutoffs are drawn on the before- and after-filter plots. Doublet calls are saved whether or not predicted doublets are removed.")), "run_scrna_qc", "Run QC & doublets", show_sample_progress = FALSE) else NULL,
         if (!reuse_existing || show_rebuild) tool_panel("Normalize & PCA", status, "Normalize retained cells, identify variable genes, scale, and calculate PCA. PCA outputs appear here as soon as this step finishes.", tagList(uiOutput("scrna_preprocess_settings_ui"), uiOutput("scrna_pca_output_ui")), "run_scrna_preprocess", "Run normalization & PCA", show_sample_progress = FALSE) else NULL,
-        if (!reuse_existing || show_rebuild) tool_panel("UMAP & clustering", status, "Compare the uncorrected embedding first. For multiple inputs, optionally correct a technical batch; then calculate neighbors, UMAP, and clusters.", tagList(uiOutput("scrna_preintegration_umap_ui"), uiOutput("scrna_cluster_settings_ui"), uiOutput("scrna_umap_output_ui")), "run_scrna_cluster", "Run UMAP & clustering", show_sample_progress = FALSE) else NULL,
+        if (!reuse_existing || show_rebuild) tool_panel("UMAP & clustering", status, if (NROW(scrna_manifest(p)) <= 1L) "Review the initial embedding, then calculate neighbors, UMAP, and clusters." else "Compare the uncorrected embedding first. Optionally correct a technical batch, then calculate neighbors, UMAP, and clusters.", tagList(uiOutput("scrna_preintegration_umap_ui"), uiOutput("scrna_cluster_settings_ui"), uiOutput("scrna_umap_output_ui")), "run_scrna_cluster", "Run UMAP & clustering", show_sample_progress = FALSE) else NULL,
         tool_panel("Annotate & markers", status, "Use the project's saved post-UMAP object to add a named annotation metadata field.", uiOutput("scrna_annotation_settings_ui"), "run_scrna_annotate", "Run annotation", show_sample_progress = FALSE, button_ui = uiOutput("scrna_annotation_run_button_ui")),
         tool_panel("Signature scoring", status, "Score one or more named gene signatures on normalized expression and store every score as reusable cell metadata in the processed object.", tagList(uiOutput("scrna_signature_settings_ui"), uiOutput("scrna_run_signature_umap_ui")), "run_scrna_score", "Run signature scoring", show_sample_progress = FALSE),
         tool_panel("Differential expression", status, "Use pseudobulk DESeq2 when independent biological samples are available; one-sample projects use cell-level Wilcoxon comparisons between annotated populations.", uiOutput("scrna_differential_settings_ui"), "run_scrna_differential", "Run differential expression", show_sample_progress = FALSE),
@@ -22153,9 +22158,9 @@ server <- function(input, output, session) {
     }
     tagList(
       normalization_controls,
-      tags$h4("PCA and initial pre-integration UMAP"),
+      tags$h4(if (NROW(scrna_manifest(p)) <= 1L) "PCA and initial UMAP" else "PCA and pre-integration UMAP"),
       radioButtons("scrna_umap_focus", "Emphasize", choices = c("Local structure (nearby subpopulations)" = "local", "Global structure (broader population relationships)" = "global"), selected = input$scrna_umap_focus %||% "local", inline = TRUE),
-      tags$p(class = "muted small-note", "This choice sets the PCA-neighbor and UMAP parameters used to create the initial sample UMAP before integration. The same values are retained for the later integrated UMAP unless you edit them."),
+      tags$p(class = "muted small-note", if (NROW(scrna_manifest(p)) <= 1L) "This choice sets the PCA-neighbor and UMAP parameters for the initial UMAP and final clustering run." else "This choice sets the PCA-neighbor and UMAP parameters used to create the initial sample UMAP before integration. The same values are retained for the later integrated UMAP unless you edit them."),
       fluidRow(
         column(4, numericInput("scrna_n_neighbors", "Neighbors", value = input$scrna_n_neighbors %||% tutorial$n_neighbors %||% 15, min = 2, max = 200, step = 1)),
         column(4, numericInput("scrna_umap_min_dist", "Minimum distance", value = input$scrna_umap_min_dist %||% tutorial$umap_min_dist %||% 0.3, min = 0, max = 2, step = 0.05)),
@@ -22190,7 +22195,7 @@ server <- function(input, output, session) {
       integration_controls,
       tags$h4("UMAP parameters"),
       radioButtons("scrna_cluster_umap_focus", "Emphasize", choices = c("Local structure (nearby subpopulations)" = "local", "Global structure (broader population relationships)" = "global"), selected = input$scrna_umap_focus %||% "local", inline = TRUE),
-      tags$p(class = "muted small-note", "Neighbors, minimum distance, and PCA dimensions were selected during Normalize & PCA and used for the pre-integration sample UMAP. Changing emphasis here updates those values for this final UMAP and clustering run."),
+      tags$p(class = "muted small-note", if (multiple_inputs) "Neighbors, minimum distance, and PCA dimensions were selected during Normalize & PCA and used for the pre-integration sample UMAP. Changing emphasis here updates those values for this final UMAP and clustering run." else "Neighbors, minimum distance, and PCA dimensions are shared with the initial UMAP. Changing emphasis here updates them for this final UMAP and clustering run."),
       numericInput("scrna_cluster_resolution", "Clustering resolution", value = input$scrna_cluster_resolution %||% tutorial$cluster_resolution %||% 0.6, min = 0.05, max = 5, step = 0.05),
       tags$p(class = "muted small-note", "Default resolution is 0.6 (PBMC 3K: 0.5). Raise it for more, smaller clusters; lower it for fewer, broader clusters. Review markers and sample composition before choosing a final resolution."),
       tags$details(tags$summary("Advanced clustering and Harmony settings"),
@@ -24422,13 +24427,14 @@ server <- function(input, output, session) {
   output$scrna_preintegration_umap_ui <- renderUI({
     progress_refresh()
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
-    files <- scrna_result_file_choices(p, "^02_preintegration_umap_.*\\.png$")
-    if (!length(files)) return(div(class = "empty-box", "Run Normalize & PCA to generate the UMAP before integration. It will appear here before you choose a correction method."))
+    single_input <- NROW(scrna_manifest(p)) <= 1L
+    files <- scrna_result_file_choices(p, if (single_input) "^02_initial_umap_.*\\.png$" else "^02_preintegration_umap_.*\\.png$")
+    if (!length(files)) return(div(class = "empty-box", if (single_input) "Run Normalize & PCA to generate the initial UMAP." else "Run Normalize & PCA to generate the UMAP before integration. It will appear here before you choose a correction method."))
     selected <- selected_choice(input$scrna_preintegration_umap, files, unname(files)[[1]])
     tagList(
-      tags$h4("Before integration"),
-      tags$p(class = "muted small-note", "Uncorrected normalized expression. Compare this with the final UMAP to confirm that correction removes technical structure without erasing expected biology."),
-      selectInput("scrna_preintegration_umap", "Pre-integration view", choices = files, selected = selected, selectize = FALSE),
+      tags$h4(if (single_input) "Initial UMAP" else "Before integration"),
+      tags$p(class = "muted small-note", if (single_input) "Normalized expression before graph clustering. This is the same single-sample representation used for the final UMAP and clustering run." else "Uncorrected normalized expression. Compare this with the final UMAP to confirm that correction removes technical structure without erasing expected biology."),
+      selectInput("scrna_preintegration_umap", if (single_input) "Initial UMAP view" else "Pre-integration view", choices = files, selected = selected, selectize = FALSE),
       image_or_file_ui(selected, "760px")
     )
   })
