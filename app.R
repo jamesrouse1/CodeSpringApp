@@ -5655,20 +5655,47 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
       }
       if (complete) "Complete" else "Not started"
     }
-    paths <- c(file.path(out_dir, "tables", "input_processing_detected.tsv"), file.path(out_dir, "tables", "qc_summary_by_sample.tsv"), file.path(out_dir, "tables", "pca_variance_explained.tsv"), file.path(out_dir, "checkpoints"), file.path(out_dir, "objects"), file.path(out_dir, "tables", "signature_scores_summary.tsv"), file.path(out_dir, "tables", "pseudobulk_differential_expression.tsv"), file.path(out_dir, "tables", "pathway_fgsea_ranked.tsv"))
-    inputs <- c(project$scrna_engine %||% "auto", "", "", "", "", "", "", "")
-    details <- c(source_details, "Scores named gene sets on normalized expression and stores them as cell metadata", "Uses sample-level pseudobulk DESeq2 when replicates are available and cell-level Wilcoxon for cell-population comparisons", "Runs ranked fgsea for any completed differential-expression comparison")
+    inspection_detail <- paste(source_details[nzchar(source_details)], collapse = " | ")
+    paths <- c(
+      "Input inspection" = file.path(out_dir, "tables", "input_processing_detected.tsv"),
+      "QC & doublets" = file.path(out_dir, "tables", "qc_summary_by_sample.tsv"),
+      "PCA preview" = file.path(out_dir, "tables", "pca_variance_explained.tsv"),
+      "Normalize & PCA" = file.path(out_dir, "checkpoints"),
+      "UMAP & clustering" = file.path(out_dir, "objects"),
+      "Annotate & markers" = file.path(out_dir, "objects"),
+      "Signature scoring" = file.path(out_dir, "tables", "signature_scores_summary.tsv"),
+      "Differential expression" = file.path(out_dir, "tables", "pseudobulk_differential_expression.tsv"),
+      "Pathway analysis" = file.path(out_dir, "tables", "pathway_fgsea_ranked.tsv")
+    )
+    inputs <- c(
+      "Input inspection" = project$scrna_engine %||% "auto",
+      setNames(
+        rep("", length(stage_keys) - 1L),
+        vapply(stage_keys[-1L], scrna_stage_step, character(1))
+      )
+    )
+    details <- c(
+      "Input inspection" = inspection_detail,
+      "QC & doublets" = "Filter cells and genes, calculate QC metrics, and detect/remove doublets while preserving raw counts.",
+      "PCA preview" = "Creates a provisional PCA elbow plot from post-QC cells before the final PCA settings are chosen.",
+      "Normalize & PCA" = "Normalizes expression, selects variable genes, scales data, and calculates the final PCA.",
+      "UMAP & clustering" = "Calculates the neighbor graph, UMAP embedding, and clusters using the selected settings.",
+      "Annotate & markers" = "Adds the chosen annotation field, calculates cluster markers, and writes composition tables.",
+      "Signature scoring" = "Scores named gene sets on normalized expression and stores them as cell metadata.",
+      "Differential expression" = "Uses sample-level pseudobulk DESeq2 when replicates are available and cell-level Wilcoxon for cell-population comparisons.",
+      "Pathway analysis" = "Runs ranked fgsea for any completed differential-expression comparison."
+    )
     if (has_fastq) {
-      paths <- c(file.path(data_dir, "cellranger"), paths)
-      inputs <- c("CellRanger/9.0.1", inputs)
-      details <- c("Converts each selected 10x FASTQ sample into a filtered feature-barcode matrix", details)
+      paths <- c("Alignment & counting" = file.path(data_dir, "cellranger"), paths)
+      inputs <- c("Alignment & counting" = "CellRanger/9.0.1", inputs)
+      details <- c("Alignment & counting" = "Converts each selected 10x FASTQ sample into a filtered feature-barcode matrix", details)
     }
     raw <- data.frame(
       step = stages,
       status = mapply(status_one, stages, marker, USE.NAMES = FALSE),
-      path = paths,
-      input = inputs,
-      detail = details,
+      path = unname(paths[stages]),
+      input = unname(inputs[stages]),
+      detail = unname(details[stages]),
       stringsAsFactors = FALSE
     )
     if (has_fastq) {
