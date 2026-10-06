@@ -21957,6 +21957,7 @@ server <- function(input, output, session) {
         actionButton("browse_scrna_cellranger_reference", "Browse server", class = "btn-default")
       ),
       numericInput("scrna_cellranger_expected_cells", "Expected recovered cells per sample (0 = automatic)", value = input$scrna_cellranger_expected_cells %||% 0, min = 0, step = 500),
+      tags$p(class = "muted small-note", "Usually leave Expected recovered cells at 0. Raising it retains more low-UMI barcodes; lowering it is stricter. Set it only when you have a credible expected recovery for that 10x run."),
       tags$p(class = "muted small-note", "Cell Ranger 9.0.1 detects 10x chemistry automatically. R1/R2 lanes are combined per sample. Jobs run concurrently, use 16 cores, skip BAM generation, retain only the filtered matrix plus small summaries, and resume failed staging."),
       if (!length(candidates)) tags$p(class = "muted small-note", "No standard Cell Ranger reference was detected automatically. Browse to a matching human or mouse refdata-gex transcriptome folder.") else NULL
     )
@@ -22127,7 +22128,11 @@ server <- function(input, output, session) {
       selectInput("scrna_doublet_method", "Doublet detection", choices = choices$doublets, selected = selected_choice(input$scrna_doublet_method, unname(choices$doublets), tutorial$doublet_method %||% "auto"), selectize = FALSE),
       checkboxInput("scrna_auto_doublet_rate", "Estimate the doublet rate automatically for each capture", value = if (is.null(input$scrna_auto_doublet_rate)) TRUE else isTRUE(input$scrna_auto_doublet_rate)),
       conditionalPanel("!input.scrna_auto_doublet_rate", numericInput("scrna_doublet_rate", "Expected doublet rate", value = input$scrna_doublet_rate %||% 0.05, min = 0.001, max = 0.5, step = 0.01)),
-      checkboxInput("scrna_remove_doublets", "Remove predicted doublets before downstream analysis", value = if (is.null(input$scrna_remove_doublets)) tutorial$remove_doublets %||% TRUE else isTRUE(input$scrna_remove_doublets))
+      checkboxInput("scrna_remove_doublets", "Remove predicted doublets before downstream analysis", value = if (is.null(input$scrna_remove_doublets)) tutorial$remove_doublets %||% TRUE else isTRUE(input$scrna_remove_doublets)),
+      tags$details(tags$summary("How to adjust QC settings"),
+        tags$p(class = "muted small-note", "Defaults are 200 genes, no count minimum, no upper gene cap, and 20% mitochondrial reads (PBMC 3K: 200, disabled, 2,500, and 5%). Raise a minimum to remove more low-quality cells; lower a maximum to remove more stressed cells or likely multiplets. Start with the plotted distributions rather than copying cutoffs between tissues."),
+        tags$p(class = "muted small-note", "Automatic doublet-rate estimation is the default. If you enter a rate, a higher value calls more doublets; a lower value calls fewer. Keep removal on unless doublets are part of the biological question.")
+      )
     )
   })
 
@@ -22151,11 +22156,15 @@ server <- function(input, output, session) {
       tags$h4("PCA and initial pre-integration UMAP"),
       radioButtons("scrna_umap_focus", "Emphasize", choices = c("Local structure (nearby subpopulations)" = "local", "Global structure (broader population relationships)" = "global"), selected = input$scrna_umap_focus %||% "local", inline = TRUE),
       tags$p(class = "muted small-note", "This choice sets the PCA-neighbor and UMAP parameters used to create the initial sample UMAP before integration. The same values are retained for the later integrated UMAP unless you edit them."),
-      if (is.null(tutorial)) fluidRow(
+      fluidRow(
         column(4, numericInput("scrna_n_neighbors", "Neighbors", value = input$scrna_n_neighbors %||% tutorial$n_neighbors %||% 15, min = 2, max = 200, step = 1)),
         column(4, numericInput("scrna_umap_min_dist", "Minimum distance", value = input$scrna_umap_min_dist %||% tutorial$umap_min_dist %||% 0.3, min = 0, max = 2, step = 0.05)),
         column(4, numericInput("scrna_n_pcs", "Principal components", value = input$scrna_n_pcs %||% tutorial$n_pcs %||% 30, min = 5, max = 100, step = 1))
-      ) else tags$p(class = "muted small-note", "The example applies the Local or Global UMAP preset automatically.")
+      ),
+      tags$details(tags$summary("How to adjust normalization and UMAP settings"),
+        tags$p(class = "muted small-note", "Automatic normalization is the default; use SCTransform when depth varies substantially, otherwise LogNormalize is the simpler choice. For PBMC 3K, LogNormalize is preselected to match the tutorial."),
+        tags$p(class = "muted small-note", "Defaults are 15 neighbors, minimum distance 0.3, and 30 PCs (PBMC 3K: 20, 0.3, and 10). More neighbors or a higher minimum distance gives a smoother, broader map; fewer neighbors or a lower minimum distance separates local structure more strongly. More PCs can retain subtle signal but also noise. These change the visualization and clustering, not the underlying counts.")
+      )
     )
   })
 
@@ -22183,12 +22192,13 @@ server <- function(input, output, session) {
       radioButtons("scrna_cluster_umap_focus", "Emphasize", choices = c("Local structure (nearby subpopulations)" = "local", "Global structure (broader population relationships)" = "global"), selected = input$scrna_umap_focus %||% "local", inline = TRUE),
       tags$p(class = "muted small-note", "Neighbors, minimum distance, and PCA dimensions were selected during Normalize & PCA and used for the pre-integration sample UMAP. Changing emphasis here updates those values for this final UMAP and clustering run."),
       numericInput("scrna_cluster_resolution", "Clustering resolution", value = input$scrna_cluster_resolution %||% tutorial$cluster_resolution %||% 0.6, min = 0.05, max = 5, step = 0.05),
+      tags$p(class = "muted small-note", "Default resolution is 0.6 (PBMC 3K: 0.5). Raise it for more, smaller clusters; lower it for fewer, broader clusters. Review markers and sample composition before choosing a final resolution."),
       tags$details(tags$summary("Advanced clustering and Harmony settings"),
         numericInput("scrna_seed", "Random seed", value = input$scrna_seed %||% 1234, min = 1, step = 1),
         numericInput("scrna_harmony_theta", "Harmony diversity penalty (theta)", value = input$scrna_harmony_theta %||% 2, min = 0, max = 20, step = 0.5),
         numericInput("scrna_harmony_lambda", "Harmony correction penalty (lambda)", value = input$scrna_harmony_lambda %||% 1, min = 0.001, max = 20, step = 0.25),
         numericInput("scrna_harmony_max_iter", "Maximum Harmony iterations", value = input$scrna_harmony_max_iter %||% 20, min = 1, max = 100, step = 1),
-        tags$p(class = "muted small-note", "Higher theta encourages stronger mixing across the selected technical batch. Higher lambda makes correction more conservative. Defaults are appropriate starting values."),
+        tags$p(class = "muted small-note", "Default seed is 1234; change it only to check stability. Harmony defaults are theta 2, lambda 1, and 20 iterations. Higher theta mixes batches more strongly; higher lambda corrects more conservatively. Increase iterations only if Harmony has not converged. For Scanpy scVI, 400 epochs is the default; more epochs can help difficult fits but takes longer."),
         if (identical(scrna_ui_engine(), "scanpy")) numericInput("scrna_scvi_max_epochs", "Maximum scVI training epochs", value = input$scrna_scvi_max_epochs %||% 400, min = 10, max = 5000, step = 50) else NULL
       ),
       uiOutput("scrna_recommendations_ui")

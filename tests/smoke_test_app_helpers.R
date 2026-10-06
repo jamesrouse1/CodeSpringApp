@@ -375,9 +375,9 @@ pbmc_global_umap <- app_env$scrna_umap_focus_settings(pbmc_project, "global")
 assert(
   identical(pbmc_local_umap, list(n_neighbors = 20L, min_dist = 0.3, n_pcs = 10L)) &&
     identical(pbmc_global_umap, list(n_neighbors = 30L, min_dist = 0.6, n_pcs = 10L)) &&
-    grepl('if (is.null(tutorial)) fluidRow(', app_text, fixed = TRUE) &&
-    grepl('tutorial_umap$n_neighbors %||% input$scrna_n_neighbors', app_text, fixed = TRUE),
-  "the PBMC example hides manual embedding fields and applies distinct Local/Global presets"
+    grepl('numericInput("scrna_n_neighbors"', app_text, fixed = TRUE) &&
+    grepl('How to adjust normalization and UMAP settings', app_text, fixed = TRUE),
+  "the PBMC example keeps editable embedding fields while retaining distinct Local/Global presets"
 )
 dir.create(file.path(pbmc_manifest_dir, "scrna", "tables"), recursive = TRUE)
 utils::write.table(
