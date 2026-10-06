@@ -13691,6 +13691,12 @@ scrna_stage_resource_options <- function(stage, input_bytes = 0, engine = "auto"
   ) else if (heavy) switch(tier,
     small = c(cpus = 12L, memory_gb = 128L), medium = c(cpus = 16L, memory_gb = 160L),
     large = c(cpus = 20L, memory_gb = 192L), xlarge = c(cpus = 24L, memory_gb = 256L)
+  ) else if (identical(stage, "inspect")) switch(tier,
+    # Inspection reads counts, calculates QC summaries, renders two small
+    # plots, and writes a checkpoint. A modest request starts promptly for
+    # the PBMC tutorial instead of waiting behind large-memory jobs.
+    small = c(cpus = 2L, memory_gb = 16L), medium = c(cpus = 4L, memory_gb = 32L),
+    large = c(cpus = 8L, memory_gb = 64L), xlarge = c(cpus = 12L, memory_gb = 96L)
   ) else if (light) switch(tier,
     small = c(cpus = 6L, memory_gb = 48L), medium = c(cpus = 8L, memory_gb = 64L),
     large = c(cpus = 12L, memory_gb = 96L), xlarge = c(cpus = 16L, memory_gb = 128L)

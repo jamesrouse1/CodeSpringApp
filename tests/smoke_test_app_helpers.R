@@ -2587,7 +2587,7 @@ assert(
 )
 assert(
   grepl('scrna_stage_resource_options <- function', app_text, fixed = TRUE) &&
-    identical(app_env$scrna_stage_resource_options("inspect", 0, "seurat"), c("--cpus-per-task=6", "--mem=48G", "--time=1-00:00:00")) &&
+    identical(app_env$scrna_stage_resource_options("inspect", 0, "seurat"), c("--cpus-per-task=2", "--mem=16G", "--time=1-00:00:00")) &&
     identical(app_env$scrna_stage_resource_options("cluster", 3 * 1024^3, "seurat"), c("--cpus-per-task=16", "--mem=160G", "--time=2-00:00:00")) &&
     identical(app_env$scrna_stage_resource_options("cluster", 3 * 1024^3, "scanpy"), c("--cpus-per-task=20", "--mem=160G", "--time=2-00:00:00")) &&
     identical(app_env$scrna_stage_resource_options("annotate", 10 * 1024^3, "seurat"), c("--cpus-per-task=20", "--mem=192G", "--time=3-00:00:00")) &&
