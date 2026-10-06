@@ -14890,18 +14890,18 @@ run_step_meta <- function(project = NULL) {
   steps <- pipeline_order(project)
   descriptions <- if (!is.null(project) && is_scrna_project(project)) {
     descriptions <- c(
-      "Inspect the supplied object or matrix and record detected counts, reductions, clusters, and annotations.",
-      "Filter cells and genes, calculate QC metrics, and detect/remove doublets while preserving raw counts.",
-      "Calculate a provisional PCA elbow plot from post-QC cells before choosing the final number of principal components.",
-      "Normalize, select highly variable genes, scale, and calculate PCA from the QC-passed checkpoint.",
-      "Apply optional technical-batch integration, then calculate neighbors, UMAP, and clusters.",
-      "Add a named annotation metadata field, calculate cluster markers, and write exact composition tables.",
-      "Score named gene signatures on normalized expression and retain the scores in the processed object.",
-      "Run sample-level pseudobulk DESeq2 and optional cell-level Wilcoxon testing.",
-      "Run ranked fgseaMultilevel for a selected completed differential-expression comparison and pathway database."
+      "Alignment & counting" = "Align and quantify each 10x FASTQ sample with Cell Ranger and create filtered feature-barcode matrices.",
+      "Input inspection" = "Inspect the supplied object or matrix and record detected counts, reductions, clusters, and annotations.",
+      "QC & doublets" = "Filter cells and genes, calculate QC metrics, and detect/remove doublets while preserving raw counts.",
+      "PCA preview" = "Calculate a provisional PCA elbow plot from post-QC cells before choosing the final number of principal components.",
+      "Normalize & PCA" = "Normalize, select highly variable genes, scale, and calculate PCA from the QC-passed checkpoint.",
+      "UMAP & clustering" = "Apply optional technical-batch integration, then calculate neighbors, UMAP, and clusters.",
+      "Annotate & markers" = "Add a named annotation metadata field, calculate cluster markers, and write exact composition tables.",
+      "Signature scoring" = "Score named gene signatures on normalized expression and retain the scores in the processed object.",
+      "Differential expression" = "Run sample-level pseudobulk DESeq2 and optional cell-level Wilcoxon testing.",
+      "Pathway analysis" = "Run ranked fgseaMultilevel for a selected completed differential-expression comparison and pathway database."
     )
-    if ("Alignment & counting" %in% steps) descriptions <- c("Align and quantify each 10x FASTQ sample with Cell Ranger and create filtered feature-barcode matrices.", descriptions)
-    descriptions
+    unname(descriptions[steps])
   } else if (!is.null(project) && isTRUE(project$counts_only)) {
     c(
       "Review or complete sample metadata for the uploaded count matrix.",
