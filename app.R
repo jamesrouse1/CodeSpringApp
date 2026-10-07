@@ -21502,7 +21502,7 @@ server <- function(input, output, session) {
         if (!reuse_existing || show_rebuild) tool_panel("Input inspection", status, "Validate the raw-count input, create an unfiltered QC preview, and report any existing analysis state only when the input is an RDS or H5AD object.", tagList(uiOutput("scrna_inspect_settings_ui"), uiOutput("scrna_input_state_ui"), tags$p(class = "muted small-note", "The input is read only. This first job creates the unfiltered QC plots and auto-fills editable, distribution-aware starting cutoffs for review.")), "run_scrna_inspect", "Inspect input & show QC plots", show_sample_progress = FALSE) else NULL,
         if (!reuse_existing || show_rebuild) tool_panel("QC & doublets", status, "Review the unfiltered QC plots below, choose biologically appropriate cutoffs, then filter cells and record predicted doublets.", tagList(uiOutput("scrna_pre_qc_plot_ui"), uiOutput("scrna_qc_settings_ui"), uiOutput("scrna_post_qc_plot_ui"), tags$p(class = "muted small-note", "The same applied cutoffs are drawn on the before- and after-filter plots. Doublet calls are saved whether or not predicted doublets are removed.")), "run_scrna_qc", "Run QC & doublets", show_sample_progress = FALSE) else NULL,
         if (!reuse_existing || show_rebuild) tool_panel("PCA preview", status, "Use the post-QC cells to create an elbow plot before choosing principal components for the final analysis.", tagList(tags$p(class = "muted small-note", "The preview calculates up to 50 PCs with the selected normalization. It does not create a final UMAP, clustering, or processed object."), uiOutput("scrna_pca_output_ui")), "run_scrna_pca_preview", "Create PCA elbow plot", show_sample_progress = FALSE) else NULL,
-        if (!reuse_existing || show_rebuild) tool_panel("Normalize, PCA & UMAP", status, "Choose principal components from the elbow plot, then normalize, calculate the final PCA, optionally correct a technical batch, and create UMAP clusters.", tagList(uiOutput("scrna_preprocess_settings_ui"), uiOutput("scrna_cluster_settings_ui"), uiOutput("scrna_preintegration_umap_ui"), uiOutput("scrna_umap_output_ui")), "run_scrna_cluster", "Run normalization, PCA & UMAP", show_sample_progress = FALSE) else NULL,
+        if (!reuse_existing || show_rebuild) tool_panel("Normalize, PCA & UMAP", status, "Choose principal components from the elbow plot, then normalize, calculate the final PCA, optionally correct a technical batch, and create UMAP clusters.", tagList(uiOutput("scrna_pca_elbow_compact_ui"), uiOutput("scrna_preprocess_settings_ui"), uiOutput("scrna_cluster_settings_ui"), uiOutput("scrna_preintegration_umap_ui"), uiOutput("scrna_umap_output_ui")), "run_scrna_cluster", "Run normalization, PCA & UMAP", show_sample_progress = FALSE) else NULL,
         tool_panel("Annotate & markers", status, "Use the project's saved post-UMAP object to add a named annotation metadata field.", uiOutput("scrna_annotation_settings_ui"), "run_scrna_annotate", "Run annotation", show_sample_progress = FALSE, button_ui = uiOutput("scrna_annotation_run_button_ui")),
         tool_panel("Signature scoring", status, "Score one or more named gene signatures on normalized expression and store every score as reusable cell metadata in the processed object.", tagList(uiOutput("scrna_signature_settings_ui"), uiOutput("scrna_run_signature_umap_ui")), "run_scrna_score", "Run signature scoring", show_sample_progress = FALSE),
         tool_panel("Differential expression", status, "Use pseudobulk DESeq2 when independent biological samples are available; one-sample projects use cell-level Wilcoxon comparisons between annotated populations.", uiOutput("scrna_differential_settings_ui"), "run_scrna_differential", "Run differential expression", show_sample_progress = FALSE),
@@ -24445,6 +24445,19 @@ server <- function(input, output, session) {
       tags$p(class = "muted small-note", paste0("Review variance explained and the PCA distribution by input sample before moving on to UMAP and clustering.", if (!is.na(recommended_pcs)) paste0(" The dashed line marks the suggested PCA elbow (", recommended_pcs, " PCs).") else "")),
       selectInput("scrna_pca_output", "PCA figure", choices = files, selected = selected, selectize = FALSE),
       image_or_file_ui(selected, "760px")
+    )
+  })
+  output$scrna_pca_elbow_compact_ui <- renderUI({
+    progress_refresh()
+    p <- current_project(); if (!is_scrna_project(p)) return(NULL)
+    files <- scrna_result_file_choices(p, "^03_pca_.*\\.png$")
+    elbow <- files[grepl("elbow", unname(files), ignore.case = TRUE)]
+    if (!length(elbow)) return(div(class = "muted small-note", "Create the PCA preview to view the elbow plot here."))
+    recommended_pcs <- scrna_pca_recommendation(p)
+    tagList(
+      tags$h4("PCA elbow plot"),
+      tags$p(class = "muted small-note", paste0("Use this to choose principal components below.", if (!is.na(recommended_pcs)) paste0(" Suggested: ", recommended_pcs, " PCs.") else "")),
+      image_or_file_ui(unname(elbow[[1]]), "280px")
     )
   })
   output$scrna_preintegration_umap_ui <- renderUI({
