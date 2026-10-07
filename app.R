@@ -4135,18 +4135,6 @@ extract_job_id <- function(x) {
   ""
 }
 
-extract_local_job_id <- function(x) {
-  m <- regexpr("local_job_id:[[:space:]]*[0-9]+", x)
-  if (m < 0) return("")
-  sub("local_job_id:[[:space:]]*", "", regmatches(x, m))
-}
-
-local_process_running <- function(pid) {
-  pid <- trimws(as.character(pid %||% ""))
-  if (!grepl("^[0-9]+$", pid)) return(FALSE)
-  identical(tryCatch(system2("kill", c("-0", pid), stdout = FALSE, stderr = FALSE), error = function(e) 1L), 0L)
-}
-
 job_history_cache_key <- function(project) {
   paste(project$id %||% project$name %||% "project", project$data_dir %||% "", sep = "\r")
 }
@@ -4190,11 +4178,8 @@ job_history <- function(project, force_refresh = FALSE) {
   jobs$step[jobs$step == "Count matrix"] <- "featureCounts"
   jobs$step[jobs$step == "RSEM optional"] <- "RSEM (optional)"
   jobs$step[jobs$step == "Kallisto optional"] <- "Kallisto (optional)"
-  scheduler_job_id <- vapply(as.character(jobs$output), extract_job_id, character(1))
-  local_job_id <- vapply(as.character(jobs$output), extract_local_job_id, character(1))
-  jobs$job_id <- ifelse(nzchar(local_job_id), paste0("local:", local_job_id), scheduler_job_id)
-  jobs$target <- vapply(as.character(jobs$output), extract_output_field, character(1), key = "target")
-  jobs$slurm_state <- ifelse(nzchar(local_job_id), "Submitted", ifelse(nzchar(scheduler_job_id), "Submitted", "No job id"))
+  jobs$job_id <- vapply(as.character(jobs$output), extract_job_id, character(1))
+  jobs$slurm_state <- ifelse(nzchar(jobs$job_id), "Submitted", "No job id")
   jobs$elapsed <- ""
   jobs$start_time <- ""
   jobs$end_time <- ""
@@ -4210,16 +4195,8 @@ job_history <- function(project, force_refresh = FALSE) {
       jobs[[column]][restore] <- as.character(previous[[column]][previous_hit[restore]])
     }
   }
-  is_local <- nzchar(local_job_id)
-  if (any(is_local)) {
-    local_running <- vapply(local_job_id[is_local], local_process_running, logical(1))
-    local_complete <- !local_running & file.exists(jobs$target[is_local])
-    jobs$slurm_state[which(is_local)[local_running]] <- "RUNNING"
-    jobs$slurm_state[which(is_local)[local_complete]] <- "COMPLETED"
-    jobs$slurm_state[which(is_local)[!local_running & !local_complete]] <- "FAILED"
-  }
   refreshable_states <- c("Submitted", "Finished or not in queue", active_slurm_states())
-  ids <- unique(jobs$job_id[!is_local & nzchar(jobs$job_id) & jobs$slurm_state %in% refreshable_states])
+  ids <- unique(jobs$job_id[nzchar(jobs$job_id) & jobs$slurm_state %in% refreshable_states])
   if (length(ids) > MAX_SLURM_JOB_IDS_PER_REFRESH) {
     skipped_ids <- head(ids, length(ids) - MAX_SLURM_JOB_IDS_PER_REFRESH)
     jobs$slurm_state[jobs$job_id %in% skipped_ids & jobs$slurm_state == "Submitted"] <- "Finished or not in queue"
@@ -4287,6 +4264,7 @@ job_history <- function(project, force_refresh = FALSE) {
   }
   jobs$input_mode <- vapply(as.character(jobs$output), extract_output_field, character(1), key = "input_mode")
   jobs$sample <- vapply(as.character(jobs$output), extract_output_field, character(1), key = "sample")
+  jobs$target <- vapply(as.character(jobs$output), extract_output_field, character(1), key = "target")
   jobs$stdout <- vapply(as.character(jobs$output), extract_output_field, character(1), key = "stdout")
   jobs$stderr <- vapply(as.character(jobs$output), extract_output_field, character(1), key = "stderr")
   app_cancelled <- grepl("cancelled_by_codespringweb:[[:space:]]*true", as.character(jobs$output), ignore.case = TRUE)
@@ -5235,7 +5213,8 @@ methods_sentence_for_step <- function(step, manifest_rows, project) {
     step,
     "Input inspection" = paste0("The supplied single-cell matrix or processed object was inspected for raw counts, normalized data, reductions, clusters, and annotations.", mode_text),
     "QC & doublets" = paste0("Cells and genes were filtered using the recorded thresholds, mitochondrial content was calculated, and doublets were detected independently by capture with scDblFinder (Seurat) or Scrublet (Scanpy).", mode_text),
-    "Normalize, UMAP & clustering" = paste0("Counts were normalized, highly variable genes and principal components were calculated, then optional technical-batch integration, neighbors, UMAP, and graph-based clustering were performed.", mode_text),
+    "Normalize & PCA" = paste0("Counts were normalized with the selected Seurat or Scanpy method, highly variable genes were selected, and principal-component analysis was calculated.", mode_text),
+    "UMAP & clustering" = paste0("Optional technical-batch integration was applied before nearest-neighbor graph construction, UMAP, and graph-based clustering; unintegrated coordinates were retained.", mode_text),
     "Annotate & markers" = paste0("Cell annotations were assigned using marker-list scoring, a direct per-cell mapping, or Seurat reference transfer, and requested cluster markers were calculated.", mode_text),
     "Signature scoring" = paste0("Named gene signatures were scored on normalized expression and stored as per-cell metadata.", mode_text),
     "Differential expression" = paste0("Differential expression used sample-level pseudobulk DESeq2 where biological replicates were available and/or a separately reported cell-level Wilcoxon comparison.", mode_text),
@@ -5641,7 +5620,7 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
     fastq_manifest <- tryCatch(scrna_fastq_manifest(project), error = function(e) data.frame())
     has_fastq <- NROW(fastq_manifest) > 0L
     stages <- scrna_pipeline_order(project)
-    stage_keys <- c("inspect", "qc", "pca_preview", "cluster", "annotate", "score", "differential", "pathway")
+    stage_keys <- c("inspect", "qc", "pca_preview", "preprocess", "cluster", "annotate", "score", "differential", "pathway")
     marker <- file.path(out_dir, paste0("_STAGE_", toupper(stage_keys), "_COMPLETE"))
     if (has_fastq) marker <- c(file.path(data_dir, "cellranger"), marker)
     detected <- safe_read_table(file.path(out_dir, "tables", "input_processing_detected.tsv"), 10000)
@@ -5662,7 +5641,8 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
           scrna_cellranger_complete(project, sample)
         }, logical(1)))
       } else file.exists(marker_path) ||
-        (existing_processed_ready && identical(step, "Normalize, UMAP & clustering")) ||
+        (existing_processed_ready && identical(step, "Normalize & PCA") && detected_any("pca_detected")) ||
+        (existing_processed_ready && identical(step, "UMAP & clustering")) ||
         (existing_processed_ready && identical(step, "Annotate & markers") && "annotation_columns_detected" %in% names(detected) && any(nzchar(trimws(as.character(detected$annotation_columns_detected))))) ||
         (identical(step, "Annotate & markers") && file.exists(file.path(out_dir, "_COMPLETE")))
       hit <- if (NROW(jobs) && all(c("step", "slurm_state") %in% names(jobs))) jobs[canonical_job_step(jobs$step) == canonical_job_step(step), , drop = FALSE] else data.frame()
@@ -5680,7 +5660,8 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
       "Input inspection" = file.path(out_dir, "tables", "input_processing_detected.tsv"),
       "QC & doublets" = file.path(out_dir, "tables", "qc_summary_by_sample.tsv"),
       "PCA preview" = file.path(out_dir, "tables", "pca_variance_explained.tsv"),
-      "Normalize, UMAP & clustering" = file.path(out_dir, "objects"),
+      "Normalize & PCA" = file.path(out_dir, "checkpoints"),
+      "UMAP & clustering" = file.path(out_dir, "objects"),
       "Annotate & markers" = file.path(out_dir, "objects"),
       "Signature scoring" = file.path(out_dir, "tables", "signature_scores_summary.tsv"),
       "Differential expression" = file.path(out_dir, "tables", "pseudobulk_differential_expression.tsv"),
@@ -5697,7 +5678,8 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
       "Input inspection" = inspection_detail,
       "QC & doublets" = "Filter cells and genes, calculate QC metrics, and detect/remove doublets while preserving raw counts.",
       "PCA preview" = "Creates a provisional PCA elbow plot from post-QC cells before the final PCA settings are chosen.",
-      "Normalize, UMAP & clustering" = "Normalizes expression, selects variable genes, calculates PCA, optionally corrects a technical batch, then calculates the neighbor graph, UMAP, and clusters.",
+      "Normalize & PCA" = "Normalizes expression, selects variable genes, scales data, and calculates the final PCA.",
+      "UMAP & clustering" = "Calculates the neighbor graph, UMAP embedding, and clusters using the selected settings.",
       "Annotate & markers" = "Adds the chosen annotation field, calculates cluster markers, and writes composition tables.",
       "Signature scoring" = "Scores named gene sets on normalized expression and stores them as cell metadata.",
       "Differential expression" = "Uses sample-level pseudobulk DESeq2 when replicates are available and cell-level Wilcoxon for cell-population comparisons.",
@@ -5977,7 +5959,7 @@ chip_pipeline_order <- function() {
 }
 
 scrna_pipeline_order <- function(project = NULL) {
-  steps <- c("Alignment & counting", "Input inspection", "QC & doublets", "PCA preview", "Normalize, UMAP & clustering", "Annotate & markers", "Signature scoring", "Differential expression", "Pathway analysis")
+  steps <- c("Alignment & counting", "Input inspection", "QC & doublets", "PCA preview", "Normalize & PCA", "UMAP & clustering", "Annotate & markers", "Signature scoring", "Differential expression", "Pathway analysis")
   if (!is.null(project)) {
     has_fastq <- tryCatch(NROW(scrna_fastq_manifest(project)) > 0L, error = function(e) FALSE)
     if (!has_fastq) steps <- setdiff(steps, "Alignment & counting")
@@ -5987,7 +5969,7 @@ scrna_pipeline_order <- function(project = NULL) {
 
 scrna_stage_step <- function(stage = "inspect") {
   stage <- tolower(trimws(as.character(stage %||% "inspect")))
-  labels <- c(inspect = "Input inspection", qc = "QC & doublets", pca_preview = "PCA preview", preprocess = "Normalize & PCA", cluster = "Normalize, UMAP & clustering", annotate = "Annotate & markers", score = "Signature scoring", differential = "Differential expression", pathway = "Pathway analysis")
+  labels <- c(inspect = "Input inspection", qc = "QC & doublets", pca_preview = "PCA preview", preprocess = "Normalize & PCA", cluster = "UMAP & clustering", annotate = "Annotate & markers", score = "Signature scoring", differential = "Differential expression", pathway = "Pathway analysis")
   value <- unname(labels[[stage]])
   if (is.null(value) || !nzchar(value)) stop("Unknown scRNA stage: ", stage)
   value
@@ -11142,50 +11124,6 @@ submit_sbatch <- function(project, step, script, args, log_name, input_mode = ""
   submit_screen_message(step, sample, job_id, input_mode, dep)
 }
 
-# Submit a deliberately small scRNA preview without waiting for the SLURM
-# scheduler.  The process is detached from Shiny, writes to the same logs and
-# completion marker as a batch job, and is tracked through its local PID.
-# Keep this narrow: it is intended for fast inspection/PCA preview work, not
-# for general analysis on the web application's host.
-submit_local_scrna_preview_job <- function(project, step, script, args, log_name, input_mode = "", target = "", reference = "") {
-  log_dir <- file.path(dirname(project$data_dir), "log")
-  dir.create(log_dir, recursive = TRUE, showWarnings = FALSE)
-  scope <- input_mode %||% ""
-  if (!nzchar(scope) && nzchar(target %||% "")) scope <- basename(target)
-  if (!nzchar(scope)) scope <- "project"
-  scope_slug <- clean_name(scope, "project")
-  tool_slug <- clean_name(log_name, clean_name(step, "job"))
-  stdout <- file.path(log_dir, paste0("output_", tool_slug, "_", scope_slug, ".txt"))
-  stderr <- file.path(log_dir, paste0("error_", tool_slug, "_", scope_slug, ".txt"))
-  submit_log <- file.path(log_dir, paste0("submit_", tool_slug, "_", scope_slug, ".txt"))
-  wrapper <- file.path(log_dir, paste0("local_", tool_slug, "_", scope_slug, ".sh"))
-  cat("", file = stdout)
-  cat("", file = stderr)
-  if (!file.exists(script) || file.access(script, mode = 1) != 0L) {
-    return(record_preflight_failure(project, step, "The local scRNA preview runner is unavailable or not executable.", "scrna"))
-  }
-  writeLines(c("#!/usr/bin/env bash", "set -euo pipefail", "export CSL_SCRNA_LOCAL_PREVIEW=1", paste(c(shQuote(script), vapply(args, shQuote, character(1))), collapse = " ")), wrapper)
-  Sys.chmod(wrapper, mode = "0755")
-  launch <- paste("nohup", shQuote(wrapper), ">", shQuote(stdout), "2>", shQuote(stderr), "< /dev/null & echo $!")
-  pid <- tryCatch(trimws(system2("/bin/sh", c("-c", launch), stdout = TRUE, stderr = TRUE)[1]), error = function(e) "")
-  if (!grepl("^[0-9]+$", pid)) {
-    writeLines(c(paste("time:", format(Sys.time(), "%Y-%m-%d %H:%M:%S")), "local launch failed", paste("response:", pid)), submit_log)
-    return(record_preflight_failure(project, step, "Could not start the local scRNA preview process. See the submission log for details.", "scrna"))
-  }
-  writeLines(c(
-    paste("time:", format(Sys.time(), "%Y-%m-%d %H:%M:%S")),
-    paste("project:", project$name), paste("step:", step), "execution: local_preview",
-    paste("target:", target %||% ""), paste("stdout:", stdout), paste("stderr:", stderr),
-    paste("wrapper:", wrapper), paste("local_job_id:", pid)
-  ), submit_log)
-  manifest <- append_run_manifest(project, step, "", c(wrapper), target, input_mode, reference, paste0("local:", pid))
-  save_job(project, step, c(wrapper), paste(c(
-    "Local preview started", paste("local_job_id:", pid), paste("target:", target %||% ""),
-    paste("stdout:", stdout), paste("stderr:", stderr), paste("submit_log:", submit_log), paste("manifest:", manifest)
-  ), collapse = "\n"))
-  paste0(step, " started locally (preview process ", pid, ").")
-}
-
 submit_sbatch_wrap <- function(project, step, shell_command, log_name, input_mode = "", sample = "", target = "", reference = "", dependency_ids = character(0)) {
   log_dir <- file.path(dirname(project$data_dir), "log")
   dir.create(log_dir, recursive = TRUE, showWarnings = FALSE)
@@ -13746,7 +13684,7 @@ scrna_stage_input_bytes <- function(stage, engine, manifest, out_dir, reference_
     inspect = unique(as.character(manifest$input_path %||% character(0))),
     qc = checkpoint("01_input"),
     preprocess = checkpoint("02_qc"),
-    cluster = checkpoint("03_pca_preview"),
+    cluster = checkpoint("03_preprocessed"),
     annotate = c(processed, checkpoint("04_clustered"), reference_file),
     score = processed,
     differential = processed,
@@ -13801,30 +13739,6 @@ scrna_stage_resource_options <- function(stage, input_bytes = 0, engine = "auto"
     paste0("--mem=", profile[["memory_gb"]], "G"),
     paste0("--time=", run_time)
   )
-}
-
-scrna_local_preview_max_bytes <- function() {
-  configured_mb <- suppressWarnings(as.numeric(Sys.getenv("CSL_SCRNA_LOCAL_PREVIEW_MAX_MB", unset = "250")))
-  if (!is.finite(configured_mb) || configured_mb <= 0) configured_mb <- 250
-  as.numeric(configured_mb) * 1024^2
-}
-
-scrna_use_local_preview <- function(stage, engine, input_bytes) {
-  # Local previews preserve the interactive tutorial experience without
-  # consuming scheduler time.  Restrict this to Seurat's two read-only/
-  # preparatory preview stages; doublet calling and all final analyses remain
-  # scheduled jobs even for small inputs.
-  stage <- tolower(trimws(as.character(stage %||% "")))
-  engine <- tolower(trimws(as.character(engine %||% "")))
-  bytes <- suppressWarnings(as.numeric(input_bytes %||% 0))
-  is.finite(bytes) && bytes >= 0 && bytes <= scrna_local_preview_max_bytes() &&
-    identical(engine, "seurat") && stage %in% c("inspect", "pca_preview")
-}
-
-scrna_local_preview_active <- function(project) {
-  jobs <- tryCatch(job_history(project), error = function(e) data.frame())
-  NROW(jobs) && all(c("job_id", "slurm_state") %in% names(jobs)) &&
-    any(startsWith(as.character(jobs$job_id), "local:") & toupper(as.character(jobs$slurm_state)) %in% toupper(active_slurm_states()))
 }
 
 scrna_object_query_resource_options <- function(object_path, engine = "seurat") {
@@ -14379,23 +14293,12 @@ submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto
   qsub <- file.path(SCRIPTS_DIR, "singleCellRNAseq", "qsub_scrna_pipeline.sh")
   runner <- file.path(SCRIPTS_DIR, "singleCellRNAseq", "scrna_pipeline.sh")
   if (!file.exists(qsub) || !file.exists(runner)) return(record_preflight_failure(project, step_label, "CodeSpringLab single-cell runner scripts were not found. Update CodeSpringLab, then try again.", "scrna"))
-  prior_map <- c(qc = "inspect", pca_preview = "qc", preprocess = "pca_preview", cluster = "pca_preview", annotate = "cluster", score = "annotate", differential = "annotate", pathway = "differential")
+  prior_map <- c(qc = "inspect", pca_preview = "qc", preprocess = "pca_preview", cluster = "preprocess", annotate = "cluster", score = "annotate", differential = "annotate", pathway = "differential")
   prior <- unname(prior_map[stage]) %||% ""
   prior_marker <- if (nzchar(prior)) file.path(out_dir, paste0("_STAGE_", toupper(prior), "_COMPLETE")) else ""
   if (nzchar(prior_marker) && !file.exists(prior_marker)) return(record_preflight_failure(project, step_label, paste0("Complete ", scrna_stage_step(prior), " before submitting this stage."), "scrna"))
   scanpy_container_path <- if (identical(resolved_engine, "scanpy")) scanpy_container_check()$path else ""
   input_bytes <- scrna_stage_input_bytes(stage, resolved_engine, manifest, out_dir, reference_file)
-  if (scrna_use_local_preview(stage, resolved_engine, input_bytes)) {
-    if (scrna_local_preview_active(project)) {
-      return(record_preflight_failure(project, step_label, "A local single-cell preview is already running for this project. Wait for it to finish before starting another preview.", "scrna"))
-    }
-    return(submit_local_scrna_preview_job(
-      project, step_label, qsub,
-      c(runner, resolved_engine, manifest_path, out_dir, params_path, stage, scanpy_container_path),
-      "scrna_pipeline", paste(stage, resolved_engine, normalization, integration),
-      target = file.path(out_dir, paste0("_STAGE_", toupper(stage), "_COMPLETE")), reference = resolved_engine
-    ))
-  }
   sbatch_options <- scrna_stage_resource_options(stage, input_bytes, resolved_engine)
   submit_sbatch(project, step_label, qsub, c(runner, resolved_engine, manifest_path, out_dir, params_path, stage, scanpy_container_path), "scrna_pipeline", paste(stage, resolved_engine, normalization, integration), target = file.path(out_dir, paste0("_STAGE_", toupper(stage), "_COMPLETE")), reference = resolved_engine, sbatch_options = sbatch_options)
 }
@@ -15018,7 +14921,8 @@ run_step_meta <- function(project = NULL) {
       "Input inspection" = "Inspect the supplied object or matrix and record detected counts, reductions, clusters, and annotations.",
       "QC & doublets" = "Filter cells and genes, calculate QC metrics, and detect/remove doublets while preserving raw counts.",
       "PCA preview" = "Calculate a provisional PCA elbow plot from post-QC cells before choosing the final number of principal components.",
-      "Normalize, UMAP & clustering" = "Normalize, select highly variable genes, calculate PCA, optionally correct a technical batch, then calculate neighbors, UMAP, and clusters.",
+      "Normalize & PCA" = "Normalize, select highly variable genes, scale, and calculate PCA from the QC-passed checkpoint.",
+      "UMAP & clustering" = "Apply optional technical-batch integration, then calculate neighbors, UMAP, and clusters.",
       "Annotate & markers" = "Add a named annotation metadata field, calculate cluster markers, and write exact composition tables.",
       "Signature scoring" = "Score named gene signatures on normalized expression and retain the scores in the processed object.",
       "Differential expression" = "Run sample-level pseudobulk DESeq2 and optional cell-level Wilcoxon testing.",
@@ -21507,7 +21411,7 @@ server <- function(input, output, session) {
     p <- current_project()
     if (is_scrna_project(p)) {
       return(div(class = "resource-strip",
-        div(class = "resource-card", tags$strong("Single-cell workflow"), tags$p(class = "muted", "Small Seurat input and PCA previews run locally in the background; QC, doublet detection, and downstream analysis run as SLURM jobs. Every stage saves a checkpoint.")),
+        div(class = "resource-card", tags$strong("Single-cell workflow"), tags$p(class = "muted", "Each stage runs as its own SLURM job and saves a checkpoint. Existing object state is detected during Input inspection.")),
         div(class = "resource-card", tags$strong("Input"), tags$p(class = "muted status-path", p$scrna_input_manifest %||% p$design_matrix_path))
       ))
     }
@@ -21596,7 +21500,8 @@ server <- function(input, output, session) {
         if (!reuse_existing || show_rebuild) tool_panel("Input inspection", status, "Validate the raw-count input, create an unfiltered QC preview, and report any existing analysis state only when the input is an RDS or H5AD object.", tagList(uiOutput("scrna_inspect_settings_ui"), uiOutput("scrna_input_state_ui"), tags$p(class = "muted small-note", "The input is read only. This first job creates the unfiltered QC plots and auto-fills editable, distribution-aware starting cutoffs for review.")), "run_scrna_inspect", "Inspect input & show QC plots", show_sample_progress = FALSE) else NULL,
         if (!reuse_existing || show_rebuild) tool_panel("QC & doublets", status, "Review the unfiltered QC plots below, choose biologically appropriate cutoffs, then filter cells and record predicted doublets.", tagList(uiOutput("scrna_pre_qc_plot_ui"), uiOutput("scrna_qc_settings_ui"), uiOutput("scrna_post_qc_plot_ui"), tags$p(class = "muted small-note", "The same applied cutoffs are drawn on the before- and after-filter plots. Doublet calls are saved whether or not predicted doublets are removed.")), "run_scrna_qc", "Run QC & doublets", show_sample_progress = FALSE) else NULL,
         if (!reuse_existing || show_rebuild) tool_panel("PCA preview", status, "Use the post-QC cells to create an elbow plot before choosing principal components for the final analysis.", tagList(tags$p(class = "muted small-note", "The preview calculates up to 50 PCs with the selected normalization. It does not create a final UMAP, clustering, or processed object."), uiOutput("scrna_pca_output_ui")), "run_scrna_pca_preview", "Create PCA elbow plot", show_sample_progress = FALSE) else NULL,
-        if (!reuse_existing || show_rebuild) tool_panel("Normalize, UMAP & clustering", status, "Choose principal components from the elbow plot, then normalize, calculate PCA, optionally correct a technical batch, and create the final UMAP and clusters.", tagList(uiOutput("scrna_preprocess_settings_ui"), uiOutput("scrna_cluster_settings_ui"), uiOutput("scrna_preintegration_umap_ui"), uiOutput("scrna_umap_output_ui")), "run_scrna_cluster", "Run normalization, UMAP & clustering", show_sample_progress = FALSE) else NULL,
+        if (!reuse_existing || show_rebuild) tool_panel("Normalize & PCA", status, "Choose principal components from the elbow plot, then normalize retained cells, identify variable genes, scale, and calculate the final PCA.", uiOutput("scrna_preprocess_settings_ui"), "run_scrna_preprocess", "Run normalization & PCA", show_sample_progress = FALSE) else NULL,
+        if (!reuse_existing || show_rebuild) tool_panel("UMAP & clustering", status, if (NROW(scrna_manifest(p)) <= 1L) "Review the initial embedding, then calculate neighbors, UMAP, and clusters." else "Compare the uncorrected embedding first. Optionally correct a technical batch, then calculate neighbors, UMAP, and clusters.", tagList(uiOutput("scrna_preintegration_umap_ui"), uiOutput("scrna_cluster_settings_ui"), uiOutput("scrna_umap_output_ui")), "run_scrna_cluster", "Run UMAP & clustering", show_sample_progress = FALSE) else NULL,
         tool_panel("Annotate & markers", status, "Use the project's saved post-UMAP object to add a named annotation metadata field.", uiOutput("scrna_annotation_settings_ui"), "run_scrna_annotate", "Run annotation", show_sample_progress = FALSE, button_ui = uiOutput("scrna_annotation_run_button_ui")),
         tool_panel("Signature scoring", status, "Score one or more named gene signatures on normalized expression and store every score as reusable cell metadata in the processed object.", tagList(uiOutput("scrna_signature_settings_ui"), uiOutput("scrna_run_signature_umap_ui")), "run_scrna_score", "Run signature scoring", show_sample_progress = FALSE),
         tool_panel("Differential expression", status, "Use pseudobulk DESeq2 when independent biological samples are available; one-sample projects use cell-level Wilcoxon comparisons between annotated populations.", uiOutput("scrna_differential_settings_ui"), "run_scrna_differential", "Run differential expression", show_sample_progress = FALSE),
@@ -22242,8 +22147,9 @@ server <- function(input, output, session) {
     scrna_umap_defaults_applied(stamp)
   }, ignoreInit = FALSE)
 
-  # Keep the integration controls synchronized with the combined final
-  # normalization/UMAP/clustering card.
+  # Keep the later UMAP card as a convenient place to revise its emphasis.
+  # The preprocessing control remains authoritative because it is what creates
+  # the initial pre-integration sample UMAP.
   observeEvent(input$scrna_cluster_umap_focus, {
     choice <- input$scrna_cluster_umap_focus %||% ""
     if (choice %in% c("local", "global")) {
@@ -24561,7 +24467,7 @@ server <- function(input, output, session) {
     progress_refresh()
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
     files <- scrna_result_file_choices(p, "^03_pca_.*\\.png$")
-    if (!length(files)) return(div(class = "empty-box", "Run PCA preview to create the PCA variance and sample-separation previews."))
+    if (!length(files)) return(div(class = "empty-box", "Run Normalize & PCA to create the PCA variance and sample-separation previews."))
     variance <- files[grepl("_variance_explained\\.png$", unname(files), ignore.case = TRUE)]
     selected <- selected_choice(input$scrna_pca_output, files, unname(if (length(variance)) variance else files)[[1]])
     recommended_pcs <- scrna_pca_recommendation(p)
@@ -24577,7 +24483,7 @@ server <- function(input, output, session) {
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
     single_input <- NROW(scrna_manifest(p)) <= 1L
     files <- scrna_result_file_choices(p, if (single_input) "^02_initial_umap_.*\\.png$" else "^02_preintegration_umap_.*\\.png$")
-    if (!length(files)) return(div(class = "empty-box", "Run Normalize, UMAP & clustering to generate this view."))
+    if (!length(files)) return(div(class = "empty-box", if (single_input) "Run Normalize & PCA to generate the initial UMAP." else "Run Normalize & PCA to generate the UMAP before integration. It will appear here before you choose a correction method."))
     selected <- selected_choice(input$scrna_preintegration_umap, files, unname(files)[[1]])
     tagList(
       tags$h4(if (single_input) "Initial UMAP" else "Before integration"),
@@ -24590,12 +24496,12 @@ server <- function(input, output, session) {
     progress_refresh()
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
     files <- scrna_result_file_choices(p, "^04_umap_.*pre_annotation\\.png$")
-    if (!length(files)) return(div(class = "empty-box", "Run Normalize, UMAP & clustering to create the unannotated UMAP preview."))
+    if (!length(files)) return(div(class = "empty-box", "Run UMAP & clustering to create the unannotated UMAP preview."))
     clusters <- files[grepl("_clusters_pre_annotation\\.png$", unname(files), ignore.case = TRUE)]
     selected <- selected_choice(input$scrna_umap_output, files, unname(if (length(clusters)) clusters else files)[[1]])
     tagList(
       tags$h4("After integration / final clustering UMAP"),
-      tags$p(class = "muted small-note", "This appears as soon as Normalize, UMAP & clustering completes. It uses the integrated coordinates when Harmony, RPCA, CCA, or scVI was selected; with integration disabled it uses PCA directly. Cell-type labels have not yet been applied."),
+      tags$p(class = "muted small-note", "This appears as soon as UMAP & clustering completes. It uses the integrated coordinates when Harmony, RPCA, CCA, or scVI was selected; with integration disabled it uses PCA directly. Cell-type labels have not yet been applied."),
       selectInput("scrna_umap_output", "UMAP figure", choices = files, selected = selected, selectize = FALSE),
       image_or_file_ui(selected, "760px")
     )
@@ -25065,7 +24971,7 @@ server <- function(input, output, session) {
       expression_data <- scrna_dashboard_marker_values(p, marker_gene)
       validate(need(!is.null(expression_data), paste("Marker expression could not be read.", scrna_dashboard_expression_error() %||% "")))
       cell_index <- match(x$cell, expression_data$cell)
-      validate(need(!anyNA(cell_index), "The marker-expression values do not match this UMAP. Re-run Normalize, UMAP & clustering."))
+      validate(need(!anyNA(cell_index), "The marker-expression values do not match this UMAP. Re-run Normalize & PCA and UMAP."))
       x$.marker_expression <- expression_data$expression[cell_index]
       value <- x$.marker_expression
     } else {
@@ -25150,7 +25056,7 @@ server <- function(input, output, session) {
       expression <- scrna_dashboard_marker_values(p, marker_gene)
       validate(need(!is.null(expression), paste("Marker expression could not be read.", scrna_dashboard_expression_error() %||% "")))
       index <- match(x$cell, expression$cell)
-      validate(need(!anyNA(index)), "The marker-expression values do not match this UMAP. Re-run Normalize, UMAP & clustering.")
+      validate(need(!anyNA(index)), "The marker-expression values do not match this UMAP. Re-run Normalize & PCA and UMAP.")
       return(scrna_continuous_embedding_ggplot(x, expression$expression[index], title, marker_gene, point_size, opacity, isTRUE(input$scrna_embedding_legend)))
     }
     value <- x[[color_column]]
