@@ -11167,10 +11167,7 @@ submit_local_scrna_preview_job <- function(project, step, script, args, log_name
   writeLines(c("#!/usr/bin/env bash", "set -euo pipefail", "export CSL_SCRNA_LOCAL_PREVIEW=1", paste(c(shQuote(script), vapply(args, shQuote, character(1))), collapse = " ")), wrapper)
   Sys.chmod(wrapper, mode = "0755")
   launch <- paste("nohup", shQuote(wrapper), ">", shQuote(stdout), "2>", shQuote(stderr), "< /dev/null & echo $!")
-  # `system2()` splits a shell command passed through `-c` on some R builds,
-  # which leaves nohup without its wrapper operand.  Quote the complete shell
-  # command once so the background launcher receives it intact.
-  pid <- tryCatch(trimws(system(paste("/bin/sh -c", shQuote(launch)), intern = TRUE)[1]), error = function(e) "")
+  pid <- tryCatch(trimws(system2("/bin/sh", c("-c", launch), stdout = TRUE, stderr = TRUE)[1]), error = function(e) "")
   if (!grepl("^[0-9]+$", pid)) {
     writeLines(c(paste("time:", format(Sys.time(), "%Y-%m-%d %H:%M:%S")), "local launch failed", paste("response:", pid)), submit_log)
     return(record_preflight_failure(project, step, "Could not start the local scRNA preview process. See the submission log for details.", "scrna"))
