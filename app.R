@@ -13712,7 +13712,13 @@ scrna_stage_resource_options <- function(stage, input_bytes = 0, engine = "auto"
   tier <- scrna_resource_tier(input_bytes)
   heavy <- stage %in% c("pca_preview", "preprocess", "cluster", "annotate")
   light <- stage %in% c("inspect", "pathway")
-  profile <- if (heavy && identical(engine, "scanpy")) switch(tier,
+  # Small tutorial-scale checkpoints do not need the 128 GB allocations used
+  # for production-sized single-cell objects.  Modest requests start sooner
+  # on shared SLURM systems while retaining a safe memory margin for PBMC3K.
+  preview_scale <- input_bytes < 250 * 1024^2
+  profile <- if (heavy && preview_scale) {
+    if (identical(engine, "scanpy")) c(cpus = 4L, memory_gb = 32L) else c(cpus = 4L, memory_gb = 32L)
+  } else if (heavy && identical(engine, "scanpy")) switch(tier,
     small = c(cpus = 16L, memory_gb = 128L), medium = c(cpus = 20L, memory_gb = 160L),
     large = c(cpus = 24L, memory_gb = 192L), xlarge = c(cpus = 32L, memory_gb = 256L)
   ) else if (heavy) switch(tier,
