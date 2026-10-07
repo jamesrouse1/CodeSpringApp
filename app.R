@@ -22126,9 +22126,9 @@ server <- function(input, output, session) {
     if (is.na(value) || value < 5L) NA_integer_ else value
   }
 
-  observeEvent(list(progress_refresh(), input$scrna_umap_focus), {
+  observeEvent(list(progress_refresh(), input$scrna_cluster_umap_focus), {
     p <- current_project(); if (!is_scrna_project(p)) return()
-    focus <- input$scrna_umap_focus %||% "local"
+    focus <- input$scrna_cluster_umap_focus %||% "local"
     if (!focus %in% c("local", "global")) focus <- "local"
     recommendation_path <- file.path(scrna_output_dir(p), "tables", "pca_recommended_parameters.tsv")
     recommendation_stamp <- if (file.exists(recommendation_path)) as.character(file.info(recommendation_path)$mtime) else "no_pca_yet"
@@ -22138,25 +22138,12 @@ server <- function(input, output, session) {
     defaults <- scrna_umap_focus_settings(p, focus)
     n_pcs <- if (tutorial) defaults$n_pcs else scrna_pca_recommendation(p)
     session$onFlushed(function() {
-      updateNumericInput(session, "scrna_n_neighbors", value = defaults$n_neighbors)
-      updateNumericInput(session, "scrna_umap_min_dist", value = defaults$min_dist)
-      if (!is.na(n_pcs)) updateNumericInput(session, "scrna_n_pcs", value = n_pcs)
       updateNumericInput(session, "scrna_cluster_n_neighbors", value = defaults$n_neighbors)
       updateNumericInput(session, "scrna_cluster_umap_min_dist", value = defaults$min_dist)
       if (!is.na(n_pcs)) updateNumericInput(session, "scrna_cluster_n_pcs", value = n_pcs)
     }, once = TRUE)
     scrna_umap_defaults_applied(stamp)
   }, ignoreInit = FALSE)
-
-  # Keep the later UMAP card as a convenient place to revise its emphasis.
-  # The preprocessing control remains authoritative because it is what creates
-  # the initial pre-integration sample UMAP.
-  observeEvent(input$scrna_cluster_umap_focus, {
-    choice <- input$scrna_cluster_umap_focus %||% ""
-    if (choice %in% c("local", "global")) {
-      updateRadioButtons(session, "scrna_umap_focus", selected = choice)
-    }
-  }, ignoreInit = TRUE)
 
   output$scrna_qc_settings_ui <- renderUI({
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
@@ -22197,17 +22184,8 @@ server <- function(input, output, session) {
     }
     tagList(
       normalization_controls,
-      tags$h4(if (NROW(scrna_manifest(p)) <= 1L) "PCA and initial UMAP" else "PCA and pre-integration UMAP"),
-      radioButtons("scrna_umap_focus", "Emphasize", choices = c("Local structure (nearby subpopulations)" = "local", "Global structure (broader population relationships)" = "global"), selected = input$scrna_umap_focus %||% "local", inline = TRUE),
-      tags$p(class = "muted small-note", if (NROW(scrna_manifest(p)) <= 1L) "This choice sets the PCA-neighbor and UMAP parameters for the initial UMAP and final clustering run." else "This choice sets the PCA-neighbor and UMAP parameters used to create the initial sample UMAP before integration. The same values are retained for the later integrated UMAP unless you edit them."),
-      fluidRow(
-        column(4, numericInput("scrna_n_neighbors", "Neighbors", value = input$scrna_n_neighbors %||% tutorial$n_neighbors %||% 15, min = 2, max = 200, step = 1)),
-        column(4, numericInput("scrna_umap_min_dist", "Minimum distance", value = input$scrna_umap_min_dist %||% tutorial$umap_min_dist %||% 0.3, min = 0, max = 2, step = 0.05)),
-        column(4, numericInput("scrna_n_pcs", "Principal components", value = input$scrna_n_pcs %||% tutorial$n_pcs %||% 30, min = 5, max = 100, step = 1))
-      ),
-      tags$details(tags$summary("How to adjust normalization and UMAP settings"),
-        tags$p(class = "muted small-note", "Automatic normalization is the default; use SCTransform when depth varies substantially, otherwise LogNormalize is the simpler choice. For PBMC 3K, LogNormalize is preselected to match the tutorial."),
-        tags$p(class = "muted small-note", "Defaults are 15 neighbors, minimum distance 0.3, and 30 PCs (PBMC 3K: 20, 0.3, and 10). More neighbors or a higher minimum distance gives a smoother, broader map; fewer neighbors or a lower minimum distance separates local structure more strongly. More PCs can retain subtle signal but also noise. These change the visualization and clustering, not the underlying counts.")
+      tags$details(tags$summary("How to adjust normalization"),
+        tags$p(class = "muted small-note", "Automatic normalization is the default; use SCTransform when depth varies substantially, otherwise LogNormalize is the simpler choice. For PBMC 3K, LogNormalize is preselected to match the tutorial. UMAP and clustering parameters are set below.")
       )
     )
   })
@@ -22233,12 +22211,12 @@ server <- function(input, output, session) {
     tagList(
       integration_controls,
       tags$h4("UMAP parameters"),
-      radioButtons("scrna_cluster_umap_focus", "Emphasize", choices = c("Local structure (nearby subpopulations)" = "local", "Global structure (broader population relationships)" = "global"), selected = input$scrna_umap_focus %||% "local", inline = TRUE),
+      radioButtons("scrna_cluster_umap_focus", "Emphasize", choices = c("Local structure (nearby subpopulations)" = "local", "Global structure (broader population relationships)" = "global"), selected = input$scrna_cluster_umap_focus %||% "local", inline = TRUE),
       tags$p(class = "muted small-note", if (multiple_inputs) "These settings replace the initial pre-integration values for this final UMAP and clustering run." else "These settings replace the initial UMAP values for this final UMAP and clustering run."),
       fluidRow(
-        column(4, numericInput("scrna_cluster_n_neighbors", "Neighbors", value = input$scrna_cluster_n_neighbors %||% input$scrna_n_neighbors %||% tutorial$n_neighbors %||% 15, min = 2, max = 200, step = 1)),
-        column(4, numericInput("scrna_cluster_umap_min_dist", "Minimum distance", value = input$scrna_cluster_umap_min_dist %||% input$scrna_umap_min_dist %||% tutorial$umap_min_dist %||% 0.3, min = 0, max = 2, step = 0.05)),
-        column(4, numericInput("scrna_cluster_n_pcs", "Principal components", value = input$scrna_cluster_n_pcs %||% input$scrna_n_pcs %||% tutorial$n_pcs %||% 30, min = 5, max = 100, step = 1))
+        column(4, numericInput("scrna_cluster_n_neighbors", "Neighbors", value = input$scrna_cluster_n_neighbors %||% tutorial$n_neighbors %||% 15, min = 2, max = 200, step = 1)),
+        column(4, numericInput("scrna_cluster_umap_min_dist", "Minimum distance", value = input$scrna_cluster_umap_min_dist %||% tutorial$umap_min_dist %||% 0.3, min = 0, max = 2, step = 0.05)),
+        column(4, numericInput("scrna_cluster_n_pcs", "Principal components", value = input$scrna_cluster_n_pcs %||% tutorial$n_pcs %||% 30, min = 5, max = 100, step = 1))
       ),
       numericInput("scrna_cluster_resolution", "Clustering resolution", value = input$scrna_cluster_resolution %||% tutorial$cluster_resolution %||% 0.6, min = 0.05, max = 5, step = 0.05),
       tags$p(class = "muted small-note", "Default resolution is 0.6 (PBMC 3K: 0.5). Raise it for more, smaller clusters; lower it for fewer, broader clusters. Review markers and sample composition before choosing a final resolution."),
