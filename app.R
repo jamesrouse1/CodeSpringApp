@@ -23047,7 +23047,7 @@ server <- function(input, output, session) {
     p <- current_project()
     label <- scrna_stage_step(stage)
     pbmc_example <- scrna_is_pbmc3k_example(p)
-    tutorial_umap <- if (pbmc_example) scrna_umap_focus_settings(p, input$scrna_umap_focus %||% "local") else NULL
+    tutorial_umap <- if (pbmc_example) scrna_umap_focus_settings(p, input$scrna_cluster_umap_focus %||% "local") else NULL
     multiple_inputs <- NROW(scrna_manifest(p)) > 1L
     single_biological_sample <- length(scrna_biological_sample_ids(p)) <= 1L
     integration_choice <- if (!multiple_inputs || isTRUE(input$scrna_cluster_without_integration)) "none" else input$scrna_integration %||% "auto"
@@ -23089,9 +23089,9 @@ server <- function(input, output, session) {
         max_percent_mt = input$scrna_max_percent_mt %||% 20,
         qc_preset = if (pbmc_example) "pbmc3k" else "",
         min_cells_per_gene = input$scrna_min_cells_per_gene %||% 3,
-        n_pcs = if (identical(stage, "pca_preview")) 50 else if (identical(stage, "cluster")) input$scrna_cluster_n_pcs %||% input$scrna_n_pcs %||% tutorial_umap$n_pcs %||% 30 else input$scrna_n_pcs %||% tutorial_umap$n_pcs %||% 30,
-        n_neighbors = if (identical(stage, "cluster")) input$scrna_cluster_n_neighbors %||% input$scrna_n_neighbors %||% tutorial_umap$n_neighbors %||% 15 else input$scrna_n_neighbors %||% tutorial_umap$n_neighbors %||% 15,
-        umap_min_dist = if (identical(stage, "cluster")) input$scrna_cluster_umap_min_dist %||% input$scrna_umap_min_dist %||% tutorial_umap$min_dist %||% 0.3 else input$scrna_umap_min_dist %||% tutorial_umap$min_dist %||% 0.3,
+        n_pcs = if (identical(stage, "pca_preview")) 50 else input$scrna_cluster_n_pcs %||% tutorial_umap$n_pcs %||% 30,
+        n_neighbors = input$scrna_cluster_n_neighbors %||% tutorial_umap$n_neighbors %||% 15,
+        umap_min_dist = input$scrna_cluster_umap_min_dist %||% tutorial_umap$min_dist %||% 0.3,
         umap_spread = input$scrna_umap_spread %||% 1,
         umap_metric = input$scrna_umap_metric %||% "euclidean",
         umap_init_pos = input$scrna_umap_init_pos %||% "spectral",
