@@ -15784,7 +15784,10 @@ scrna_gene_select_input <- function(project, input_id, label, selected = "") {
     choices = genes,
     selected = selected_choice(selected, genes, genes[[1]]),
     options = list(
-      create = TRUE,
+      # Keep the Shiny value on the last selected gene while the user types
+      # into Selectize's search box. This prevents the UMAP/violin from
+      # rerendering for partial text such as "CD8" before a gene is chosen.
+      create = FALSE,
       persist = FALSE,
       closeAfterSelect = TRUE,
       # A full gene list can contain tens of thousands of entries. Rendering
