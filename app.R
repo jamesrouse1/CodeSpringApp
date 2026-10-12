@@ -24625,6 +24625,32 @@ server <- function(input, output, session) {
     if (identical(cached$stamp %||% "", stamp)) return(cached$values)
     if (!file.exists(cache_path) || file.info(cache_path)$mtime < object_info$mtime) {
       dir.create(dirname(cache_path), recursive = TRUE, showWarnings = FALSE)
+      # Small tutorial-scale objects used to provide marker values immediately.
+      # Preserve that responsive path; only delegate genuinely large objects to
+      # SLURM so ordinary UMAP coloring and gene violins do not wait in queue.
+      if (is.finite(object_info$size) && object_info$size <= 1024^3) {
+        if (identical(engine, "seurat")) {
+          helper <- file.path(SCRIPTS_DIR, "singleCellRNAseq", "extract_seurat_marker_expression.R")
+          rscript <- Sys.which("Rscript")
+          if (nzchar(rscript) && file.exists(helper)) {
+            tryCatch(system2(rscript, c(helper, checkpoint, gene, cache_path), stdout = TRUE, stderr = TRUE), error = function(e) character(0))
+          }
+        } else {
+          container <- scanpy_container_check()
+          helper <- file.path(SCRIPTS_DIR, "singleCellRNAseq", "extract_h5ad_marker_expression.py")
+          if (isTRUE(container$ready) && file.exists(helper) && nzchar(Sys.which("singularity"))) {
+            tryCatch(system2("singularity", c("exec", container$path, "python", helper, checkpoint, gene, cache_path), stdout = TRUE, stderr = TRUE), error = function(e) character(0))
+          }
+        }
+      }
+      if (file.exists(cache_path) && file_size_for(cache_path) > 0) {
+        values <- safe_read_table(cache_path, 1000000)
+        if (all(c("cell", "expression") %in% names(values))) {
+          values$cell <- as.character(values$cell); values$expression <- suppressWarnings(as.numeric(values$expression))
+          scrna_dashboard_expression_cache(list(stamp = stamp, values = values))
+          return(values)
+        }
+      }
       progress_refresh()
       query_jobs <- scrna_object_query_jobs(project, cache_path)
       tracked_query_jobs <- if (NROW(query_jobs) && "job_id" %in% names(query_jobs)) query_jobs[nzchar(as.character(query_jobs$job_id)), , drop = FALSE] else data.frame()
