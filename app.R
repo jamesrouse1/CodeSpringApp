@@ -15799,6 +15799,9 @@ scrna_gene_select_input <- function(project, input_id, label, selected = "") {
       searchField = "text",
       loadThrottle = 80,
       dropdownParent = "body",
+      # Selectize's ordinary Shiny value can transiently reflect its search
+      # text.  Send a separate event only after an item is actually chosen.
+      onItemAdd = I(sprintf("function(value) { Shiny.setInputValue('%s_selected', value, {priority: 'event'}); }", input_id)),
       placeholder = "Search and select a gene"
     )
   ))
@@ -17571,6 +17574,11 @@ server <- function(input, output, session) {
   scrna_batch_default_project <- reactiveVal("")
   scrna_dashboard_expression_cache <- reactiveVal(list())
   scrna_dashboard_expression_error <- reactiveVal("")
+  # Selectize may briefly clear its value while filtering its menu.  Keep a
+  # separate, committed value for each plot so merely typing never redraws or
+  # interrupts the selector; only a real gene-list choice updates a plot.
+  scrna_violin_selected_gene <- reactiveVal("")
+  scrna_embedding_selected_gene <- reactiveVal("")
   scrna_object_query_submitted <- reactiveVal(character(0))
   scrna_object_query_attempted <- reactiveVal(character(0))
   scrna_embedding_selection_reset <- reactiveVal(0L)
@@ -24711,6 +24719,22 @@ server <- function(input, output, session) {
     scrna_dashboard_expression_cache(list(stamp = stamp, values = values))
     values
   }
+  scrna_commit_dashboard_gene <- function(project, value, target) {
+    candidate <- trimws(as.character(value %||% ""))
+    if (!nzchar(candidate)) return(invisible(NULL))
+    genes <- scrna_dashboard_gene_choices(project)
+    match_index <- match(tolower(candidate), tolower(genes))
+    if (!is.na(match_index)) target(genes[[match_index]])
+    invisible(NULL)
+  }
+  observeEvent(input$scrna_violin_gene_selected, {
+    p <- isolate(current_project())
+    if (is_scrna_project(p)) scrna_commit_dashboard_gene(p, input$scrna_violin_gene_selected, scrna_violin_selected_gene)
+  }, ignoreInit = FALSE)
+  observeEvent(input$scrna_embedding_gene_selected, {
+    p <- isolate(current_project())
+    if (is_scrna_project(p)) scrna_commit_dashboard_gene(p, input$scrna_embedding_gene_selected, scrna_embedding_selected_gene)
+  }, ignoreInit = FALSE)
   output$scrna_violin_controls_ui <- renderUI({
     scrna_signature_scores_stamp()
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
@@ -24737,7 +24761,7 @@ server <- function(input, output, session) {
     mode_choices <- c("Individual gene" = "gene")
     if (length(signatures)) mode_choices <- c(mode_choices, "Stored signature score" = "signature")
     mode <- selected_choice(isolate(input$scrna_violin_value_mode), mode_choices, "gene")
-    requested_gene <- trimws(as.character(isolate(input$scrna_violin_gene) %||% ""))
+    requested_gene <- scrna_violin_selected_gene()
     default_group <- if ("cell_type" %in% group_choices) "cell_type" else if ("cluster" %in% group_choices) "cluster" else group_choices[[1]]
     tagList(
       fluidRow(
@@ -24768,7 +24792,7 @@ server <- function(input, output, session) {
       label <- gsub("^signature__", "", value_column)
       y_label <- "Signature score"
     } else {
-      gene <- input$scrna_violin_gene %||% ""
+      gene <- scrna_violin_selected_gene()
       validate(need(nzchar(trimws(gene)), "Search for a gene and select it from the list to draw violins."))
       x <- scrna_embedding_table(p, columns = metadata_columns, max_points = Inf)
       expression <- scrna_dashboard_marker_values(p, gene)
@@ -24810,7 +24834,7 @@ server <- function(input, output, session) {
   output$scrna_expression_violin <- renderPlot({ scrna_violin_plot_object() }, res = 120)
   output$download_scrna_expression_violin <- downloadHandler(
     filename = function() {
-      value_name <- if (identical(input$scrna_violin_value_mode %||% "gene", "signature")) gsub("^signature__", "", input$scrna_violin_signature %||% "signature") else input$scrna_violin_gene %||% "gene"
+      value_name <- if (identical(input$scrna_violin_value_mode %||% "gene", "signature")) gsub("^signature__", "", input$scrna_violin_signature %||% "signature") else scrna_violin_selected_gene() %||% "gene"
       paste0("expression_violin__", clean_name(value_name, "value"), "__by_", clean_name(input$scrna_violin_group %||% "group", "group"), ".png")
     },
     content = function(file) ggplot2::ggsave(file, scrna_violin_plot_object(), width = 10, height = 6.5, dpi = 220)
@@ -24916,7 +24940,7 @@ server <- function(input, output, session) {
     # never while the default metadata UMAP is loading.
     if (!identical(input$scrna_embedding_color_mode %||% "metadata", "marker")) return(NULL)
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
-    scrna_gene_select_input(p, "scrna_embedding_gene", "Marker gene", isolate(input$scrna_embedding_gene))
+    scrna_gene_select_input(p, "scrna_embedding_gene", "Marker gene", scrna_embedding_selected_gene())
   })
   output$scrna_embedding_widget_ui <- renderUI({
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
@@ -25035,7 +25059,7 @@ server <- function(input, output, session) {
     point_size <- max(point_size, scrna_embedding_auto_point_size(NROW(x)))
     marker_gene <- ""
     if (identical(color_mode, "marker")) {
-      marker_gene <- trimws(input$scrna_embedding_gene %||% "")
+      marker_gene <- scrna_embedding_selected_gene()
       validate(need(nzchar(marker_gene), "Search for a marker gene and select it from the list."))
       expression_data <- scrna_dashboard_marker_values(p, marker_gene)
       validate(need(!is.null(expression_data), paste("Marker expression could not be read.", scrna_dashboard_expression_error() %||% "")))
@@ -25121,7 +25145,7 @@ server <- function(input, output, session) {
         legend.key.height = grid::unit(0.42, "cm")
       )
     if (identical(color_mode, "marker")) {
-      marker_gene <- trimws(input$scrna_embedding_gene %||% "")
+      marker_gene <- scrna_embedding_selected_gene()
       validate(need(nzchar(marker_gene), "Search for a marker gene and select it from the list."))
       expression <- scrna_dashboard_marker_values(p, marker_gene)
       validate(need(!is.null(expression), paste("Marker expression could not be read.", scrna_dashboard_expression_error() %||% "")))
@@ -25142,7 +25166,7 @@ server <- function(input, output, session) {
   })
   output$download_scrna_embedding_pdf <- downloadHandler(
     filename = function() {
-      selected_view <- if (identical(input$scrna_embedding_color_mode %||% "metadata", "marker")) input$scrna_embedding_gene %||% "marker" else input$scrna_embedding_filter_field %||% "metadata"
+      selected_view <- if (identical(input$scrna_embedding_color_mode %||% "metadata", "marker")) scrna_embedding_selected_gene() %||% "marker" else input$scrna_embedding_filter_field %||% "metadata"
       paste0("umap__", clean_name(selected_view, "view"), ".pdf")
     },
     content = function(file) {
