@@ -15787,8 +15787,11 @@ scrna_gene_select_input <- function(project, input_id, label, selected = "") {
       create = TRUE,
       persist = FALSE,
       closeAfterSelect = TRUE,
-      maxOptions = 1000,
+      # A full gene list can contain tens of thousands of entries. Rendering
+      # hundreds of matches on every keystroke makes prefix search feel slow.
+      maxOptions = 75,
       searchField = "text",
+      loadThrottle = 80,
       dropdownParent = "body",
       placeholder = "Search or type an exact gene symbol"
     )
