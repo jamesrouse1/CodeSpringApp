@@ -17553,6 +17553,7 @@ server <- function(input, output, session) {
   scrna_dashboard_expression_cache <- reactiveVal(list())
   scrna_dashboard_expression_error <- reactiveVal("")
   scrna_object_query_submitted <- reactiveVal(character(0))
+  scrna_object_query_attempted <- reactiveVal(character(0))
   scrna_embedding_selection_reset <- reactiveVal(0L)
   scrna_embedding_manual_selection <- reactiveVal(character(0))
   # Named manual marker/signature collections are stored per project for the
@@ -24607,7 +24608,8 @@ server <- function(input, output, session) {
     if (!file.exists(scanpy_object)) scanpy_object <- file.path(root, "checkpoints", "04_clustered_scanpy.h5ad")
     seurat_object <- file.path(root, "objects", "processed_seurat.rds")
     if (!file.exists(seurat_object)) seurat_object <- file.path(root, "checkpoints", "04_clustered_seurat.rds")
-    engine <- if (file.exists(scanpy_object)) "scanpy" else if (file.exists(seurat_object)) "seurat" else ""
+    preferred_engine <- tolower(trimws(as.character(project$scrna_engine %||% "")))
+    engine <- if (identical(preferred_engine, "seurat") && file.exists(seurat_object)) "seurat" else if (identical(preferred_engine, "scanpy") && file.exists(scanpy_object)) "scanpy" else if (file.exists(scanpy_object) && !file.exists(seurat_object)) "scanpy" else if (file.exists(seurat_object)) "seurat" else if (file.exists(scanpy_object)) "scanpy" else ""
     checkpoint <- if (identical(engine, "scanpy")) scanpy_object else seurat_object
     if (!nzchar(engine) || !file.exists(checkpoint)) {
       scrna_dashboard_expression_error("No processed Scanpy or Seurat object was found for this run.")
@@ -24627,8 +24629,13 @@ server <- function(input, output, session) {
       query_jobs <- scrna_object_query_jobs(project, cache_path)
       tracked_query_jobs <- if (NROW(query_jobs) && "job_id" %in% names(query_jobs)) query_jobs[nzchar(as.character(query_jobs$job_id)), , drop = FALSE] else data.frame()
       submitted <- isolate(scrna_object_query_submitted())
-      already_requested <- cache_path %in% submitted || NROW(tracked_query_jobs) > 0L
-      if (!already_requested) {
+      attempted <- isolate(scrna_object_query_attempted())
+      attempt_key <- paste(cache_path, stamp, sep = "::")
+      latest_state <- if (NROW(tracked_query_jobs) && "slurm_state" %in% names(tracked_query_jobs)) toupper(as.character(utils::tail(tracked_query_jobs$slurm_state, 1L))) else ""
+      active_query <- cache_path %in% submitted || latest_state %in% toupper(c(active_slurm_states(), "Submitted"))
+      # A completed/failed historical query must not permanently block the
+      # current session. Retry once for the current object/gene combination.
+      if (!active_query && !attempt_key %in% attempted) {
         message <- submit_scrna_object_query_job(project, engine, "gene", checkpoint, cache_path, gene)
         job_id <- parse_sbatch_job_id(message)
         if (!nzchar(job_id)) {
@@ -24636,18 +24643,18 @@ server <- function(input, output, session) {
           return(NULL)
         }
         scrna_object_query_submitted(unique(c(submitted, cache_path)))
+        scrna_object_query_attempted(unique(c(attempted, attempt_key)))
         scrna_dashboard_expression_error("Marker expression is running. This view will update automatically when it finishes.")
         invalidateLater(5000, session)
         return(NULL)
       }
-      latest_state <- if (NROW(tracked_query_jobs) && "slurm_state" %in% names(tracked_query_jobs)) as.character(utils::tail(tracked_query_jobs$slurm_state, 1L)) else "Submitted"
-      if (latest_state %in% c(active_slurm_states(), "Submitted", "Finished or not in queue")) {
+      if (active_query) {
         scrna_dashboard_expression_error("Marker expression is running. This view will update automatically when it finishes.")
         invalidateLater(5000, session)
         return(NULL)
       }
       scrna_object_query_submitted(setdiff(submitted, cache_path))
-      scrna_dashboard_expression_error("Marker expression did not finish successfully. Check the Logs tab for details.")
+      scrna_dashboard_expression_error("Marker expression did not create a readable result. Check the latest Marker expression job in Logs for details.")
       return(NULL)
     }
     values <- safe_read_table(cache_path, 1000000)
