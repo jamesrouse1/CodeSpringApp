@@ -15778,11 +15778,14 @@ scrna_gene_select_input <- function(project, input_id, label, selected = "") {
   }
   case_match <- match(tolower(selected), tolower(genes))
   if (nzchar(selected) && !is.na(case_match)) selected <- genes[[case_match]]
+  selected_gene <- if (nzchar(selected) && selected %in% genes) selected else character(0)
   div(class = "scrna-marker-gene-control", selectizeInput(
     input_id,
     label,
     choices = genes,
-    selected = selected_choice(selected, genes, genes[[1]]),
+    # Do not silently choose the first gene in the matrix.  Marker plots
+    # should begin only after the user has selected a gene from the list.
+    selected = selected_gene,
     options = list(
       # Keep the Shiny value on the last selected gene while the user types
       # into Selectize's search box. This prevents the UMAP/violin from
@@ -15796,7 +15799,7 @@ scrna_gene_select_input <- function(project, input_id, label, selected = "") {
       searchField = "text",
       loadThrottle = 80,
       dropdownParent = "body",
-      placeholder = "Search or type an exact gene symbol"
+      placeholder = "Search and select a gene"
     )
   ))
 }
@@ -16380,7 +16383,10 @@ body { background:#eef3f8; color:#17202f; }
 .scrna-marker-gene-control .form-group,
 .scrna-marker-gene-control .selectize-control,
 .scrna-marker-gene-control .selectize-input { width:100%; min-width:0; }
-.scrna-marker-gene-control .selectize-dropdown { z-index:100003 !important; }
+/* Selectize moves this dropdown to <body> so it cannot be clipped by a
+   narrow dashboard column.  Target the moved element directly as well, or
+   the interactive plot can sit on top of the gene suggestions. */
+.scrna-marker-gene-control .selectize-dropdown, body > .selectize-dropdown { z-index:100003 !important; }
 .scrna-selection-status { display:inline-flex; align-items:center; margin:8px 0 2px; padding:6px 10px; border:1px solid #cbdced; border-radius:999px; background:#f7f9fc; color:#526070; font-size:12px; font-weight:800; }
 .scrna-selection-status.active { border-color:#78b99a; background:#eaf8f0; color:#16613d; }
 .project-step-summary { margin:12px 0; border:1px solid #d8dde8; border-radius:8px; background:#f8fafc; padding:12px; }
@@ -24732,7 +24738,6 @@ server <- function(input, output, session) {
     if (length(signatures)) mode_choices <- c(mode_choices, "Stored signature score" = "signature")
     mode <- selected_choice(isolate(input$scrna_violin_value_mode), mode_choices, "gene")
     requested_gene <- trimws(as.character(isolate(input$scrna_violin_gene) %||% ""))
-    if (!nzchar(requested_gene)) requested_gene <- "CD8A"
     default_group <- if ("cell_type" %in% group_choices) "cell_type" else if ("cluster" %in% group_choices) "cluster" else group_choices[[1]]
     tagList(
       fluidRow(
@@ -24764,7 +24769,7 @@ server <- function(input, output, session) {
       y_label <- "Signature score"
     } else {
       gene <- input$scrna_violin_gene %||% ""
-      req(nzchar(gene))
+      validate(need(nzchar(trimws(gene)), "Search for a gene and select it from the list to draw violins."))
       x <- scrna_embedding_table(p, columns = metadata_columns, max_points = Inf)
       expression <- scrna_dashboard_marker_values(p, gene)
       validate(need(!is.null(expression), paste("Gene expression could not be read.", scrna_dashboard_expression_error() %||% "")))
@@ -25031,6 +25036,7 @@ server <- function(input, output, session) {
     marker_gene <- ""
     if (identical(color_mode, "marker")) {
       marker_gene <- trimws(input$scrna_embedding_gene %||% "")
+      validate(need(nzchar(marker_gene), "Search for a marker gene and select it from the list."))
       expression_data <- scrna_dashboard_marker_values(p, marker_gene)
       validate(need(!is.null(expression_data), paste("Marker expression could not be read.", scrna_dashboard_expression_error() %||% "")))
       cell_index <- match(x$cell, expression_data$cell)
@@ -25116,6 +25122,7 @@ server <- function(input, output, session) {
       )
     if (identical(color_mode, "marker")) {
       marker_gene <- trimws(input$scrna_embedding_gene %||% "")
+      validate(need(nzchar(marker_gene), "Search for a marker gene and select it from the list."))
       expression <- scrna_dashboard_marker_values(p, marker_gene)
       validate(need(!is.null(expression), paste("Marker expression could not be read.", scrna_dashboard_expression_error() %||% "")))
       index <- match(x$cell, expression$cell)
