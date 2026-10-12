@@ -15787,7 +15787,9 @@ scrna_gene_select_input <- function(project, input_id, label, selected = "") {
       create = TRUE,
       persist = FALSE,
       closeAfterSelect = TRUE,
-      maxOptions = 500,
+      maxOptions = 1000,
+      searchField = "text",
+      dropdownParent = "body",
       placeholder = "Search or type an exact gene symbol"
     )
   ))
@@ -16372,7 +16374,7 @@ body { background:#eef3f8; color:#17202f; }
 .scrna-marker-gene-control .form-group,
 .scrna-marker-gene-control .selectize-control,
 .scrna-marker-gene-control .selectize-input { width:100%; min-width:0; }
-.scrna-marker-gene-control .selectize-dropdown { min-width:100%; max-width:100%; }
+.scrna-marker-gene-control .selectize-dropdown { z-index:100003 !important; }
 .scrna-selection-status { display:inline-flex; align-items:center; margin:8px 0 2px; padding:6px 10px; border:1px solid #cbdced; border-radius:999px; background:#f7f9fc; color:#526070; font-size:12px; font-weight:800; }
 .scrna-selection-status.active { border-color:#78b99a; background:#eaf8f0; color:#16613d; }
 .project-step-summary { margin:12px 0; border:1px solid #d8dde8; border-radius:8px; background:#f8fafc; padding:12px; }
@@ -24729,8 +24731,8 @@ server <- function(input, output, session) {
     tagList(
       fluidRow(
         column(3, radioButtons("scrna_violin_value_mode", "Show", choices = mode_choices, selected = mode, inline = FALSE)),
-        column(6, conditionalPanel("input.scrna_violin_value_mode == 'gene'", scrna_violin_gene_input(p, requested_gene)), conditionalPanel("input.scrna_violin_value_mode == 'signature'", selectInput("scrna_violin_signature", "Signature", choices = signature_choices, selected = selected_choice(isolate(input$scrna_violin_signature), signature_choices, scrna_default_b_cell_signature(signature_choices)), selectize = FALSE))),
-        column(3, selectInput("scrna_violin_group", "Separate violins by", choices = group_choices, selected = selected_choice(isolate(input$scrna_violin_group), group_choices, default_group), selectize = FALSE))
+        column(5, conditionalPanel("input.scrna_violin_value_mode == 'gene'", scrna_violin_gene_input(p, requested_gene)), conditionalPanel("input.scrna_violin_value_mode == 'signature'", selectInput("scrna_violin_signature", "Signature", choices = signature_choices, selected = selected_choice(isolate(input$scrna_violin_signature), signature_choices, scrna_default_b_cell_signature(signature_choices)), selectize = FALSE))),
+        column(4, selectInput("scrna_violin_group", "Separate violins by", choices = group_choices, selected = selected_choice(isolate(input$scrna_violin_group), group_choices, default_group), selectize = FALSE))
       ),
       tags$p(class = "muted small-note", paste(if (length(signatures)) "Stored signatures are available because signature scoring has been completed. Gene violins use normalized expression from the processed object." else "Run Signature scoring to add reusable signature-score violins. Gene violins use normalized expression from the processed object.", "The y-axis ends at the 98th percentile of the displayed violin with the highest mean so rare extreme cells do not compress the distributions."))
     )
@@ -24824,11 +24826,11 @@ server <- function(input, output, session) {
     tagList(
       if (length(embedding_views) > 1L) selectInput("scrna_embedding_view", "UMAP coordinates", choices = embedding_views, selected = selected_view, selectize = FALSE) else NULL,
       fluidRow(
-        column(8,
+        column(7,
           radioButtons("scrna_embedding_color_mode", "Color UMAP by", choices = c("Selected metadata column" = "metadata", "Marker expression" = "marker"), selected = isolate(input$scrna_embedding_color_mode) %||% "metadata", inline = TRUE),
           conditionalPanel("input.scrna_embedding_color_mode == 'marker'", uiOutput("scrna_embedding_marker_gene_ui"))
         ),
-        column(4,
+        column(5,
           checkboxInput("scrna_embedding_legend", "Show legend", value = if (is.null(isolate(input$scrna_embedding_legend))) TRUE else isTRUE(isolate(input$scrna_embedding_legend))),
           downloadButton("download_scrna_embedding_pdf", "Download publication PDF", class = "btn-default btn-sm"),
           tags$details(tags$summary("Display"), selectInput("scrna_embedding_display_cells", "Cells rendered", choices = c("Representative 75,000 (faster)" = "75000", "Representative 125,000" = "125000", "All cells" = "all"), selected = selected_choice(isolate(input$scrna_embedding_display_cells), c("75000", "125000", "all"), "75000"), selectize = FALSE), sliderInput("scrna_embedding_point_size", "Point size (auto-adjusted)", min = 1, max = 8, value = isolate(input$scrna_embedding_point_size) %||% 2, step = 0.5), sliderInput("scrna_embedding_opacity", "Opacity", min = 0.1, max = 1, value = isolate(input$scrna_embedding_opacity) %||% 0.72, step = 0.05)))
