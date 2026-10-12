@@ -22567,15 +22567,17 @@ server <- function(input, output, session) {
     }
     active_annotation <- scrna_summary_value(p, "active_annotation", "")
     default_group <- if (single_sample && active_annotation %in% group_choices) active_annotation else if (single_sample && "cell_type" %in% group_choices) "cell_type" else if (single_sample) group_choices[[1]] else if ("condition" %in% group_choices) "condition" else group_choices[[1]]
-    requested_group <- if (pbmc_example && single_sample) default_group else isolate(input$scrna_de_group_column)
+    # These controls must be reactive: changing cell_type to cluster (or any
+    # other valid field) should immediately rebuild the available labels.
+    requested_group <- input$scrna_de_group_column %||% default_group
     group_column <- selected_choice(requested_group, group_choices, default_group)
     group_data <- scrna_embedding_table(p, columns = group_column, max_points = Inf)
     group_values <- if (group_column %in% names(group_data)) sort(unique(trimws(as.character(group_data[[group_column]])))) else character(0)
     group_values <- group_values[nzchar(group_values)]
     if (length(group_values) < 2L) return(div(class = "empty-box", paste0("‘", group_column, "’ does not contain two populated groups.")))
-    reference_value <- selected_choice(isolate(input$scrna_de_reference), group_values, group_values[[1]])
+    reference_value <- selected_choice(input$scrna_de_reference, group_values, group_values[[1]])
     comparison_choices <- setdiff(group_values, reference_value)
-    selected_comparisons <- intersect(as.character(isolate(input$scrna_de_comparisons) %||% input$scrna_de_comparison %||% comparison_choices[[1]]), comparison_choices)
+    selected_comparisons <- intersect(as.character(input$scrna_de_comparisons %||% input$scrna_de_comparison %||% comparison_choices[[1]]), comparison_choices)
     if (!length(selected_comparisons)) selected_comparisons <- comparison_choices[[1]]
     comparison_controls <- fluidRow(
       column(6, selectInput("scrna_de_reference", if (pbmc_example && single_sample) "Reference cell type" else if (single_sample) "Reference cell population" else "Reference group", choices = group_values, selected = reference_value, selectize = FALSE)),
@@ -22591,7 +22593,7 @@ server <- function(input, output, session) {
     }
     annotation_choices <- unique(c(intersect(c(active_annotation, "cell_type"), metadata), grep("(^cell_type|annotation|subtype)", metadata, value = TRUE, ignore.case = TRUE), ""))
     annotation_choices <- stats::setNames(annotation_choices, ifelse(nzchar(annotation_choices), annotation_choices, "All cells (no annotation subset)"))
-    annotation_column <- selected_choice(isolate(input$scrna_de_annotation_column), annotation_choices, unname(annotation_choices)[[1]])
+    annotation_column <- selected_choice(input$scrna_de_annotation_column, annotation_choices, unname(annotation_choices)[[1]])
     annotation_data <- if (nzchar(annotation_column)) scrna_embedding_table(p, columns = annotation_column, max_points = Inf) else data.frame()
     annotation_values <- if (nzchar(annotation_column) && annotation_column %in% names(annotation_data)) sort(unique(trimws(as.character(annotation_data[[annotation_column]])))) else character(0)
     annotation_values <- c("All cells" = "all", stats::setNames(annotation_values[nzchar(annotation_values)], annotation_values[nzchar(annotation_values)]))
@@ -22601,12 +22603,12 @@ server <- function(input, output, session) {
       selectInput("scrna_de_group_column", "Comparison field", choices = group_choices, selected = group_column, selectize = FALSE),
       comparison_controls,
       selectInput("scrna_de_annotation_column", "Annotation field to subset", choices = annotation_choices, selected = annotation_column, selectize = FALSE),
-      selectInput("scrna_de_annotation_values", "Populations to analyze", choices = annotation_values, selected = intersect(as.character(isolate(input$scrna_de_annotation_values) %||% "all"), unname(annotation_values)), multiple = TRUE, selectize = TRUE),
-      radioButtons("scrna_de_annotation_mode", "Analyze selected populations", choices = c("Separately (one result per population)" = "separate", "Combined (pool selected populations into one result)" = "combined"), selected = isolate(input$scrna_de_annotation_mode) %||% "separate", inline = FALSE),
+      selectInput("scrna_de_annotation_values", "Populations to analyze", choices = annotation_values, selected = intersect(as.character(input$scrna_de_annotation_values %||% "all"), unname(annotation_values)), multiple = TRUE, selectize = TRUE),
+      radioButtons("scrna_de_annotation_mode", "Analyze selected populations", choices = c("Separately (one result per population)" = "separate", "Combined (pool selected populations into one result)" = "combined"), selected = input$scrna_de_annotation_mode %||% "separate", inline = FALSE),
       tags$p(class = "muted small-note", "Select All cells for a global comparison, or choose populations to test separately or as one pooled subset. Every selected comparison receives a descriptive result file. Pseudobulk is available only when the comparison field is constant within each biological sample; otherwise use the cell-level result as exploratory."),
-      selectInput("scrna_de_covariates", "Optional sample-level covariates", choices = covariate_choices, selected = intersect(as.character(isolate(input$scrna_de_covariates) %||% character(0)), covariate_choices), multiple = TRUE, selectize = TRUE),
+      selectInput("scrna_de_covariates", "Optional sample-level covariates", choices = covariate_choices, selected = intersect(as.character(input$scrna_de_covariates %||% character(0)), covariate_choices), multiple = TRUE, selectize = TRUE),
       tags$p(class = "muted small-note", "Use this for a paired subject/donor field or a genuine technical batch. The app checks that the design is full-rank and that every covariate is constant within each biological sample."),
-      radioButtons("scrna_de_method", "Outputs", choices = c("Pseudobulk DESeq2 + cell-level Wilcoxon" = "both", "Pseudobulk DESeq2 only (recommended)" = "pseudobulk", "Cell-level Wilcoxon only" = "cell"), selected = isolate(input$scrna_de_method) %||% "both")
+      radioButtons("scrna_de_method", "Outputs", choices = c("Pseudobulk DESeq2 + cell-level Wilcoxon" = "both", "Pseudobulk DESeq2 only (recommended)" = "pseudobulk", "Cell-level Wilcoxon only" = "cell"), selected = input$scrna_de_method %||% "both")
     )
   })
 
