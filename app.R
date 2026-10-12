@@ -15376,6 +15376,12 @@ scrna_result_file_choices <- function(project, pattern = "\\.(tsv|txt|csv|png|pd
   stats::setNames(files, labels)
 }
 
+scrna_de_display_label <- function(value) {
+  value <- gsub("_and_", ", ", value, fixed = TRUE)
+  value <- gsub("__", " — ", value, fixed = TRUE)
+  gsub("_", " ", value, fixed = TRUE)
+}
+
 scrna_de_result_file_choices <- function(project, method = c("pseudobulk", "cell")) {
   method <- match.arg(method)
   root <- file.path(scrna_output_dir(project), "differential_expression")
@@ -15384,6 +15390,7 @@ scrna_de_result_file_choices <- function(project, method = c("pseudobulk", "cell
   files <- sort(files[file.exists(files) & vapply(files, file_size_for, numeric(1)) > 0])
   if (!length(files)) return(character(0))
   labels <- substring(normalizePath(files, winslash = "/", mustWork = FALSE), nchar(normalizePath(root, winslash = "/", mustWork = FALSE)) + 2L)
+  labels <- scrna_de_display_label(labels)
   stats::setNames(files, labels)
 }
 
@@ -15413,8 +15420,7 @@ scrna_pathway_result_file_choices <- function(project) {
   }
   if (!length(files)) return(character(0))
   stems <- sub("^pathway_fgsea_ranked__", "", sub("\\.tsv$", "", basename(files)))
-  labels <- gsub("__", " — ", stems, fixed = TRUE)
-  labels <- gsub("_", " ", labels, fixed = TRUE)
+  labels <- scrna_de_display_label(stems)
   labels[basename(files) == "pathway_fgsea_ranked.tsv"] <- "Most recent pathway analysis"
   stats::setNames(files, labels)
 }
@@ -15453,8 +15459,7 @@ scrna_completed_de_comparison_catalog <- function(project) {
   comparison <- sub("^(pseudobulk_DESeq2|cell_level_Wilcoxon)__", "", basename(paths))
   comparison <- sub("\\.tsv$", "", comparison)
   comparison[comparison %in% c("cell_level_differential_expression", "pseudobulk_differential_expression")] <- "Global comparison"
-  comparison <- gsub("__", " — ", comparison, fixed = TRUE)
-  comparison <- gsub("_", " ", comparison, fixed = TRUE)
+  comparison <- scrna_de_display_label(comparison)
   data.frame(label = paste0(comparison, " (", method, ")"), path = paths, method = method, relative = relative, stringsAsFactors = FALSE)
 }
 
