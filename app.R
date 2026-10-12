@@ -14086,7 +14086,7 @@ submit_scrna_reference_inspection <- function(project, reference_file) {
   list(message = message, output_path = output_path, reference_file = reference_file, job_id = parse_sbatch_job_id(message))
 }
 
-submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto", normalization = "auto", integration = "auto", batch_column = "batch", cluster_resolution = 0.6, min_features = 200, min_counts = 0, max_features = 0, max_percent_mt = 20, qc_preset = "", min_cells_per_gene = 3, n_pcs = 30, n_neighbors = 15, umap_min_dist = 0.3, umap_spread = 1, umap_metric = "euclidean", umap_init_pos = "spectral", doublet_method = "auto", doublet_rate = 0, remove_doublets = TRUE, seed = 1234, scvi_max_epochs = 400, harmony_theta = 2, harmony_lambda = 1, harmony_max_iter = 20, marker_file = "", celltype_file = "", reference_file = "", marker_upload = NULL, celltype_upload = NULL, reference_upload = NULL, marker_source = "server", celltype_source = "server", reference_source = "server", reference_label_column = "", find_cluster_markers = FALSE, marker_manual = list(), marker_species = "auto", marker_ortholog_file = "", marker_ortholog_upload = NULL, marker_ortholog_source = "server", annotation_name = "cell_type", signature_file = "", signature_upload = NULL, signature_source = "server", signature_manual = list(), signature_species = "same", signature_ortholog_file = "", signature_ortholog_upload = NULL, signature_ortholog_source = "server", de_group_column = "condition", de_reference = "", de_comparison = "", de_annotation_column = "", de_annotation_values = "all", de_method = "both", de_covariates = character(0), pathway_library = "MSigDB_Hallmark_2020", pathway_de_file = "", pathway_species = "auto", pathway_ortholog_file = "", pathway_ortholog_upload = NULL, pathway_ortholog_source = "server", pathway_gmt_file = "", pathway_gmt_upload = NULL, pathway_source = "server") {
+submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto", normalization = "auto", integration = "auto", batch_column = "batch", cluster_resolution = 0.6, min_features = 200, min_counts = 0, max_features = 0, max_percent_mt = 20, qc_preset = "", min_cells_per_gene = 3, n_pcs = 30, n_neighbors = 15, umap_min_dist = 0.3, umap_spread = 1, umap_metric = "euclidean", umap_init_pos = "spectral", doublet_method = "auto", doublet_rate = 0, remove_doublets = TRUE, seed = 1234, scvi_max_epochs = 400, harmony_theta = 2, harmony_lambda = 1, harmony_max_iter = 20, marker_file = "", celltype_file = "", reference_file = "", marker_upload = NULL, celltype_upload = NULL, reference_upload = NULL, marker_source = "server", celltype_source = "server", reference_source = "server", reference_label_column = "", find_cluster_markers = FALSE, marker_manual = list(), marker_species = "auto", marker_ortholog_file = "", marker_ortholog_upload = NULL, marker_ortholog_source = "server", annotation_name = "cell_type", signature_file = "", signature_upload = NULL, signature_source = "server", signature_manual = list(), signature_species = "same", signature_ortholog_file = "", signature_ortholog_upload = NULL, signature_ortholog_source = "server", de_group_column = "condition", de_reference = "", de_comparison = "", de_comparisons = character(0), de_annotation_column = "", de_annotation_values = "all", de_method = "both", de_covariates = character(0), pathway_library = "MSigDB_Hallmark_2020", pathway_de_file = "", pathway_species = "auto", pathway_ortholog_file = "", pathway_ortholog_upload = NULL, pathway_ortholog_source = "server", pathway_gmt_file = "", pathway_gmt_upload = NULL, pathway_source = "server") {
   if (missing(batch_column)) batch_column <- "sample_id"
   stage <- tolower(trimws(as.character(stage %||% "inspect")))
   step_label <- tryCatch(scrna_stage_step(stage), error = function(e) "")
@@ -14247,13 +14247,18 @@ submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto
   }
   if (identical(stage, "score") && !nzchar(signature_file)) return(record_preflight_failure(project, step_label, "Choose a signature TSV with signature and gene columns.", "scrna"))
   if (identical(stage, "differential")) {
-    de_group_column <- trimws(as.character(de_group_column %||% "")); de_reference <- trimws(as.character(de_reference %||% "")); de_comparison <- trimws(as.character(de_comparison %||% ""))
+    de_group_column <- trimws(as.character(de_group_column %||% "")); de_reference <- trimws(as.character(de_reference %||% ""))
+    de_comparisons <- unique(trimws(as.character(de_comparisons %||% character(0))))
+    de_comparisons <- de_comparisons[nzchar(de_comparisons)]
+    if (!length(de_comparisons)) de_comparisons <- trimws(as.character(de_comparison %||% ""))
+    de_comparisons <- unique(de_comparisons[nzchar(de_comparisons)])
+    de_comparison <- if (length(de_comparisons)) de_comparisons[[1]] else ""
     de_method <- tolower(trimws(as.character(de_method %||% "both")))
     metadata <- setdiff(scrna_all_metadata_columns(project), c("cell", "UMAP_1", "UMAP_2", "input_path", "source_barcode", "annotation_source"))
     single_sample <- length(scrna_biological_sample_ids(project)) <= 1L
-    valid_fields <- if (single_sample) scrna_de_population_fields(project, metadata) else scrna_de_sample_fields(project, metadata)
-    if (!nzchar(de_group_column) || !de_group_column %in% valid_fields || !nzchar(de_reference) || !nzchar(de_comparison) || identical(de_reference, de_comparison)) {
-      label <- if (single_sample) "cell-population annotation and two different populations" else "sample-level comparison field and two different groups"
+    valid_fields <- if (single_sample) scrna_de_population_fields(project, metadata) else unique(c(scrna_de_sample_fields(project, metadata), scrna_de_population_fields(project, metadata)))
+    if (!nzchar(de_group_column) || !de_group_column %in% valid_fields || !nzchar(de_reference) || !length(de_comparisons) || any(de_comparisons == de_reference)) {
+      label <- if (single_sample) "cell-population annotation, a reference population, and at least one different comparison population" else "sample-level comparison field, a reference group, and at least one different comparison group"
       return(record_preflight_failure(project, step_label, paste0("Choose a valid ", label, "."), "scrna"))
     }
     if (single_sample) {
@@ -14285,8 +14290,8 @@ submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto
     return(record_preflight_failure(project, "scRNA processing", paste0("Doublet method '", doublet_method, "' is not compatible with the ", resolved_engine, " engine. Choose ", paste(allowed_doublet, collapse = ", "), "."), "scrna"))
   }
   params <- data.frame(
-    key = c("normalization", "integration", "batch_column", "cluster_resolution", "min_features", "min_counts", "max_features", "max_percent_mt", "qc_preset", "n_pcs", "n_neighbors", "umap_min_dist", "umap_spread", "umap_metric", "umap_init_pos", "min_cells_per_gene", "doublet_method", "doublet_rate", "remove_doublets", "marker_file", "celltype_file", "reference_file", "reference_label_column", "reference_ortholog_file", "find_cluster_markers", "marker_species", "marker_ortholog_file", "annotation_name", "signature_file", "signature_species", "signature_ortholog_file", "de_group_column", "de_reference", "de_comparison", "de_annotation_column", "de_annotation_values", "de_method", "de_covariates", "pathway_library", "pathway_de_file", "pathway_species", "pathway_ortholog_file", "pathway_gmt_file", "seed", "scvi_max_epochs", "harmony_theta", "harmony_lambda", "harmony_max_iter"),
-    value = as.character(c(normalization, integration, batch_column, checked$cluster_resolution, checked$min_features, checked$min_counts, checked$max_features, checked$max_percent_mt, qc_preset, checked$n_pcs, checked$n_neighbors, checked$umap_min_dist, checked$umap_spread, umap_metric, umap_init_pos, checked$min_cells_per_gene, doublet_method, checked$doublet_rate, isTRUE(remove_doublets), marker_file, celltype_file, reference_file, reference_label_column, reference_ortholog_file, isTRUE(find_cluster_markers), marker_species, marker_ortholog_file, annotation_name, signature_file, signature_species, signature_ortholog_file, de_group_column, de_reference, de_comparison, de_annotation_column, paste(unique(as.character(de_annotation_values %||% "all")), collapse = "||"), de_method, paste(unique(as.character(de_covariates %||% character(0))), collapse = ","), pathway_library, pathway_de_file, pathway_species, pathway_ortholog_file, pathway_gmt_file, checked$seed, checked$scvi_max_epochs, checked$harmony_theta, checked$harmony_lambda, checked$harmony_max_iter)),
+    key = c("normalization", "integration", "batch_column", "cluster_resolution", "min_features", "min_counts", "max_features", "max_percent_mt", "qc_preset", "n_pcs", "n_neighbors", "umap_min_dist", "umap_spread", "umap_metric", "umap_init_pos", "min_cells_per_gene", "doublet_method", "doublet_rate", "remove_doublets", "marker_file", "celltype_file", "reference_file", "reference_label_column", "reference_ortholog_file", "find_cluster_markers", "marker_species", "marker_ortholog_file", "annotation_name", "signature_file", "signature_species", "signature_ortholog_file", "de_group_column", "de_reference", "de_comparison", "de_comparisons", "de_annotation_column", "de_annotation_values", "de_method", "de_covariates", "pathway_library", "pathway_de_file", "pathway_species", "pathway_ortholog_file", "pathway_gmt_file", "seed", "scvi_max_epochs", "harmony_theta", "harmony_lambda", "harmony_max_iter"),
+    value = as.character(c(normalization, integration, batch_column, checked$cluster_resolution, checked$min_features, checked$min_counts, checked$max_features, checked$max_percent_mt, qc_preset, checked$n_pcs, checked$n_neighbors, checked$umap_min_dist, checked$umap_spread, umap_metric, umap_init_pos, checked$min_cells_per_gene, doublet_method, checked$doublet_rate, isTRUE(remove_doublets), marker_file, celltype_file, reference_file, reference_label_column, reference_ortholog_file, isTRUE(find_cluster_markers), marker_species, marker_ortholog_file, annotation_name, signature_file, signature_species, signature_ortholog_file, de_group_column, de_reference, de_comparison, paste(de_comparisons, collapse = "||"), de_annotation_column, paste(unique(as.character(de_annotation_values %||% "all")), collapse = "||"), de_method, paste(unique(as.character(de_covariates %||% character(0))), collapse = ","), pathway_library, pathway_de_file, pathway_species, pathway_ortholog_file, pathway_gmt_file, checked$seed, checked$scvi_max_epochs, checked$harmony_theta, checked$harmony_lambda, checked$harmony_max_iter)),
     stringsAsFactors = FALSE
   )
   # Keep the copied, editable project manifest normalized immediately before
@@ -22550,9 +22555,11 @@ server <- function(input, output, session) {
     sample_ids <- scrna_biological_sample_ids(p)
     single_sample <- length(sample_ids) <= 1L
     pbmc_example <- scrna_is_pbmc3k_example(p)
-    group_choices <- if (single_sample) scrna_de_population_fields(p, metadata) else scrna_de_sample_fields(p, metadata)
+    sample_group_choices <- scrna_de_sample_fields(p, metadata)
+    population_group_choices <- scrna_de_population_fields(p, metadata)
+    group_choices <- if (single_sample) population_group_choices else unique(c(sample_group_choices, population_group_choices))
     if (!length(group_choices)) {
-      message <- if (single_sample) "Complete clustering or annotation so at least one cell-population field contains two groups." else "No valid sample-level comparison field was found. A field must contain at least two values and be constant within each biological sample."
+      message <- if (single_sample) "Complete clustering or annotation so at least one cell-population field contains two groups." else "No metadata or annotation field with at least two groups was found."
       return(div(class = "empty-box", message))
     }
     active_annotation <- scrna_summary_value(p, "active_annotation", "")
@@ -22563,16 +22570,20 @@ server <- function(input, output, session) {
     group_values <- if (group_column %in% names(group_data)) sort(unique(trimws(as.character(group_data[[group_column]])))) else character(0)
     group_values <- group_values[nzchar(group_values)]
     if (length(group_values) < 2L) return(div(class = "empty-box", paste0("‘", group_column, "’ does not contain two populated groups.")))
+    reference_value <- selected_choice(isolate(input$scrna_de_reference), group_values, group_values[[1]])
+    comparison_choices <- setdiff(group_values, reference_value)
+    selected_comparisons <- intersect(as.character(isolate(input$scrna_de_comparisons) %||% input$scrna_de_comparison %||% comparison_choices[[1]]), comparison_choices)
+    if (!length(selected_comparisons)) selected_comparisons <- comparison_choices[[1]]
     comparison_controls <- fluidRow(
-      column(6, selectInput("scrna_de_reference", if (pbmc_example && single_sample) "Reference cell type" else if (single_sample) "Reference cell population" else "Reference group", choices = group_values, selected = selected_choice(isolate(input$scrna_de_reference), group_values, group_values[[1]]), selectize = FALSE)),
-      column(6, selectInput("scrna_de_comparison", if (pbmc_example && single_sample) "Comparison cell type" else if (single_sample) "Comparison cell population" else "Comparison group", choices = group_values, selected = selected_choice(isolate(input$scrna_de_comparison), group_values, group_values[[2]]), selectize = FALSE))
+      column(6, selectInput("scrna_de_reference", if (pbmc_example && single_sample) "Reference cell type" else if (single_sample) "Reference cell population" else "Reference group", choices = group_values, selected = reference_value, selectize = FALSE)),
+      column(6, checkboxGroupInput("scrna_de_comparisons", if (pbmc_example && single_sample) "Comparison cell type(s)" else if (single_sample) "Comparison cell population(s)" else "Comparison group(s)", choices = comparison_choices, selected = selected_comparisons, inline = FALSE))
     )
     if (single_sample) {
       return(tagList(
         div(class = "read-source-note", tags$strong("One biological sample detected"), tags$p("Compare two cell populations with a cell-level Wilcoxon test. Pseudobulk is not shown because there are no independent biological replicates; cells are not treated as replicate samples.")),
         selectInput("scrna_de_group_column", "Cell-population annotation", choices = group_choices, selected = group_column, selectize = FALSE),
         comparison_controls,
-        tags$p(class = "muted small-note", "The comparison uses normalized expression from all cells carrying either selected label and saves a descriptive cell-level result file.")
+        tags$p(class = "muted small-note", "Each selected comparison is tested against the reference and saved as its own descriptive result file.")
       ))
     }
     annotation_choices <- unique(c(intersect(c(active_annotation, "cell_type"), metadata), grep("(^cell_type|annotation|subtype)", metadata, value = TRUE, ignore.case = TRUE), ""))
@@ -22581,14 +22592,14 @@ server <- function(input, output, session) {
     annotation_data <- if (nzchar(annotation_column)) scrna_embedding_table(p, columns = annotation_column, max_points = Inf) else data.frame()
     annotation_values <- if (nzchar(annotation_column) && annotation_column %in% names(annotation_data)) sort(unique(trimws(as.character(annotation_data[[annotation_column]])))) else character(0)
     annotation_values <- c("All cells" = "all", stats::setNames(annotation_values[nzchar(annotation_values)], annotation_values[nzchar(annotation_values)]))
-    covariate_choices <- setdiff(group_choices, c(group_column, "sample_id"))
+    covariate_choices <- setdiff(sample_group_choices, c(group_column, "sample_id"))
     tagList(
       div(class = "read-source-note", tags$strong("Inference defaults"), tags$p("Pseudobulk sums raw counts within each biological sample and requires at least two independent samples per group. Cell-level Wilcoxon is optional and explicitly reported as exploratory because cells are not independent replicates.")),
-      selectInput("scrna_de_group_column", "Sample-level comparison field", choices = group_choices, selected = group_column, selectize = FALSE),
+      selectInput("scrna_de_group_column", "Comparison field", choices = group_choices, selected = group_column, selectize = FALSE),
       comparison_controls,
       selectInput("scrna_de_annotation_column", "Annotation field to subset", choices = annotation_choices, selected = annotation_column, selectize = FALSE),
       selectInput("scrna_de_annotation_values", "Populations to analyze", choices = annotation_values, selected = intersect(as.character(isolate(input$scrna_de_annotation_values) %||% "all"), unname(annotation_values)), multiple = TRUE, selectize = TRUE),
-      tags$p(class = "muted small-note", "Select All cells for a global comparison and any number of individual populations in the same run. Every result receives its own descriptive filename and folder."),
+      tags$p(class = "muted small-note", "Select All cells for a global comparison and any number of individual populations in the same run. The app runs every selected comparison within every selected population, with a separate descriptive result file for each. Pseudobulk is available only when the comparison field is constant within each biological sample; otherwise use the cell-level result as exploratory."),
       selectInput("scrna_de_covariates", "Optional sample-level covariates", choices = covariate_choices, selected = intersect(as.character(isolate(input$scrna_de_covariates) %||% character(0)), covariate_choices), multiple = TRUE, selectize = TRUE),
       tags$p(class = "muted small-note", "Use this for a paired subject/donor field or a genuine technical batch. The app checks that the design is full-rank and that every covariate is constant within each biological sample."),
       radioButtons("scrna_de_method", "Outputs", choices = c("Pseudobulk DESeq2 + cell-level Wilcoxon" = "both", "Pseudobulk DESeq2 only (recommended)" = "pseudobulk", "Cell-level Wilcoxon only" = "cell"), selected = isolate(input$scrna_de_method) %||% "both")
@@ -23133,7 +23144,8 @@ server <- function(input, output, session) {
         signature_ortholog_source = "server",
         de_group_column = input$scrna_de_group_column %||% "condition",
         de_reference = input$scrna_de_reference %||% "",
-        de_comparison = input$scrna_de_comparison %||% "",
+        de_comparison = input$scrna_de_comparisons %||% input$scrna_de_comparison %||% "",
+        de_comparisons = input$scrna_de_comparisons %||% input$scrna_de_comparison %||% character(0),
         de_annotation_column = if (single_biological_sample) "" else input$scrna_de_annotation_column %||% "",
         de_annotation_values = if (single_biological_sample) "all" else input$scrna_de_annotation_values %||% "all",
         de_method = if (single_biological_sample) "cell" else input$scrna_de_method %||% "both",
