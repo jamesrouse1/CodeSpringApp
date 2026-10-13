@@ -15784,7 +15784,7 @@ scrna_gene_select_input <- function(project, input_id, label, selected = "") {
       placeholder = "Type a gene symbol, for example CD8A"
     ),
     uiOutput(paste0(input_id, "_matches")),
-    if (nzchar(selected)) tags$p(class = "muted small-note", paste("Selected gene:", selected)) else tags$p(class = "muted small-note", "Type to filter genes, then choose one from the list.")
+    if (nzchar(selected)) tags$p(class = "muted small-note", paste("Selected gene:", selected)) else tags$p(class = "muted small-note", "Type to see and choose a suggestion below.")
   )
 }
 
@@ -15795,14 +15795,10 @@ scrna_gene_match_input <- function(project, input_id, query) {
   query_lower <- tolower(query)
   prefix <- genes[startsWith(tolower(genes), query_lower)]
   other <- genes[!startsWith(tolower(genes), query_lower) & grepl(query_lower, tolower(genes), fixed = TRUE)]
-  matches <- head(c(prefix, other), 75L)
+  matches <- head(c(prefix, other), 5L)
   if (!length(matches)) return(tags$p(class = "muted small-note", "No matching genes found."))
-  selectInput(
-    input_id,
-    "Matching genes — choose one",
-    choices = c("Choose a matching gene" = "", stats::setNames(matches, matches)),
-    selected = "",
-    selectize = FALSE
+  div(class = "scrna-gene-suggestions",
+    radioButtons(input_id, NULL, choices = stats::setNames(matches, matches), selected = character(0), inline = TRUE)
   )
 }
 
@@ -16392,6 +16388,10 @@ body { background:#eef3f8; color:#17202f; }
 .scrna-marker-gene-control .selectize-control { overflow:visible !important; }
 .scrna-marker-gene-control .selectize-control.dropdown-active { position:relative; z-index:100003 !important; }
 .scrna-marker-gene-control .selectize-dropdown { z-index:100004 !important; }
+.scrna-gene-suggestions .shiny-options-group { display:flex; flex-wrap:wrap; gap:7px; margin:3px 0 6px; }
+.scrna-gene-suggestions .radio-inline { margin:0; padding:5px 10px 5px 28px; border:1px solid #cbdced; border-radius:999px; background:#f7f9fc; color:#244765; font-size:12px; font-weight:800; }
+.scrna-gene-suggestions .radio-inline:hover { border-color:#78b99a; background:#eaf8f0; }
+.scrna-gene-suggestions input[type=radio] { margin-top:2px; }
 .scrna-selection-status { display:inline-flex; align-items:center; margin:8px 0 2px; padding:6px 10px; border:1px solid #cbdced; border-radius:999px; background:#f7f9fc; color:#526070; font-size:12px; font-weight:800; }
 .scrna-selection-status.active { border-color:#78b99a; background:#eaf8f0; color:#16613d; }
 .project-step-summary { margin:12px 0; border:1px solid #d8dde8; border-radius:8px; background:#f8fafc; padding:12px; }
