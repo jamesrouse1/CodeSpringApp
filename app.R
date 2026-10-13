@@ -15376,7 +15376,24 @@ scrna_output_dir <- function(project) {
     file.path(dirname(data_dir), "scrna")
   ))
   ready <- candidates[dir.exists(candidates)]
-  if (length(ready)) ready[[1]] else candidates[[1]]
+  if (!length(ready)) return(candidates[[1]])
+  # A stale empty `scrna` directory can coexist with completed results in a
+  # different established layout (for example, an imported tutorial project
+  # whose saved data_dir points at the project root).  Prefer the directory
+  # that demonstrably contains scRNA output, rather than merely the first
+  # directory that happens to exist.
+  result_score <- vapply(ready, function(root) {
+    evidence <- c(
+      file.path(root, "tables", "umap_coordinates.tsv"),
+      file.path(root, "tables", "initial_umap_coordinates.tsv"),
+      file.path(root, "tables", "marker_annotation_cluster_scores.tsv"),
+      file.path(root, "objects", "processed_seurat.rds"),
+      file.path(root, "objects", "processed_scanpy.h5ad"),
+      file.path(root, "_STAGE_CLUSTER_COMPLETE")
+    )
+    sum(file.exists(evidence) & vapply(evidence, file_size_for, numeric(1)) > 0)
+  }, numeric(1))
+  ready[[order(result_score, decreasing = TRUE, seq_along(ready))[[1]]]]
 }
 
 scrna_result_file_choices <- function(project, pattern = "\\.(tsv|txt|csv|png|pdf|rds|h5ad)$") {
