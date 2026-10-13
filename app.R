@@ -15360,7 +15360,24 @@ image_or_file_ui <- function(path, height = "900px", fill_width = FALSE) {
   }
 }
 
-scrna_output_dir <- function(project) file.path(project$data_dir, "scrna")
+scrna_output_dir <- function(project) {
+  # New projects store results at <project>/data/scrna.  Imported completed
+  # projects may instead point their saved data_dir at the scRNA folder or at
+  # the project root.  Resolve those established layouts before falling back
+  # to the new-project location so every results view reads the same files.
+  data_dir <- normalizePath(project$data_dir %||% "", winslash = "/", mustWork = FALSE)
+  if (!nzchar(data_dir)) return(file.path("", "scrna"))
+  is_scrna_root <- identical(tolower(basename(data_dir)), "scrna")
+  candidates <- unique(c(
+    if (is_scrna_root) data_dir else character(0),
+    file.path(data_dir, "scrna"),
+    file.path(data_dir, "data", "scrna"),
+    file.path(dirname(data_dir), "data", "scrna"),
+    file.path(dirname(data_dir), "scrna")
+  ))
+  ready <- candidates[dir.exists(candidates)]
+  if (length(ready)) ready[[1]] else candidates[[1]]
+}
 
 scrna_result_file_choices <- function(project, pattern = "\\.(tsv|txt|csv|png|pdf|rds|h5ad)$") {
   root <- scrna_output_dir(project)
@@ -22511,7 +22528,7 @@ server <- function(input, output, session) {
     if (identical(method, "markers") && is.null(input$scrna_marker_source)) return(NULL)
     if (identical(method, "mapping") && is.null(input$scrna_celltype_source)) return(NULL)
     assignment_mode <- scrna_annotation_ui_state(p)$marker_assignment %||% input$scrna_marker_assignment %||% "automatic"
-    if (pbmc_example && identical(method, "markers") && identical(assignment_mode, "manual")) {
+    if (identical(method, "markers") && identical(assignment_mode, "manual")) {
       suggestions <- scrna_marker_suggestion_table(p, input$scrna_annotation_name %||% "cell_type")
       if (!NROW(suggestions)) return(actionButton("run_scrna_annotate", "Generate marker suggestions", class = "btn-primary"))
       controls_ready <- all(vapply(suggestions$cluster, function(cluster) !is.null(input[[scrna_manual_cluster_input_id(cluster)]]), logical(1)))
@@ -22522,7 +22539,7 @@ server <- function(input, output, session) {
   })
 
   output$scrna_manual_annotation_review_ui <- renderUI({
-    p <- current_project(); if (!is_scrna_project(p) || !scrna_is_pbmc3k_example(p)) return(NULL)
+    p <- current_project(); if (!is_scrna_project(p)) return(NULL)
     scrna_marker_suggestions_stamp()
     suggestions <- scrna_marker_suggestion_table(p, input$scrna_annotation_name %||% "cell_type")
     if (!NROW(suggestions)) return(div(class = "empty-box", "Run Generate marker suggestions first. The app will calculate the marker dot plot and ranked normalized-average suggestions without locking in the labels."))
@@ -23147,7 +23164,7 @@ server <- function(input, output, session) {
     annotation_method <- annotation_ui$method %||% input$scrna_annotation_method %||% "markers"
     marker_assignment <- annotation_ui$marker_assignment %||% input$scrna_marker_assignment %||% "automatic"
     manual_cluster_mapping <- ""
-    if (identical(stage, "annotate") && pbmc_example && identical(annotation_method, "markers") && identical(marker_assignment, "manual")) {
+    if (identical(stage, "annotate") && identical(annotation_method, "markers") && identical(marker_assignment, "manual")) {
       suggestions <- scrna_marker_suggestion_table(p, input$scrna_annotation_name %||% "cell_type")
       if (NROW(suggestions)) {
         assignments <- stats::setNames(vapply(suggestions$cluster, function(cluster) trimws(as.character(input[[scrna_manual_cluster_input_id(cluster)]] %||% "")), character(1)), suggestions$cluster)
