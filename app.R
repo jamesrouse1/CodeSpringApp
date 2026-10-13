@@ -16595,7 +16595,9 @@ body { background:#eef3f8; color:#17202f; }
 
 /* Executive polish layer */
 body {
-  background: linear-gradient(180deg, #f7f9fc 0%, #edf2f7 100%);
+  /* Keep spacing neutral while dynamic Shiny content is mounted or removed.
+     A tinted canvas otherwise shows through layout gaps as blue bands. */
+  background: #ffffff;
   color: #132033;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 }
@@ -16716,7 +16718,7 @@ body > .container-fluid > .row > .col-sm-10 {
   color: #fff !important;
 }
 .tab-content {
-  background: rgba(255,255,255,.82);
+  background: #ffffff;
   border: 1px solid #dce4ee;
   border-radius: 8px;
   padding: 18px;
