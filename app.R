@@ -15776,35 +15776,34 @@ scrna_gene_select_input <- function(project, input_id, label, selected = "") {
       tags$p(class = "muted small-note", "This legacy result does not include the exported gene list. Enter an exact gene symbol; its expression will be prepared when requested.")
     ))
   }
-  case_match <- match(tolower(selected), tolower(genes))
-  if (nzchar(selected) && !is.na(case_match)) selected <- genes[[case_match]]
-  selected_gene <- if (nzchar(selected) && selected %in% genes) selected else character(0)
-  div(class = "scrna-marker-gene-control", selectizeInput(
-    input_id,
+  div(class = "scrna-marker-gene-control",
+    textInput(
+      paste0(input_id, "_query"),
     label,
-    choices = genes,
-    # Do not silently choose the first gene in the matrix.  Marker plots
-    # should begin only after the user has selected a gene from the list.
-    selected = selected_gene,
-    options = list(
-      # Keep the Shiny value on the last selected gene while the user types
-      # into Selectize's search box. This prevents the UMAP/violin from
-      # rerendering for partial text such as "CD8" before a gene is chosen.
-      create = FALSE,
-      persist = FALSE,
-      closeAfterSelect = TRUE,
-      # A full gene list can contain tens of thousands of entries. Rendering
-      # hundreds of matches on every keystroke makes prefix search feel slow.
-      maxOptions = 75,
-      searchField = "text",
-      loadThrottle = 80,
-      dropdownParent = "body",
-      # Selectize's ordinary Shiny value can transiently reflect its search
-      # text.  Send a separate event only after an item is actually chosen.
-      onItemAdd = I(sprintf("function(value) { Shiny.setInputValue('%s_selected', value, {priority: 'event'}); }", input_id)),
-      placeholder = "Search and select a gene"
-    )
-  ))
+      value = "",
+      placeholder = "Type a gene symbol, for example CD8A"
+    ),
+    uiOutput(paste0(input_id, "_matches")),
+    if (nzchar(selected)) tags$p(class = "muted small-note", paste("Selected gene:", selected)) else tags$p(class = "muted small-note", "Type to filter genes, then choose one from the list.")
+  )
+}
+
+scrna_gene_match_input <- function(project, input_id, query) {
+  query <- trimws(as.character(query %||% ""))
+  if (!nzchar(query)) return(NULL)
+  genes <- scrna_dashboard_gene_choices(project)
+  query_lower <- tolower(query)
+  prefix <- genes[startsWith(tolower(genes), query_lower)]
+  other <- genes[!startsWith(tolower(genes), query_lower) & grepl(query_lower, tolower(genes), fixed = TRUE)]
+  matches <- head(c(prefix, other), 75L)
+  if (!length(matches)) return(tags$p(class = "muted small-note", "No matching genes found."))
+  selectInput(
+    input_id,
+    "Matching genes — choose one",
+    choices = c("Choose a matching gene" = "", stats::setNames(matches, matches)),
+    selected = "",
+    selectize = FALSE
+  )
 }
 
 scrna_violin_gene_input <- function(project, selected = "") {
@@ -16386,10 +16385,13 @@ body { background:#eef3f8; color:#17202f; }
 .scrna-marker-gene-control .form-group,
 .scrna-marker-gene-control .selectize-control,
 .scrna-marker-gene-control .selectize-input { width:100%; min-width:0; }
-/* Selectize moves this dropdown to <body> so it cannot be clipped by a
-   narrow dashboard column.  Target the moved element directly as well, or
-   the interactive plot can sit on top of the gene suggestions. */
-.scrna-marker-gene-control .selectize-dropdown, body > .selectize-dropdown { z-index:100003 !important; }
+/* Keep the menu attached to its input.  Reparenting it to <body> made the
+   menu vanish when Shiny refreshed nearby result panels. */
+.scrna-marker-gene-control,
+.scrna-marker-gene-control .form-group,
+.scrna-marker-gene-control .selectize-control { overflow:visible !important; }
+.scrna-marker-gene-control .selectize-control.dropdown-active { position:relative; z-index:100003 !important; }
+.scrna-marker-gene-control .selectize-dropdown { z-index:100004 !important; }
 .scrna-selection-status { display:inline-flex; align-items:center; margin:8px 0 2px; padding:6px 10px; border:1px solid #cbdced; border-radius:999px; background:#f7f9fc; color:#526070; font-size:12px; font-weight:800; }
 .scrna-selection-status.active { border-color:#78b99a; background:#eaf8f0; color:#16613d; }
 .project-step-summary { margin:12px 0; border:1px solid #d8dde8; border-radius:8px; background:#f8fafc; padding:12px; }
@@ -24727,20 +24729,33 @@ server <- function(input, output, session) {
     if (!is.na(match_index)) target(genes[[match_index]])
     invisible(NULL)
   }
-  observeEvent(input$scrna_violin_gene_selected, {
+  output$scrna_violin_gene_matches <- renderUI({
+    p <- current_project()
+    if (!is_scrna_project(p)) return(NULL)
+    scrna_gene_match_input(p, "scrna_violin_gene", input$scrna_violin_gene_query %||% "")
+  })
+  output$scrna_embedding_gene_matches <- renderUI({
+    if (!identical(input$scrna_embedding_color_mode %||% "metadata", "marker")) return(NULL)
+    p <- current_project()
+    if (!is_scrna_project(p)) return(NULL)
+    scrna_gene_match_input(p, "scrna_embedding_gene", input$scrna_embedding_gene_query %||% "")
+  })
+  observeEvent(input$scrna_violin_gene, {
     p <- isolate(current_project())
-    if (is_scrna_project(p)) scrna_commit_dashboard_gene(p, input$scrna_violin_gene_selected, scrna_violin_selected_gene)
+    if (is_scrna_project(p)) scrna_commit_dashboard_gene(p, input$scrna_violin_gene, scrna_violin_selected_gene)
   }, ignoreInit = FALSE)
-  observeEvent(input$scrna_embedding_gene_selected, {
+  observeEvent(input$scrna_embedding_gene, {
     p <- isolate(current_project())
-    if (is_scrna_project(p)) scrna_commit_dashboard_gene(p, input$scrna_embedding_gene_selected, scrna_embedding_selected_gene)
+    if (is_scrna_project(p)) scrna_commit_dashboard_gene(p, input$scrna_embedding_gene, scrna_embedding_selected_gene)
   }, ignoreInit = FALSE)
   output$scrna_violin_controls_ui <- renderUI({
-    scrna_signature_scores_stamp()
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
     columns <- scrna_embedding_columns(p)
     signature_choices <- scrna_signature_score_choices(p)
     signatures <- unname(signature_choices)
+    # Poll only until signature output first appears.  Polling an already
+    # loaded control panel rebuilds its gene selector while someone is typing.
+    if (!length(signatures)) scrna_signature_scores_stamp()
     # Reference-transfer and post-hoc annotation labels may live in the
     # auxiliary per-cell metadata table rather than the original UMAP TSV.
     # scrna_embedding_table() joins those columns when requested, so expose
@@ -24840,13 +24855,12 @@ server <- function(input, output, session) {
     content = function(file) ggplot2::ggsave(file, scrna_violin_plot_object(), width = 10, height = 6.5, dpi = 220)
   )
   output$scrna_embedding_controls_ui <- renderUI({
-    scrna_embedding_stamp()
-    scrna_signature_scores_stamp()
     p <- current_project(); if (!is_scrna_project(p)) return(NULL)
     embedding_views <- scrna_embedding_view_choices(p)
     if (!length(embedding_views)) {
       # Poll only while UMAP outputs are absent. Once the viewer is ready,
       # avoid rebuilding its controls at each scheduler-status refresh.
+      scrna_embedding_stamp()
       progress_refresh()
       expected <- scrna_embedding_candidate_paths(p, "integrated")
       return(div(class = "empty-box", tags$p("Interactive UMAP coordinates are not available yet."), tags$p(class = "muted small-note", paste("Checked:", paste(expected, collapse = " | ")))))
