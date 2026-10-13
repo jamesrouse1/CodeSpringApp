@@ -14282,6 +14282,17 @@ submit_scrna_pipeline_job <- function(project, stage = "inspect", engine = "auto
     if (!nzchar(pathway_de_file) || !selected_de %in% allowed_de || !file.exists(selected_de)) return(record_preflight_failure(project, step_label, "Choose one completed differential-expression comparison before pathway analysis.", "scrna"))
     pathway_de_file <- selected_de
   }
+  # The Pathway screen retains the multi-select choices from Differential
+  # expression.  They are not used for a pathway run, but the legacy
+  # single-value manifest fields still need one value.  Without this
+  # normalization, a prior multi-group DE selection expands the `value`
+  # column below and prevents Pathway analysis from being submitted.
+  de_reference_values <- unique(trimws(as.character(de_reference %||% character(0))))
+  de_reference_values <- de_reference_values[nzchar(de_reference_values)]
+  de_reference <- if (length(de_reference_values)) de_reference_values[[1]] else ""
+  de_comparison_values <- unique(trimws(as.character(de_comparison %||% character(0))))
+  de_comparison_values <- de_comparison_values[nzchar(de_comparison_values)]
+  de_comparison <- if (length(de_comparison_values)) de_comparison_values[[1]] else ""
   out_dir <- file.path(project$data_dir, "scrna")
   params_path <- file.path(project$data_dir, "manifest", "scrna_parameters.tsv")
   dir.create(dirname(params_path), recursive = TRUE, showWarnings = FALSE)
