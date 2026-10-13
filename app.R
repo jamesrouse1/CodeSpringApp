@@ -15381,6 +15381,18 @@ scrna_result_file_choices <- function(project, pattern = "\\.(tsv|txt|csv|png|pd
   stats::setNames(files, labels)
 }
 
+scrna_marker_panel_choices <- function(files) {
+  files <- unname(files)
+  if (!length(files)) return(character(0))
+  is_dotplot <- grepl("_dotplot_", basename(files), ignore.case = TRUE)
+  files <- files[order(!is_dotplot, basename(files))]
+  panel_number <- sub(".*_panel_([0-9]+)\\.png$", "\\1", basename(files))
+  has_panels <- any(grepl("_panel_[0-9]+\\.png$", basename(files), ignore.case = TRUE))
+  figure_type <- ifelse(grepl("_dotplot_", basename(files), ignore.case = TRUE), "Dot plot", "Heatmap")
+  labels <- if (has_panels) paste0("Marker group ", panel_number, " — ", figure_type) else figure_type
+  stats::setNames(files, labels)
+}
+
 scrna_de_display_label <- function(value) {
   value <- gsub("_and_", ", ", value, fixed = TRUE)
   value <- gsub("__", " — ", value, fixed = TRUE)
@@ -16393,6 +16405,17 @@ body { background:#eef3f8; color:#17202f; }
 .scrna-marker-gene-control .selectize-control { overflow:visible !important; }
 .scrna-marker-gene-control .selectize-control.dropdown-active { position:relative; z-index:100003 !important; }
 .scrna-marker-gene-control .selectize-dropdown { z-index:100004 !important; }
+.scrna-marker-panel-controls { display:flex; flex-wrap:wrap; gap:12px 22px; align-items:flex-end; margin:12px 0 16px; padding:12px 14px; border:1px solid #d8e4ef; border-radius:10px; background:#f8fbfe; }
+.scrna-marker-panel-control { min-width:0; }
+.scrna-marker-panel-control-label { display:block; margin:0 0 6px; color:#526070; font-size:12px; font-weight:800; letter-spacing:.03em; text-transform:uppercase; }
+.scrna-marker-panel-toggle .form-group { margin:0; }
+.scrna-marker-panel-toggle .shiny-options-group { display:flex; flex-wrap:wrap; gap:7px; }
+.scrna-marker-panel-toggle .radio-inline { position:relative; margin:0; padding:6px 11px 6px 29px; border:1px solid #cbd7e4; border-radius:999px; background:white; color:#35516b; font-size:13px; font-weight:700; }
+.scrna-marker-panel-toggle .radio-inline:hover { border-color:#72a4c9; background:#f1f8fd; }
+.scrna-marker-panel-toggle .radio-inline:has(input:checked) { border-color:#2676aa; background:#dff0fb; color:#174d70; box-shadow:inset 0 0 0 1px #2676aa; }
+.scrna-marker-panel-toggle input[type=radio] { margin-top:3px; }
+.scrna-marker-panel-figure { width:100%; max-width:1320px; margin:0 auto 18px; padding:10px; border:1px solid #d8dde8; border-radius:10px; background:white; box-shadow:0 2px 8px rgba(15,39,66,.05); }
+.scrna-marker-panel-figure img { display:block; width:100% !important; height:auto !important; border:0 !important; border-radius:6px !important; }
 .scrna-gene-suggestions .shiny-options-group { display:flex; flex-wrap:wrap; gap:7px; margin:3px 0 6px; }
 .scrna-gene-suggestions .radio-inline { margin:0; padding:5px 10px 5px 28px; border:1px solid #cbdced; border-radius:999px; background:#f7f9fc; color:#244765; font-size:12px; font-weight:800; }
 .scrna-gene-suggestions .radio-inline:hover { border-color:#78b99a; background:#eaf8f0; }
@@ -24583,12 +24606,21 @@ server <- function(input, output, session) {
     available_groups <- groups[vapply(unname(groups), function(group) any(grepl(paste0("_by_", group, "(_panel_[0-9]+)?\\.png$"), basename(unname(files)))), logical(1))]
     group_selected <- selected_choice(input$scrna_marker_panel_group, available_groups, unname(available_groups)[[1]])
     files <- files[grepl(paste0("_by_", group_selected, "(_panel_[0-9]+)?\\.png$"), basename(unname(files)))]
-    selected <- selected_choice(input$scrna_marker_panel, files, unname(files)[[1]])
+    figure_choices <- scrna_marker_panel_choices(files)
+    selected <- selected_choice(input$scrna_marker_panel, figure_choices, unname(figure_choices)[[1]])
     tagList(
-      tags$p(class = "muted small-note", "Start with Cluster number to check whether the marker programs support the unsupervised groups. Then switch to Cell-type annotation to show the same evidence at the final label level."),
-      radioButtons("scrna_marker_panel_group", "Group marker figures by", choices = available_groups, selected = group_selected, inline = TRUE),
-      selectInput("scrna_marker_panel", "Marker figure", choices = files, selected = selected, selectize = FALSE),
-      image_or_file_ui(selected, "900px", fill_width = TRUE)
+      tags$p(class = "muted small-note", "Check the cluster view first, then switch to final cell-type labels. Each marker group is shown separately so labels and dots remain readable."),
+      div(class = "scrna-marker-panel-controls",
+        if (length(available_groups) > 1L) div(class = "scrna-marker-panel-control scrna-marker-panel-toggle",
+          tags$span(class = "scrna-marker-panel-control-label", "Group figures by"),
+          radioButtons("scrna_marker_panel_group", NULL, choices = available_groups, selected = group_selected, inline = TRUE)
+        ) else NULL,
+        div(class = "scrna-marker-panel-control scrna-marker-panel-toggle",
+          tags$span(class = "scrna-marker-panel-control-label", "Show"),
+          radioButtons("scrna_marker_panel", NULL, choices = figure_choices, selected = selected, inline = TRUE)
+        )
+      ),
+      div(class = "scrna-marker-panel-figure", image_or_file_ui(selected, "900px", fill_width = TRUE))
     )
   })
   output$scrna_cluster_marker_heatmap_ui <- renderUI({
