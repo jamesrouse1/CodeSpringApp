@@ -16414,7 +16414,7 @@ body { background:#eef3f8; color:#17202f; }
 .scrna-marker-panel-toggle .radio-inline:hover { border-color:#72a4c9; background:#f1f8fd; }
 .scrna-marker-panel-toggle .radio-inline:has(input:checked) { border-color:#2676aa; background:#dff0fb; color:#174d70; box-shadow:inset 0 0 0 1px #2676aa; }
 .scrna-marker-panel-toggle input[type=radio] { margin-top:3px; }
-.scrna-marker-panel-scroll { width:100%; max-width:1320px; height:780px; margin:0 auto 18px; padding:10px; overflow:auto; border:1px solid #d8dde8; border-radius:10px; background:white; box-shadow:0 2px 8px rgba(15,39,66,.05); }
+.scrna-marker-panel-scroll { width:100%; max-width:1320px; height:860px; margin:0 auto 18px; padding:10px; overflow:scroll; border:1px solid #d8dde8; border-radius:10px; background:white; box-shadow:0 2px 8px rgba(15,39,66,.05); }
 .scrna-marker-panel-scroll img { display:block; width:auto !important; max-width:none !important; height:auto !important; min-width:1100px; border:0 !important; border-radius:6px !important; }
 .scrna-gene-suggestions .shiny-options-group { display:flex; flex-wrap:wrap; gap:7px; margin:3px 0 6px; }
 .scrna-gene-suggestions .radio-inline { margin:0; padding:5px 10px 5px 28px; border:1px solid #cbdced; border-radius:999px; background:#f7f9fc; color:#244765; font-size:12px; font-weight:800; }
@@ -22535,12 +22535,15 @@ server <- function(input, output, session) {
       tags$tr(
         tags$td(tags$strong(paste0("Cluster ", cluster))),
         tags$td(suggestions$suggestion_rankings[[i]]),
-        tags$td(selectInput(scrna_manual_cluster_input_id(cluster), NULL, choices = choices, selected = isolate(input[[scrna_manual_cluster_input_id(cluster)]]) %||% "", width = "100%"))
+        tags$td(selectInput(scrna_manual_cluster_input_id(cluster), NULL, choices = choices, selected = isolate(input[[scrna_manual_cluster_input_id(cluster)]]) %||% "", width = "100%", selectize = FALSE))
       )
     })
     tagList(
       div(class = "read-source-note", tags$strong("Manual cluster review"), tags$p("The ranking is a suggestion, not a final call. Review the marker dot plot, then choose one cell type for every cluster.")),
-      if (length(dotplots)) image_or_file_ui(dotplots[[which.max(file.info(dotplots)$mtime)]], height = "720px", fill_width = TRUE) else tags$p(class = "muted small-note", "The cluster marker dot plot was not found, but the score rankings are available below."),
+      if (length(dotplots)) tagList(
+        tags$p(class = "muted small-note", "Scroll within the figure to review the complete marker list at full size."),
+        div(class = "scrna-marker-panel-scroll", image_or_file_ui(dotplots[[which.max(file.info(dotplots)$mtime)]], height = "720px"))
+      ) else tags$p(class = "muted small-note", "The cluster marker dot plot was not found, but the score rankings are available below."),
       br(), actionButton("scrna_apply_top_suggestions", "Fill with top suggestions", class = "btn-default"), br(), br(),
       tags$div(style = "overflow-x:auto;", tags$table(class = "table table-striped table-condensed", tags$thead(tags$tr(tags$th("Cluster"), tags$th("Suggested ranking (normalized average)"), tags$th("Final cell type"))), tags$tbody(rows)))
     )
@@ -24620,6 +24623,7 @@ server <- function(input, output, session) {
           radioButtons("scrna_marker_panel", NULL, choices = figure_choices, selected = selected, inline = TRUE)
         )
       ),
+      tags$p(class = "muted small-note", "Scroll within the figure to inspect the full marker list."),
       div(class = "scrna-marker-panel-scroll", image_or_file_ui(selected, "900px"))
     )
   })
