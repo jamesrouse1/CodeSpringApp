@@ -3881,15 +3881,36 @@ deseq_model_columns <- function(project, compare_col = "") {
   }, logical(1))]
 }
 
-deseq_design_for_column <- function(project, compare_col, model_cols = character(0)) {
+deseq_subset_values <- function(project) {
+  df <- project_design_df(project)
+  if (!NROW(df) || !"model" %in% names(df)) return(character(0))
+  values <- trimws(as.character(df$model))
+  sort(unique(values[!is.na(values) & nzchar(values)]))
+}
+
+deseq_subset_slug <- function(model_value = "") {
+  model_value <- trimws(as.character(model_value %||% ""))
+  if (!nzchar(model_value)) return("")
+  paste0("model_", clean_name(model_value, "subset"))
+}
+
+deseq_design_for_column <- function(project, compare_col, model_cols = character(0), model_value = "") {
   df <- project_design_df(project)
   if (!NROW(df)) stop("No design matrix found.")
   if (!compare_col %in% names(df)) stop("Selected comparison column is not in design matrix: ", compare_col)
+  model_value <- trimws(as.character(model_value %||% ""))
+  if (nzchar(model_value)) {
+    if (!"model" %in% names(df)) stop("This design matrix does not contain a model column.")
+    available_models <- deseq_subset_values(project)
+    if (!model_value %in% available_models) stop("Selected model is not in the design matrix: ", model_value)
+    df <- df[trimws(as.character(df$model)) == model_value, , drop = FALSE]
+    if (!NROW(df)) stop("No samples were found for model: ", model_value)
+  }
   model_cols <- unique(trimws(as.character(model_cols %||% character(0))))
   model_cols <- model_cols[nzchar(model_cols)]
   invalid <- setdiff(model_cols, names(df))
   if (length(invalid)) stop("Selected model variable(s) are not in the design matrix: ", paste(invalid, collapse = ", "))
-  model_cols <- setdiff(model_cols, compare_col)
+  model_cols <- setdiff(model_cols, c(compare_col, if (nzchar(model_value)) "model" else character(0)))
   model_cols <- model_cols[vapply(model_cols, function(column) {
     values <- trimws(as.character(df[[column]]))
     length(unique(values[!is.na(values) & nzchar(values)])) > 1
@@ -3898,7 +3919,8 @@ deseq_design_for_column <- function(project, compare_col, model_cols = character
   keep <- df[, c("sample", model_cols, compare_col, "filename"), drop = FALSE]
   keep <- trim_design_text(keep)
   model_slug <- if (length(model_cols)) paste(clean_name(model_cols), collapse = "_") else "unadjusted"
-  out_dir <- file.path(project$data_dir, "manifest", paste0("deseq2_", clean_name(compare_col, "comparison"), "__", model_slug))
+  scope_slug <- deseq_subset_slug(model_value)
+  out_dir <- file.path(project$data_dir, "manifest", paste0("deseq2_", clean_name(compare_col, "comparison"), "__", model_slug, if (nzchar(scope_slug)) paste0("__", scope_slug) else ""))
   dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
   out <- file.path(out_dir, "design_matrix.txt")
   utils::write.table(keep, out, sep = "\t", row.names = FALSE, quote = FALSE)
@@ -10487,7 +10509,7 @@ resolve_comparison_inputs <- function(project, compare_col = NULL, reference = N
 completed_deseq_comparison_catalog <- function(project) {
   deseq_dir <- file.path(project$data_dir, "deseq2")
   files <- if (dir.exists(deseq_dir)) {
-    list.files(deseq_dir, pattern = "^normalized_counts_.*\\(ref\\)\\.txt$", full.names = TRUE)
+    list.files(deseq_dir, pattern = "^normalized_counts_.*\\(ref\\)\\.txt$", recursive = TRUE, full.names = TRUE)
   } else {
     character(0)
   }
@@ -10499,21 +10521,33 @@ completed_deseq_comparison_catalog <- function(project) {
     if (length(hit) != 3L) return(NULL)
     comparison <- hit[[2]]
     reference <- hit[[3]]
-    deg_path <- file.path(deseq_dir, paste0("DEG_", comparison, "_vs_", reference, "(ref).txt"))
+    result_dir <- dirname(path)
+    deg_path <- file.path(result_dir, paste0("DEG_", comparison, "_vs_", reference, "(ref).txt"))
     if (!file.exists(deg_path) || file_size_for(path) <= 0 || file_size_for(deg_path) <= 0) return(NULL)
     candidates <- compare_cols[vapply(compare_cols, function(column) {
       all(c(reference, comparison) %in% as.character(design[[column]]))
     }, logical(1))]
     compare_col <- if (length(candidates) == 1L) candidates[[1]] else ""
-    key <- paste(compare_col, reference, comparison, sep = "\r")
+    deseq_root <- normalizePath(deseq_dir, winslash = "/", mustWork = FALSE)
+    normalized_result_dir <- normalizePath(result_dir, winslash = "/", mustWork = FALSE)
+    scope <- if (startsWith(normalized_result_dir, paste0(deseq_root, "/"))) {
+      substring(normalized_result_dir, nchar(deseq_root) + 2L)
+    } else {
+      ""
+    }
+    scope <- trimws(scope)
+    key <- paste(scope, compare_col, reference, comparison, sep = "\r")
     label <- if (nzchar(compare_col)) {
       format_comparison_label(compare_col, comparison, reference)
     } else {
       paste(comparison, "vs", reference)
     }
+    if (nzchar(scope)) label <- paste0(gsub("_", " ", scope), " — ", label)
     data.frame(
       key = key,
       label = label,
+      scope = scope,
+      result_dir = result_dir,
       compare_col = compare_col,
       reference = reference,
       comparison = comparison,
@@ -10532,7 +10566,7 @@ completed_deseq_result_files <- function(project) {
   catalog <- completed_deseq_comparison_catalog(project)
   if (!NROW(catalog)) return(character(0))
   root <- file.path(project$data_dir, "deseq2")
-  files <- list.files(root, pattern = "\\.(txt|csv|png|pdf)$", full.names = TRUE)
+  files <- list.files(root, pattern = "\\.(txt|csv|png|pdf)$", recursive = TRUE, full.names = TRUE)
   tokens <- paste0(catalog$comparison, "_vs_", catalog$reference)
   keep <- vapply(basename(files), function(file) {
     startsWith(file, "pca_all_samples_") || any(vapply(tokens, grepl, logical(1), x = file, fixed = TRUE))
@@ -14640,7 +14674,7 @@ featurecounts_matrix_job_active <- function(jobs, matrix_path) {
   NROW(hit) > 0 && any(hit$slurm_state %in% active_states)
 }
 
-submit_deseq2_job <- function(project, compare_col, reference, comparison, redundant = "NoRedundant", gene_name_counts = FALSE, model_cols = character(0)) {
+submit_deseq2_job <- function(project, compare_col, reference, comparison, redundant = "NoRedundant", gene_name_counts = FALSE, model_cols = character(0), model_value = "") {
   count_matrix <- file.path(project$data_dir, "counts", "count_matrix.txt")
   active_msg <- active_upstream_message(project, "featureCounts", "DESeq2")
   if (nzchar(active_msg)) {
@@ -14655,11 +14689,14 @@ submit_deseq2_job <- function(project, compare_col, reference, comparison, redun
     )
     return(record_preflight_failure(project, "DESeq2", msg, "deseq2"))
   }
-  outdir <- file.path(project$data_dir, if (isTRUE(gene_name_counts)) "deseq2_gene_name" else "deseq2")
+  result_root <- file.path(project$data_dir, if (isTRUE(gene_name_counts)) "deseq2_gene_name" else "deseq2")
+  scope_slug <- deseq_subset_slug(model_value)
+  outdir <- if (nzchar(scope_slug)) file.path(result_root, scope_slug) else result_root
   dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
   script <- file.path(SCRIPTS_DIR, "DESeq2", "qsub_deseq2.sh")
   rscript <- file.path(SCRIPTS_DIR, "DESeq2", "DESeq2.R")
   input_mode <- format_comparison_label(compare_col, comparison, reference)
+  if (nzchar(model_value)) input_mode <- paste0("model subset: ", model_value, " — ", input_mode)
   dependency_ids <- character(0)
   if (isTRUE(gene_name_counts)) {
     res <- genome_resources(project)
@@ -14672,7 +14709,8 @@ submit_deseq2_job <- function(project, compare_col, reference, comparison, redun
     count_matrix <- gene_matrix
     input_mode <- paste(input_mode, "gene-name aggregated counts", sep = " - ")
   }
-  design_matrix <- deseq_design_for_column(project, compare_col, model_cols)
+  design_matrix <- deseq_design_for_column(project, compare_col, model_cols, model_value)
+  file.copy(design_matrix, file.path(outdir, "design_matrix.txt"), overwrite = TRUE)
   model_label <- paste(c(model_cols, compare_col), collapse = " + ")
   input_mode <- paste(input_mode, paste0("model: ~ ", model_label), sep = " - ")
   submit_sbatch(project, "DESeq2", script, c(rscript, count_matrix, design_matrix, outdir, reference, comparison, redundant, project$name), "deseq2", input_mode, target = file.path(outdir, sprintf("DEG_%s_vs_%s(ref).txt", comparison, reference)), dependency_ids = dependency_ids)
@@ -14819,10 +14857,11 @@ write_gseapy_shell_script <- function(project, python_script, script_dir, projec
   script
 }
 
-submit_gseapy_job <- function(project, compare_col, reference, comparison, geneset) {
+submit_gseapy_job <- function(project, compare_col, reference, comparison, geneset, deseq_dir = file.path(project$data_dir, "deseq2"), scope = "") {
   geneset <- trimws(geneset %||% "")
   if (!nzchar(geneset)) stop("Choose a GSEA gene-set database.")
-  deseq_dir <- file.path(project$data_dir, "deseq2")
+  deseq_dir <- normalizePath(deseq_dir, winslash = "/", mustWork = FALSE)
+  scope <- trimws(as.character(scope %||% ""))
   normalized_file <- file.path(deseq_dir, paste0("normalized_counts_", comparison, "_vs_", reference, "(ref).txt"))
   active_msg <- active_upstream_message(project, "DESeq2", "GSEA")
   if (nzchar(active_msg)) {
@@ -14837,12 +14876,13 @@ submit_gseapy_job <- function(project, compare_col, reference, comparison, genes
     return(record_preflight_failure(project, "GSEA", msg, "gseapy"))
   }
   geneset_slug <- clean_name(geneset, "geneset")
-  run_slug <- clean_name(paste(compare_col, comparison, "vs", reference, geneset, sep = "_"), "gseapy")
-  outpath_pathway <- paste0(file.path(project$data_dir, "gseapy", paste0(comparison, "_vs_", reference), geneset_slug), "/")
+  run_slug <- clean_name(paste(scope, compare_col, comparison, "vs", reference, geneset, sep = "_"), "gseapy")
+  gsea_root <- file.path(project$data_dir, "gseapy")
+  if (nzchar(scope)) gsea_root <- file.path(gsea_root, scope)
+  outpath_pathway <- paste0(file.path(gsea_root, paste0(comparison, "_vs_", reference), geneset_slug), "/")
   target <- file.path(outpath_pathway, paste0("report.gseapy.", geneset_slug, ".csv"))
   dir.create(outpath_pathway, recursive = TRUE, showWarnings = FALSE)
-  design_matrix <- deseq_design_for_column(project, compare_col)
-  design_dir <- dirname(design_matrix)
+  design_dir <- deseq_dir
   results_root <- project$results_root %||% dirname(dirname(project$data_dir))
   python_script <- write_gseapy_script(project, run_slug)
   shell_script <- write_gseapy_shell_script(
@@ -22994,6 +23034,9 @@ server <- function(input, output, session) {
     p <- current_project()
     cols <- design_compare_columns(p)
     if (!length(cols)) return(div(class = "empty-box", "No comparison columns found between sample and filename in design_matrix.txt."))
+    model_values <- deseq_subset_values(p)
+    requested_model <- trimws(as.character(input$deseq_model_subset %||% ""))
+    selected_model <- if (length(requested_model) && requested_model[[1]] %in% model_values) requested_model[[1]] else ""
     selected_col <- input$deseq_compare_col %||% if ("treatment" %in% cols) "treatment" else cols[[1]]
     if (!selected_col %in% cols) selected_col <- cols[[1]]
     vals <- design_compare_values(p, selected_col)
@@ -23004,9 +23047,17 @@ server <- function(input, output, session) {
     selected_comparisons <- intersect(requested_comparisons, comparison_choices)
     if (!length(selected_comparisons) && length(comparison_choices)) selected_comparisons <- comparison_choices[[1]]
     covariate_choices <- deseq_model_columns(p, selected_col)
+    if (nzchar(selected_model)) covariate_choices <- setdiff(covariate_choices, "model")
     selected_covariates <- intersect(input$deseq_model_cols %||% character(0), covariate_choices)
     formula_text <- paste(c(selected_covariates, selected_col), collapse = " + ")
     tagList(
+      if (length(model_values)) selectInput(
+        "deseq_model_subset",
+        "Analyze model",
+        choices = c("All models" = "", stats::setNames(model_values, model_values)),
+        selected = selected_model,
+        selectize = FALSE
+      ) else NULL,
       selectInput("deseq_compare_col", "Comparison column", choices = cols, selected = selected_col, selectize = FALSE),
       selectInput("deseq_reference", "Reference/baseline", choices = vals, selected = ref, selectize = FALSE),
       selectizeInput(
@@ -23024,7 +23075,7 @@ server <- function(input, output, session) {
         selected = selected_covariates
       ) else NULL,
       tags$p(class = "read-source-note", tags$strong("DESeq2 design: "), code(paste0("~ ", formula_text))),
-      tags$p(class = "muted small-note", "The comparison variable is always modeled last. Select batch, sex, donor, or other metadata columns here when they should be adjusted for. One independent DESeq2 job is submitted for every selected comparison.")
+      tags$p(class = "muted small-note", if (nzchar(selected_model)) paste0("Only ", selected_model, " samples will be included. The model field is used for filtering and is not added to the DESeq2 formula.") else "The comparison variable is always modeled last. Select batch, sex, donor, or other metadata columns here when they should be adjusted for. One independent DESeq2 job is submitted for every selected comparison.")
     )
   })
 
@@ -24106,7 +24157,8 @@ server <- function(input, output, session) {
             comparison,
             "NoRedundant",
             FALSE,
-            input$deseq_model_cols %||% character(0)
+            input$deseq_model_cols %||% character(0),
+            input$deseq_model_subset %||% ""
           )
         }, character(1)), collapse = "\n"),
         paste(
@@ -24146,7 +24198,9 @@ server <- function(input, output, session) {
           selected$compare_col[[1]],
           selected$reference[[1]],
           selected$comparison[[1]],
-          geneset
+          geneset,
+          selected$result_dir[[1]],
+          selected$scope[[1]]
         ),
         paste(selected$compare_col[[1]], selected$comparison[[1]], "vs", selected$reference[[1]], geneset)
       )
