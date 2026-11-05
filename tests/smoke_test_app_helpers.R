@@ -77,7 +77,7 @@ owner_path_pattern <- "(/grid/bsr/home/rouse|/home/rouse|/Users/rouse|rouse@bamd
 assert(!any(grepl(owner_path_pattern, runtime_text, ignore.case = TRUE)), "runtime code contains no hardcoded rouse home, login, or server path")
 scrna_step_meta <- app_env$run_step_meta(list(analysis_key = "scrna", analysis = "scRNA-seq", counts_only = FALSE))
 assert(
-  identical(as.character(scrna_step_meta$step), c("Input inspection", "QC & doublets", "Normalize & PCA", "UMAP & clustering", "Annotate & markers", "Signature scoring", "Differential expression", "Pathway analysis")) && NROW(scrna_step_meta) == 8L,
+  identical(as.character(scrna_step_meta$step), c("Input inspection", "QC & doublets", "PCA preview", "Normalize & PCA", "UMAP & clustering", "Annotate & markers", "Signature scoring", "Differential expression", "Pathway analysis")) && NROW(scrna_step_meta) == 9L,
   "single-cell run-step metadata exposes the complete checkpointed analysis workflow"
 )
 assert(
@@ -375,9 +375,11 @@ pbmc_global_umap <- app_env$scrna_umap_focus_settings(pbmc_project, "global")
 assert(
   identical(pbmc_local_umap, list(n_neighbors = 20L, min_dist = 0.3, n_pcs = 10L)) &&
     identical(pbmc_global_umap, list(n_neighbors = 30L, min_dist = 0.6, n_pcs = 10L)) &&
-    grepl('if (is.null(tutorial)) fluidRow(', app_text, fixed = TRUE) &&
-    grepl('tutorial_umap$n_neighbors %||% input$scrna_n_neighbors', app_text, fixed = TRUE),
-  "the PBMC example hides manual embedding fields and applies distinct Local/Global presets"
+    grepl('numericInput("scrna_n_neighbors"', app_text, fixed = TRUE) &&
+    grepl('numericInput("scrna_cluster_n_neighbors"', app_text, fixed = TRUE) &&
+    grepl('input$scrna_n_pcs %||% tutorial_umap$n_pcs', app_text, fixed = TRUE) &&
+    grepl('How to adjust normalization and UMAP settings', app_text, fixed = TRUE),
+  "the PBMC example keeps editable UMAP fields in both stages while retaining distinct Local/Global presets"
 )
 dir.create(file.path(pbmc_manifest_dir, "scrna", "tables"), recursive = TRUE)
 utils::write.table(
@@ -511,6 +513,12 @@ utils::write.table(
 embedding_views <- app_env$scrna_embedding_view_choices(embedding_project)
 unintegrated_embedding <- app_env$scrna_embedding_table(embedding_project, columns = c("cluster", "condition", "sample_id", "cell_type"), max_points = Inf, view = "unintegrated")
 assert(identical(unname(embedding_views), c("integrated", "unintegrated")), "interactive UMAP offers integrated and unintegrated coordinates when both tables exist")
+utils::write.table(
+  data.frame(cell = c("c1", "c2"), UMAP_1 = c(-10, -20), UMAP_2 = c(-30, -40), sample_id = c("s1", "s2")),
+  file.path(embedding_test_root, "scrna", "tables", "initial_umap_coordinates.tsv"), sep = "\t", row.names = FALSE, quote = FALSE
+)
+initial_embedding <- app_env$scrna_embedding_table(embedding_project, max_points = Inf, view = "unintegrated")
+assert(identical(initial_embedding$UMAP_1, c(-10, -20)), "single-input projects prefer the initial UMAP filename while retaining legacy pre-integration output support")
 assert(grepl("scrna_embedding_stamp()", app_text, fixed = TRUE), "interactive UMAP watches coordinate outputs independently of scheduler state")
 assert(!grepl('restore_scrna_embedding', app_text, fixed = TRUE), "the explorer never asks users to rebuild an existing UMAP")
 assert(grepl('itemsizing = "constant"', app_text, fixed = TRUE) && grepl('legend = list(x = 1.02', app_text, fixed = TRUE), "interactive UMAP keeps categorical legend symbols visible and reserves a fixed legend column")
@@ -2015,6 +2023,34 @@ assert(
 )
 shared_project_summary <- app_env$cutrun_seacr_peak_summary_table(seacr_selector_project)
 assert(any(grepl("Shared Peaks:", names(shared_project_summary), fixed = TRUE)), "project peak summary automatically adds each shared-overlap peak count column")
+scaling_summary_project <- seacr_selector_project
+scaling_summary_project$data_dir <- file.path(root, "cutrun-scaling-summary", "data")
+scaling_summary_project$design_matrix_path <- file.path(scaling_summary_project$data_dir, "manifest", "design_matrix.txt")
+dir.create(dirname(scaling_summary_project$design_matrix_path), recursive = TRUE, showWarnings = FALSE)
+write.table(
+  data.frame(
+    sample = c("Target1", "IgG1"), cell_type = "Model", mark = c("Creb", "IgG"),
+    target = c("Creb", "IgG"), target_class = c("tf_or_other", "control"),
+    condition = "Vehicle", replicate = 1L, control_sample = c("IgG1", ""),
+    filename = c("Target1.fastq.gz", "IgG1.fastq.gz"), stringsAsFactors = FALSE
+  ),
+  scaling_summary_project$design_matrix_path, sep = "\t", row.names = FALSE, quote = FALSE
+)
+for (entry in list(c("Target1", "1.250", "12500"), c("IgG1", "0.800", "8000"))) {
+  sample <- entry[[1]]
+  summary_path <- file.path(scaling_summary_project$data_dir, "bowtie2", sample, paste0(sample, "_alignment_summary.txt"))
+  dir.create(dirname(summary_path), recursive = TRUE, showWarnings = FALSE)
+  writeLines(c(paste0("sample\t", sample), paste0("spikein_mapped_reads\t", entry[[3]]), paste0("spikein_scale_factor\t", entry[[2]])), summary_path)
+}
+scaling_summary <- app_env$cutrun_seacr_peak_summary_table(scaling_summary_project)
+assert(
+  identical(scaling_summary[["IgG control"]], "IgG1") &&
+    identical(scaling_summary[["Sample E. coli Mapped Reads"]], "12500") &&
+    identical(scaling_summary[["IgG Control E. coli Mapped Reads"]], "8000") &&
+    identical(scaling_summary[["Sample Scale Factor"]], "1.250") &&
+    identical(scaling_summary[["IgG Control Scale Factor"]], "0.800"),
+  "CUT&RUN peak summary reports matched IgG E. coli reads and scale factors alongside each target"
+)
 app_source_text <- paste(readLines(file.path(repo_root, "app.R"), warn = FALSE), collapse = "\n")
 assert(grepl("Select all samples", app_source_text, fixed = TRUE) && grepl("Clear selection", app_source_text, fixed = TRUE), "sample-level step selectors expose select-all and clear controls")
 assert(grepl("cslRestoreToolPanels", app_source_text, fixed = TRUE) && grepl("server = TRUE", app_source_text, fixed = TRUE), "pipeline panels preserve open state and tables use server-side rendering")
@@ -2286,8 +2322,8 @@ counts_design <- app_env$write_counts_only_design(
   metadata_cols = "treatment, batch"
 )
 counts_design_df <- read.delim(counts_design, check.names = FALSE)
-counts_design_df$treatment <- c("Control", "Control", "Treated")
-counts_design_df$batch <- c("B1", "B2", "B1")
+counts_design_df$treatment <- c("Control ", "Control", "Treated ")
+counts_design_df$batch <- c("B1 ", "B2", "B1")
 write.table(counts_design_df, counts_design, sep = "\t", row.names = FALSE, quote = FALSE)
 counts_project <- list(
   id = "rna/counts-only", name = "counts-only", analysis_key = "rna", analysis = "RNA-seq",
@@ -2298,6 +2334,11 @@ assert(identical(app_env$pipeline_order(counts_project), c("Design matrix", "DES
 modeled_design <- app_env$deseq_design_for_column(counts_project, "treatment", "batch")
 modeled_df <- read.delim(modeled_design, check.names = FALSE)
 assert(identical(names(modeled_df), c("sample", "batch", "treatment", "filename")), "selected covariates are retained and the comparison variable is modeled last")
+assert(
+  identical(as.character(modeled_df$treatment), c("Control", "Control", "Treated")) &&
+    identical(as.character(modeled_df$batch), c("B1", "B2", "B1")),
+  "RNA-seq DESeq2 designs trim spreadsheet whitespace from treatment and covariate values"
+)
 dir.create(file.path(counts_only_root, "deseq2"), recursive = TRUE, showWarnings = FALSE)
 writeLines(
   "DESCRIPTION\tS1\tS2\tS3",
