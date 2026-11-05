@@ -65,14 +65,14 @@ report <- sarek_explorer_report_ui(
        assay = list(type = "WGS"), reference = list(assembly = "GRCh38"))
 )
 html <- sarek_explorer_report_html(report)
-stopifnot(grepl("GENE1", html, fixed = TRUE),
+stopifnot(grepl("Somatic alterations by tumor", html, fixed = TRUE),
+          grepl("The paired somatic oncoplot applies to matched tumor/normal runs.", html, fixed = TRUE),
           grepl("Tumor-only calls cannot reliably distinguish", html, fixed = TRUE),
           grepl("S1.cnv.png", html, fixed = TRUE),
           grepl("MultiQC general statistics", html, fixed = TRUE),
           grepl("33.5", html, fixed = TRUE),
           grepl("fastp read statistics", html, fixed = TRUE),
           grepl("89", html, fixed = TRUE),
-          grepl("Variants by sample and caller", html, fixed = TRUE),
           !grepl(output_dir, html, fixed = TRUE))
 without_multiqc <- catalog[!grepl("multiqc", catalog$folder, ignore.case = TRUE), , drop = FALSE]
 without_multiqc_html <- sarek_explorer_report_html(sarek_explorer_report_ui(

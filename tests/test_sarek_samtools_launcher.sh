@@ -38,7 +38,12 @@ module() {
 }
 MODULE_INIT
 
+# Cluster shells export a real `module` function and set BASH_ENV to the Lmod
+# init script, which would redefine it in the launcher; drop both so the
+# launcher falls through to the fake module initialization above.
 output="$({
+  unset -f module ml 2>/dev/null || true
+  unset BASH_ENV
   CSL_SAREK_MODULE_INIT="$module_init" \
   CSL_SAREK_TEST_MODULE_LOG="$module_log" \
   CSL_SAREK_TEST_FAKE_BIN="$fake_bin" \

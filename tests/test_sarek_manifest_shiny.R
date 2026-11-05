@@ -217,7 +217,10 @@ older_internal <- file.path(results_root, "older_run", ".codespring")
 dir.create(older_internal, recursive = TRUE)
 writeLines(
   c(
-    "field\tvalue", "status\tsubmitted", "job_id\t111111",
+    # A detached-controller record, not a Slurm job ID: a numeric job_id is
+    # cross-checked with sacct, which on a real cluster can be someone
+    # else's failed job.
+    "field\tvalue", "status\tsubmitted", "controller_pid\t111111",
     "submitted_at\t2026-08-17T12:00:00Z",
     paste0("run_dir\t", file.path(results_root, "older_run")),
     paste0("output_dir\t", file.path(results_root, "older_run", "results")),
