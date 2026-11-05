@@ -203,6 +203,19 @@ cutrun_nfcore_samplesheet <- function(project, design = NULL) {
 
   control_groups <- character(NROW(design))
 
+  # nf-core/cutandrun's use_control is all-or-nothing: either every target
+  # names an IgG control, or none do and SEACR falls back to a threshold.
+  target_controls <- trimws(
+    as.character(design$control_sample[!control_rows] %||% "")
+  )
+  target_controls[is.na(target_controls)] <- ""
+  if (any(nzchar(target_controls)) && any(!nzchar(target_controls))) {
+    stop(
+      "nf-core CUT&RUN needs a control_sample for every target, or for none of them. Missing for: ",
+      paste(design$sample[!control_rows][!nzchar(target_controls)], collapse = ", ")
+    )
+  }
+
   for (i in seq_len(NROW(design))) {
     if (control_rows[[i]]) {
       control_groups[[i]] <- ""
@@ -213,11 +226,9 @@ cutrun_nfcore_samplesheet <- function(project, design = NULL) {
       as.character(design$control_sample[[i]] %||% "")
     )
 
-    if (!nzchar(control_sample)) {
-      stop(
-        "Every nf-core CUT&RUN target must identify its matched control_sample. Missing for: ",
-        design$sample[[i]]
-      )
+    if (is.na(control_sample) || !nzchar(control_sample)) {
+      control_groups[[i]] <- ""
+      next
     }
 
     control_index <- match(control_sample, design$sample)
@@ -341,6 +352,30 @@ cutrun_nfcore_write_inputs <- function(
 CUTRUN_NFCORE_NEXTFLOW_VERSION <- "24.04.4"
 CUTRUN_NFCORE_PIPELINE <- "nf-core/cutandrun"
 
+# Nextflow writes launcher, lock and plugin files under NXF_HOME on every
+# run, so it must be writable by the person launching. The shared runtime
+# is used when it is; otherwise each user gets a private NXF_HOME and
+# Nextflow fetches its own copy of the pinned release on first use.
+cutrun_nfcore_default_nxf_home <- function(backend_root) {
+  shared <- file.path(
+    backend_root,
+    "runtime",
+    "nextflow",
+    "cutandrun"
+  )
+
+  if (dir.exists(shared) && file.access(shared, 2) == 0) {
+    return(shared)
+  }
+
+  file.path(
+    path.expand("~"),
+    ".codespring",
+    "nextflow",
+    "cutandrun"
+  )
+}
+
 cutrun_nfcore_runtime_defaults <- function() {
   backend_root <- Sys.getenv(
     "CSL_CUTRUN_NFCORE_BACKEND_ROOT",
@@ -358,12 +393,7 @@ cutrun_nfcore_runtime_defaults <- function() {
     ),
     nxf_home = Sys.getenv(
       "CSL_CUTRUN_NFCORE_NXF_HOME",
-      unset = file.path(
-        backend_root,
-        "runtime",
-        "nextflow",
-        "cutandrun"
-      )
+      unset = cutrun_nfcore_default_nxf_home(backend_root)
     ),
     singularity_cache = Sys.getenv(
       "CSL_CUTRUN_NFCORE_SINGULARITY_CACHE",
@@ -876,6 +906,31 @@ cutrun_nfcore_build_bundle <- function(
     )
   }
 
+  # Validate the design and references before anything is written, so a
+  # rejected design never leaves a run directory that blocks the next try.
+  generated <- cutrun_nfcore_samplesheet(project)
+
+  params <- cutrun_nfcore_params(
+    project = project,
+    paths = paths,
+    generated = generated,
+    normalisation_mode = normalisation_mode,
+    include_macs2 = include_macs2,
+    macs2_narrow_peak = macs2_narrow_peak,
+    seacr_stringent = seacr_stringent
+  )
+
+  completed <- FALSE
+  on.exit(
+    if (!completed) {
+      unlink(
+        paths$run_dir,
+        recursive = TRUE
+      )
+    },
+    add = TRUE
+  )
+
   for (directory in c(
     paths$internal_dir,
     paths$log_dir,
@@ -895,8 +950,6 @@ cutrun_nfcore_build_bundle <- function(
     }
   }
 
-  generated <- cutrun_nfcore_samplesheet(project)
-
   write.csv(
     generated$samplesheet,
     paths$samplesheet_path,
@@ -912,16 +965,6 @@ cutrun_nfcore_build_bundle <- function(
     quote = FALSE,
     row.names = FALSE,
     na = ""
-  )
-
-  params <- cutrun_nfcore_params(
-    project = project,
-    paths = paths,
-    generated = generated,
-    normalisation_mode = normalisation_mode,
-    include_macs2 = include_macs2,
-    macs2_narrow_peak = macs2_narrow_peak,
-    seacr_stringent = seacr_stringent
   )
 
   jsonlite::write_json(
@@ -954,6 +997,8 @@ cutrun_nfcore_build_bundle <- function(
     paths$launch_script,
     mode = "0700"
   )
+
+  completed <- TRUE
 
   list(
     paths = paths,

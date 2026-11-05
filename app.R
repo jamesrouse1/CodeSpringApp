@@ -514,8 +514,12 @@ FETCHNGS_ACCESSION_PATTERNS <- c(
 )
 RNA_EXAMPLE_FASTQ_DIR <- normalizePath(file.path(SCRIPTS_DIR, "test", "fastq"), winslash = "/", mustWork = FALSE)
 RNA_EXAMPLE_DESIGN_DIR <- normalizePath(file.path(SCRIPTS_DIR, "test", "manifest"), winslash = "/", mustWork = FALSE)
-CUTRUN_EXAMPLE_FASTQ_DIR <- RNA_EXAMPLE_FASTQ_DIR
-CUTRUN_EXAMPLE_DESIGN_DIR <- normalizePath(file.path(SCRIPTS_DIR, "test", "manifest_cutrun"), winslash = "/", mustWork = FALSE)
+# The CUT&RUN example is real K562 CUT&RUN (GSE145187, the nf-core full-test
+# data) kept in one shared, world-readable folder so every user runs the same
+# inputs without copying FASTQs into their own CodeSpringLab checkout.
+CUTRUN_EXAMPLE_ROOT <- Sys.getenv("CSL_CUTRUN_EXAMPLE_ROOT", unset = "/grid/bsr/data/data/bsr_readable_data/CodeSpringFlow/examples/cutrun_nfcore_GSE145187")
+CUTRUN_EXAMPLE_FASTQ_DIR <- normalizePath(file.path(CUTRUN_EXAMPLE_ROOT, "fastq"), winslash = "/", mustWork = FALSE)
+CUTRUN_EXAMPLE_DESIGN_DIR <- normalizePath(file.path(CUTRUN_EXAMPLE_ROOT, "manifest"), winslash = "/", mustWork = FALSE)
 ATAC_EXAMPLE_FASTQ_DIR <- normalizePath(file.path(SCRIPTS_DIR, "test", "fastq_atac"), winslash = "/", mustWork = FALSE)
 ATAC_EXAMPLE_DESIGN_DIR <- normalizePath(file.path(SCRIPTS_DIR, "test", "manifest_atac"), winslash = "/", mustWork = FALSE)
 CHIP_EXAMPLE_FASTQ_DIR <- normalizePath(file.path(SCRIPTS_DIR, "test", "fastq_chip"), winslash = "/", mustWork = FALSE)
@@ -1667,7 +1671,7 @@ example_dataset_paths <- function(key) {
   switch(
     analysis_key(key),
     rna = list(name = "example_dataset", fastq_dir = RNA_EXAMPLE_FASTQ_DIR, design_dir = RNA_EXAMPLE_DESIGN_DIR),
-    cutrun = list(name = "example_cutrun", fastq_dir = CUTRUN_EXAMPLE_FASTQ_DIR, design_dir = CUTRUN_EXAMPLE_DESIGN_DIR),
+    cutrun = list(name = "example_cutrun", fastq_dir = CUTRUN_EXAMPLE_FASTQ_DIR, design_dir = CUTRUN_EXAMPLE_DESIGN_DIR, species = "human"),
     atac = list(name = "example_atac", fastq_dir = ATAC_EXAMPLE_FASTQ_DIR, design_dir = ATAC_EXAMPLE_DESIGN_DIR),
     chip = list(name = "example_chip", fastq_dir = CHIP_EXAMPLE_FASTQ_DIR, design_dir = CHIP_EXAMPLE_DESIGN_DIR, species = "human", paired_end = "single"),
     scrna = list(name = "example_pbmc3k", matrix_dir = SCRNA_PBMC3K_EXAMPLE_DIR, sample_name = "pbmc3k", species = "human", folder_type = "filtered_10x_matrix"),
@@ -6499,18 +6503,46 @@ cutrun_nfcore_stage_state <- function(
     return("Failed")
   }
 
+  finished <- classes %in% c("complete", "ignored")
+
   if (
     length(classes) &&
-    all(classes == "complete")
+    all(finished)
   ) {
     return("Complete")
   }
 
-  if (any(classes == "complete")) {
+  if (any(finished)) {
     return("Partial")
   }
 
   "Waiting"
+}
+
+# trace.tsv keeps every attempt. A failed attempt that a later attempt of the
+# same task completed is superseded, and once the workflow itself has
+# completed any remaining failures were tolerated by nf-core's errorStrategy
+# (for example Preseq on low-complexity libraries). Neither should mark a
+# stage as Failed.
+cutrun_nfcore_resolve_failed_attempts <- function(
+  trace,
+  workflow_state = ""
+) {
+  if (!NROW(trace) || !"status_class" %in% names(trace)) {
+    return(trace)
+  }
+
+  failed <- trace$status_class == "failed"
+  completed_labels <- trace$label[trace$status_class == "complete"]
+
+  superseded <- failed & trace$label %in% completed_labels
+  trace <- trace[!superseded, , drop = FALSE]
+
+  if (identical(toupper(as.character(workflow_state %||% "")), "COMPLETED")) {
+    trace$status_class[trace$status_class == "failed"] <- "ignored"
+  }
+
+  trace
 }
 
 cutrun_nfcore_normalized_key <- function(
@@ -6607,9 +6639,12 @@ cutrun_nfcore_sample_aliases <- function(
         )
       )
 
+      # nf-core names per-sample tasks <group>_R<replicate>. The bare group
+      # (shared by every replicate) and control_group (the IgG group) must
+      # not be aliases, or every replicate's tasks match the first sample.
       alias_cols <- names(mapping)[
         grepl(
-          "group|nfcore|alias",
+          "alias",
           tolower(
             names(mapping)
           )
@@ -6618,7 +6653,8 @@ cutrun_nfcore_sample_aliases <- function(
 
       if (
         nzchar(original_col) &&
-        length(alias_cols)
+        (length(alias_cols) ||
+          all(c("nfcore_group", "replicate") %in% names(mapping)))
       ) {
         for (i in seq_len(NROW(mapping))) {
           original <- trimws(
@@ -6639,6 +6675,16 @@ cutrun_nfcore_sample_aliases <- function(
             ],
             use.names = FALSE
           )
+          if (all(c("nfcore_group", "replicate") %in% names(mapping))) {
+            extra <- c(
+              extra,
+              paste0(
+                mapping$nfcore_group[[i]],
+                "_R",
+                mapping$replicate[[i]]
+              )
+            )
+          }
 
           extra <- trimws(
             as.character(extra)
@@ -6737,7 +6783,7 @@ cutrun_nfcore_sample_aliases <- function(
               )
             )
 
-            extras <- group
+            extras <- character(0)
 
             if (
               nzchar(replicate_col) &&
@@ -6754,7 +6800,7 @@ cutrun_nfcore_sample_aliases <- function(
                   extras,
                   paste0(
                     group,
-                    "_",
+                    "_R",
                     replicate
                   )
                 )
@@ -6806,27 +6852,15 @@ cutrun_nfcore_task_sample <- function(
       )
     )
 
-    keys <- unique(
-      vapply(
-        candidates,
-        cutrun_nfcore_normalized_key,
-        character(1)
+    for (candidate in candidates) {
+      key <- cutrun_nfcore_normalized_key(candidate)
+      if (!nzchar(key) || nchar(key) <= best_length) next
+      pattern <- paste0(
+        "(^|[^a-z0-9])",
+        gsub("([][{}()+*^$|\\\\.?])", "\\\\\\1", tolower(trimws(candidate)), perl = TRUE),
+        "($|[^a-z0-9])"
       )
-    )
-
-    keys <- keys[
-      nzchar(keys)
-    ]
-
-    for (key in keys) {
-      if (
-        nchar(key) > best_length &&
-        grepl(
-          key,
-          label_key,
-          fixed = TRUE
-        )
-      ) {
+      if (grepl(pattern, tolower(label))) {
         best_sample <- sample
         best_length <- nchar(key)
       }
@@ -6864,6 +6898,11 @@ cutrun_nfcore_progress_snapshot <- function(
     status
   )
 
+  trace <- cutrun_nfcore_resolve_failed_attempts(
+    trace,
+    workflow_state = status$state
+  )
+
   tasks <- rbind(
     trace,
     children
@@ -6891,7 +6930,7 @@ cutrun_nfcore_progress_snapshot <- function(
         )
 
         failed <- sum(
-          rows$status_class == "failed"
+          rows$status_class %in% c("failed", "ignored")
         )
 
         data.frame(
@@ -18790,7 +18829,7 @@ server <- function(input, output, session) {
       if (!is.null(example) && !scrna_example_selected) div(
         class = "read-source-note",
         tags$strong(paste("Bundled", analysis_label(new_analysis_key), "example")),
-        tags$p(if (identical(new_analysis_key, "scrna")) "Use the shared PBMC 3k filtered 10x matrix. Results default to your own ~/csl_results folder." else "Use the small example FASTQs and design matrix included with CodeSpringLab. Results are written only to your own results folder."),
+        tags$p(if (identical(new_analysis_key, "scrna")) "Use the shared PBMC 3k filtered 10x matrix. Results default to your own ~/csl_results folder." else if (identical(new_analysis_key, "cutrun")) "Use the shared K562 CUT&RUN demo (GSE145187): H3K4me3 and H3K27me3 with two replicates each, plus matched IgG controls, on human GRCh38. Results are written only to your own results folder." else "Use the small example FASTQs and design matrix included with CodeSpringLab. Results are written only to your own results folder."),
         actionButton("use_example_dataset", "Use Example Dataset", class = "btn-default")
       ) else NULL,
       if (scrna_example_selected) tagList(

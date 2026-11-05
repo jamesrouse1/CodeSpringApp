@@ -150,6 +150,20 @@ cutrun_nfcore_result_mapping <- function(
     x <- empty
   }
 
+  # sample_mapping.tsv has one row per sequencing lane; results are
+  # per sample, so keep a single row for each CodeSpring sample.
+  if (NROW(x)) {
+    x <- x[
+      !duplicated(
+        as.character(
+          x$codespring_sample
+        )
+      ),
+      ,
+      drop = FALSE
+    ]
+  }
+
   assign(
     key,
     list(
@@ -806,23 +820,15 @@ cutrun_nfcore_peak_files <- function(
       "MACS2"
     )
   ) {
+    # Only MACS2 peak calls count. MACS2 also writes *_summits.bed and
+    # *.peaks.cut.bed beside each narrowPeak, which would otherwise tie
+    # with it during sample matching and hide the peaks entirely.
     return(
       files[
         grepl(
-          "macs",
-          paths_lower,
-          fixed = TRUE
-        ) |
-          grepl(
-            "narrowpeak",
-            paths_lower,
-            fixed = TRUE
-          ) |
-          grepl(
-            "broadpeak",
-            paths_lower,
-            fixed = TRUE
-          )
+          "\\.(narrowpeak|broadpeak)$",
+          paths_lower
+        )
       ]
     )
   }
@@ -1150,6 +1156,9 @@ cutrun_nfcore_alignment_summary_table <- function(project) {
   if (!NROW(mapping) || !all(required %in% names(mapping))) {
     return(data.frame(stringsAsFactors = FALSE))
   }
+
+  # One row per sample, not per sequencing lane.
+  mapping <- mapping[!duplicated(as.character(mapping$codespring_sample)), , drop = FALSE]
 
   bowtie2 <- read_multiqc("multiqc_bowtie2.txt")
   flagstat <- read_multiqc("multiqc_samtools_flagstat.txt")

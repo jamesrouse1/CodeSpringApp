@@ -12,6 +12,10 @@ lab_root="${1:-$(cd -- "$repo_root/../CodeSpringLab-fix" && pwd)}"
 (cd "$repo_root" && Rscript --vanilla tests/test_sarek_sex_fallback.R)
 (cd "$repo_root" && Rscript --vanilla tests/test_sarek_live_activity.R)
 (cd "$repo_root" && Rscript --vanilla tests/test_sarek_submission.R)
+(cd "$repo_root" && Rscript --vanilla tests/test_cutrun_backend.R)
+(cd "$repo_root" && Rscript --vanilla tests/test_cutrun_nfcore_samplesheet.R)
+(cd "$repo_root" && Rscript --vanilla tests/test_cutrun_nfcore_submission.R)
+(cd "$repo_root" && Rscript --vanilla tests/test_cutrun_nfcore_workshop_fixes.R)
 (cd "$repo_root" && Rscript tests/smoke_test_app_helpers.R "$lab_root")
 CSL_CODESPRINGLAB_ROOT="$lab_root" "$repo_root/run_codespringweb.sh" --check-config
 echo "All CodeSpringApp tests passed."
