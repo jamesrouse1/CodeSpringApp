@@ -906,9 +906,31 @@ sarek_manifest_ui <- function(id) {
          margin-top:14px;
          overflow-x:auto;
        }
+       .sarek-results-controls {
+         position:relative;
+         z-index:3;
+         overflow:visible;
+       }
        .sarek-results-table table.dataTable th,
        .sarek-results-table table.dataTable td {
          white-space:nowrap;
+       }
+       .sarek-variant-table .dataTables_scrollBody table.dataTable {
+         min-width:1900px;
+       }
+       .sarek-variant-table table.dataTable th,
+       .sarek-variant-table table.dataTable td {
+         min-width:110px;
+       }
+       .sarek-explorer-view {
+         position:relative;
+         z-index:1;
+         max-height:76vh;
+         overflow:auto;
+         margin-top:18px;
+         padding:16px;
+         border:1px solid #d7e0ea;
+         background:#fff;
        }"
     )),
     shiny::div(
@@ -1029,7 +1051,10 @@ sarek_manifest_ui <- function(id) {
         shiny::selectInput(
           ns("preset"),
           "Analysis preset",
-          choices = c("Core, mode-aware variant calling" = "core"),
+          choices = c(
+            "Core, mode-aware variant calling" = "core",
+            "Small variants + VEP (report)" = "small_variants_vep"
+          ),
           selected = "core",
           selectize = FALSE
         )
@@ -1043,6 +1068,8 @@ sarek_manifest_ui <- function(id) {
           placeholder = "/absolute/path/results/sarek/user"
         ),
         shiny::actionButton(ns("browse_results_root"), "Browse server folder"),
+        shiny::actionButton(ns("save_results_root"), "Save as my Sarek default"),
+        shiny::uiOutput(ns("default_results_root_status")),
         shiny::tags$p(
           class = "sarek-storage-note",
           "Final results, reports, and deliverables will be stored here."
@@ -1116,6 +1143,8 @@ sarek_manifest_ui <- function(id) {
                   shiny::actionButton(ns("browse_history_root"), "Browse server folder"),
                   shiny::actionButton(ns("refresh_runs"), "Refresh runs")
                 ),
+                shiny::actionButton(ns("save_history_root"), "Save this as my Sarek default"),
+                shiny::uiOutput(ns("history_default_results_root_status")),
                 shiny::tags$p(
                   class = "muted small-note",
                   "Runs are discovered from their private CodeSpring submission records. Active status refreshes automatically."
@@ -1128,12 +1157,12 @@ sarek_manifest_ui <- function(id) {
           )
         ),
         shiny::tabPanel(
-          "Results",
-          value = "results",
+          "Files",
+          value = "files",
           shiny::div(
             class = "progress-header-row",
             shiny::div(
-              shiny::h3("Sarek results"),
+              shiny::h3("Sarek files"),
               shiny::tags$p(
                 class = "muted",
                 "Choose a submitted run and find its reports, variants, alignments, and other result files."
@@ -1148,9 +1177,101 @@ sarek_manifest_ui <- function(id) {
             )
           ),
           shiny::uiOutput(ns("selected_results_summary")),
+          shiny::div(class = "sarek-results-controls", shiny::uiOutput(ns("files_filters"))),
           shiny::div(
             class = "sarek-results-table",
             sarek_manifest_table_output(ns("results_file_table"))
+          )
+        ),
+        shiny::tabPanel(
+          "Results Explorer",
+          value = "explorer",
+          shiny::div(class = "sarek-results-controls", shiny::fluidRow(
+            shiny::column(6, shiny::uiOutput(ns("explorer_run_selector"))),
+            shiny::column(4, shiny::uiOutput(ns("explorer_sample_selector"))),
+            shiny::column(2, shiny::br(), shiny::actionButton(ns("refresh_explorer"), "Refresh"))
+          )),
+          shiny::tabsetPanel(
+            id = ns("explorer_sections"),
+            shiny::tabPanel(
+              "QC",
+              shiny::h4("Pipeline QC"),
+              shiny::div(class = "sarek-results-controls", shiny::uiOutput(ns("qc_selector"))),
+              shiny::downloadButton(ns("download_qc"), "Download selected QC report"),
+              shiny::div(class = "sarek-explorer-view", shiny::uiOutput(ns("qc_preview")))
+            ),
+            shiny::tabPanel(
+              "Variants",
+              shiny::h4("Variant records"),
+              shiny::uiOutput(ns("variant_scope")),
+              shiny::downloadButton(ns("download_variants"), "Download inspected records"),
+              shiny::div(class = "sarek-results-table sarek-variant-table", sarek_manifest_table_output(ns("variants_table")))
+            ),
+            shiny::tabPanel(
+              "ClinVar",
+              shiny::h4("ClinVar annotations"),
+              shiny::tags$p(class = "muted", "Optional post-run annotation. Select a Sarek VCF and an indexed ClinVar VCF for the same genome build. Matching requires identical chromosome, position, REF, and ALT; original calls are preserved."),
+              shiny::div(class = "sarek-results-controls", shiny::uiOutput(ns("clinvar_controls"))),
+              shiny::actionButton(ns("start_clinvar"), "Run ClinVar annotation"),
+                shiny::hr(),
+                shiny::h4("Annotate several VCFs"),
+                shiny::uiOutput(ns("clinvar_batch_selector")),
+                shiny::actionButton(ns("start_clinvar_batch"), "Submit selected VCFs"),
+              shiny::uiOutput(ns("clinvar_job_message")),
+              shiny::h4("Previous ClinVar jobs"),
+              shiny::tableOutput(ns("clinvar_jobs")),
+              shiny::uiOutput(ns("clinvar_log_selector")),
+              shiny::verbatimTextOutput(ns("clinvar_log")),
+              shiny::hr(),
+              shiny::h4("Browse annotated output"),
+              shiny::div(
+                class = "sarek-results-controls",
+                shiny::uiOutput(ns("clinvar_output_selector")),
+                shiny::selectInput(
+                  ns("clinvar_record_mode"), "Records to show",
+                  choices = c(
+                    "All records in preview" = "all",
+                    "With ClinVar classification only" = "classified"
+                  ),
+                  selected = "all", selectize = FALSE
+                )
+              ),
+              shiny::uiOutput(ns("clinvar_scope")),
+              shiny::downloadButton(ns("download_clinvar"), "Export preview CSV"),
+              shiny::downloadButton(ns("download_clinvar_vcf"), "Download selected VCF"),
+              shiny::div(class = "sarek-results-table sarek-variant-table", sarek_manifest_table_output(ns("clinvar_table"))),
+                shiny::hr(),
+                shiny::h4("ClinVar classifications across files"),
+                shiny::tags$p(
+                  class = "muted",
+                  "Choose annotated VCFs, then scan for records with CLNSIG. ",
+                  "The table shows the first 1,000 matches; the CSV export includes all matches."
+                ),
+                shiny::uiOutput(ns("clinvar_multi_selector")),
+                shiny::actionButton(ns("clinvar_scan_multi"), "Scan selected VCFs"),
+                shiny::uiOutput(ns("clinvar_multi_scope")),
+                shiny::downloadButton(ns("download_clinvar_multi"), "Export all matches CSV"),
+                shiny::div(
+                  class = "sarek-results-table sarek-variant-table",
+                  shiny::div(
+                    style = "max-height: 520px; overflow-y: auto; overflow-x: auto;",
+                    shiny::tableOutput(ns("clinvar_multi_table"))
+                  )
+                )
+            ),
+            shiny::tabPanel(
+              "Plots",
+              shiny::h4("Pipeline plots"),
+              shiny::div(class = "sarek-results-controls", shiny::uiOutput(ns("plot_selector"))),
+              shiny::downloadButton(ns("download_plot"), "Download selected plot"),
+              shiny::div(class = "sarek-explorer-view", shiny::uiOutput(ns("plot_preview")))
+            ),
+            shiny::tabPanel(
+              "Report",
+              shiny::actionButton(ns("build_oncoplot"), "Build oncoplot"),
+              shiny::downloadButton(ns("download_report"), "Download HTML report"),
+              shiny::div(class = "sarek-explorer-view", shiny::uiOutput(ns("report_view")))
+            )
           )
         )
       )
@@ -1162,6 +1283,7 @@ sarek_manifest_server <- function(
   id,
   default_results_root,
   default_work_root,
+  results_root_preference_path = NULL,
   created_by = "unknown",
   allowed_input_roots = NULL,
   allowed_results_roots = NULL,
@@ -1174,6 +1296,7 @@ sarek_manifest_server <- function(
   max_auto_bam_inspections = 20L,
   run_catalog_handler = sarek_submission_catalog,
   run_status_handler = sarek_run_status,
+  clinvar_submit_handler = NULL,
   run_refresh_ms = 15000L
 ) {
   shiny::moduleServer(id, function(input, output, session) {
@@ -1195,6 +1318,8 @@ sarek_manifest_server <- function(
       result = NULL
     ))
     submission_in_progress <- shiny::reactiveVal(FALSE)
+    default_results_root_status <- shiny::reactiveVal("")
+    clinvar_job_state <- shiny::reactiveVal("")
     run_history_refresh <- shiny::reactiveVal(Sys.time())
     run_poll <- shiny::reactiveTimer(max(5000L, as.integer(run_refresh_ms)), session = session)
 
@@ -1238,10 +1363,62 @@ sarek_manifest_server <- function(
     })
 
     shiny::observe({
-      shiny::updateTextInput(session, "results_root", value = default_results_root)
+      current_results_root <- if (nzchar(sarek_text(results_root_preference_path))) {
+        sarek_results_read_default_root(
+          results_root_preference_path, fallback = default_results_root
+        )
+      } else {
+        default_results_root
+      }
+      shiny::updateTextInput(session, "results_root", value = current_results_root)
       shiny::updateTextInput(session, "work_root", value = default_work_root)
-      shiny::updateTextInput(session, "history_root", value = default_results_root)
+      shiny::updateTextInput(session, "history_root", value = current_results_root)
     })
+
+    output$default_results_root_status <- shiny::renderUI({
+      message <- default_results_root_status()
+      if (nzchar(message)) shiny::tags$p(class = "muted small-note", message)
+    })
+    shiny::observeEvent(input$save_results_root, {
+      tryCatch({
+        shiny::req(nzchar(sarek_text(results_root_preference_path)))
+        saved <- sarek_results_save_default_root(
+          input$results_root, results_root_preference_path,
+          allowed_roots = allowed_results_roots
+        )
+        shiny::updateTextInput(session, "history_root", value = saved)
+        default_results_root_status(paste("Sarek results default saved:", saved))
+        run_history_refresh(Sys.time())
+      }, error = function(error) {
+        default_results_root_status(paste("Could not save default:", conditionMessage(error)))
+      })
+    }, ignoreInit = TRUE)
+
+    output$history_default_results_root_status <- shiny::renderUI({
+      message <- default_results_root_status()
+      if (nzchar(message)) shiny::tags$p(class = "muted small-note", message)
+    })
+
+    shiny::observeEvent(input$save_history_root, {
+      tryCatch({
+        preference_path <- sarek_text(results_root_preference_path)
+        if (!nzchar(preference_path)) {
+          stop("Saving a Sarek default is unavailable in this session.", call. = FALSE)
+        }
+        saved <- sarek_results_save_default_root(
+          input$history_root, preference_path,
+          allowed_roots = allowed_results_roots
+        )
+        shiny::updateTextInput(session, "history_root", value = saved)
+        shiny::updateTextInput(session, "results_root", value = saved)
+        default_results_root_status(paste("Sarek results default saved:", saved))
+        run_history_refresh(Sys.time())
+      }, error = function(error) {
+        default_results_root_status(
+          paste("Could not save default:", conditionMessage(error))
+        )
+      })
+    }, ignoreInit = TRUE)
 
     request_browser <- function(target, current, input_type = "text", append = FALSE) {
       if (!is.function(browse_handler)) {
@@ -1286,6 +1463,9 @@ sarek_manifest_server <- function(
     }, ignoreInit = TRUE)
 
     shiny::observeEvent(input$refresh_results, {
+      run_history_refresh(Sys.time())
+    }, ignoreInit = TRUE)
+    shiny::observeEvent(input$refresh_explorer, {
       run_history_refresh(Sys.time())
     }, ignoreInit = TRUE)
 
@@ -1424,6 +1604,27 @@ sarek_manifest_server <- function(
       sarek_result_file_catalog(sarek_text(run$output_dir), max_files = 5000L)
     })
 
+    files_artifacts <- shiny::reactive({
+      sarek_results_artifact_catalog(as.list(selected_results_run()))
+    })
+    output$files_filters <- shiny::renderUI({
+      catalog <- files_artifacts()
+      samples <- c("All", sarek_explorer_samples(catalog))
+      categories <- c("All", sort(unique(as.character(catalog$category))))
+      sample <- shiny::isolate(sarek_text(input$files_sample, "All"))
+      category <- shiny::isolate(sarek_text(input$files_category, "All"))
+      shiny::fluidRow(
+        shiny::column(6, shiny::selectInput(
+          ns("files_sample"), "Sample", choices = samples,
+          selected = if (sample %in% samples) sample else "All", selectize = FALSE
+        )),
+        shiny::column(6, shiny::selectInput(
+          ns("files_category"), "Output type", choices = categories,
+          selected = if (category %in% categories) category else "All", selectize = FALSE
+        ))
+      )
+    })
+
     output$selected_results_summary <- shiny::renderUI({
       run <- selected_results_run()
       status <- if (is.function(run_status_handler)) {
@@ -1461,9 +1662,15 @@ sarek_manifest_server <- function(
     })
 
     results_table_data <- shiny::reactive({
-      files <- results_file_catalog()
-      shown <- files[, c("file", "folder", "type", "size", "modified"), drop = FALSE]
-      names(shown) <- c("File", "Folder", "Type", "Size", "Modified")
+      files <- files_artifacts()
+      if (nzchar(sarek_text(input$files_sample)) && input$files_sample != "All") {
+        files <- sarek_results_filter_sample(files, input$files_sample)
+      }
+      if (nzchar(sarek_text(input$files_category)) && input$files_category != "All") {
+        files <- files[files$category == input$files_category, , drop = FALSE]
+      }
+      shown <- files[, c("file", "folder", "sample", "category", "size", "modified"), drop = FALSE]
+      names(shown) <- c("File", "Folder", "Sample", "Output type", "Size", "Modified")
       shown
     })
 
@@ -1477,8 +1684,9 @@ sarek_manifest_server <- function(
           filter = "top",
           selection = "none",
           options = list(
-            pageLength = 25,
-            lengthMenu = c(10, 25, 50, 100),
+            pageLength = 50,
+            lengthMenu = c(25, 50, 100, 250),
+            deferRender = TRUE,
             autoWidth = TRUE,
             scrollX = TRUE
           ),
@@ -1493,10 +1701,726 @@ sarek_manifest_server <- function(
       }, striped = TRUE, bordered = TRUE, spacing = "s", rownames = FALSE)
     }
 
+    output$explorer_run_selector <- shiny::renderUI({
+      catalog <- run_catalog()
+      if (!NROW(catalog)) return(shiny::div(class = "empty-box", "No submitted Sarek runs found."))
+      labels <- vapply(seq_len(NROW(catalog)), function(i)
+        sarek_run_history_label(as.list(catalog[i, , drop = FALSE])), character(1))
+      choices <- stats::setNames(as.character(catalog$run_id), labels)
+      selected <- shiny::isolate(sarek_text(
+        input$explorer_run, sarek_text(input$selected_run, catalog$run_id[[1]])
+      ))
+      if (!selected %in% catalog$run_id) selected <- catalog$run_id[[1]]
+      shiny::selectInput(ns("explorer_run"), "Run", choices, selected = selected, selectize = FALSE)
+    })
+    explorer_run <- shiny::reactive({
+      run_history_refresh()
+      input$history_root
+      selected <- sarek_text(input$explorer_run)
+      catalog <- shiny::isolate(run_catalog())
+      shiny::req(NROW(catalog))
+      if (!selected %in% catalog$run_id) selected <- catalog$run_id[[1]]
+      as.list(catalog[catalog$run_id == selected, , drop = FALSE][1, , drop = FALSE])
+    })
+    explorer_catalog <- shiny::reactive({
+      run <- explorer_run()
+      sarek_results_artifact_catalog(run)
+    })
+    output$explorer_sample_selector <- shiny::renderUI({
+      samples <- c("All", sarek_explorer_samples(explorer_catalog()))
+      selected <- shiny::isolate(sarek_text(input$explorer_sample, "All"))
+      shiny::selectInput(ns("explorer_sample"), "Sample",
+                         samples, selected = if (selected %in% samples) selected else "All",
+                         selectize = FALSE)
+    })
+    explorer_sample <- shiny::reactive({
+      selected <- sarek_text(input$explorer_sample, "All")
+      if (!selected %in% c("All", sarek_explorer_samples(explorer_catalog()))) "All" else selected
+    })
+    scoped_catalog <- shiny::reactive({
+      catalog <- explorer_catalog()
+      if (explorer_sample() != "All") catalog <- sarek_results_filter_sample(catalog, explorer_sample())
+      catalog
+    })
+    qc_catalog <- shiny::reactive({
+      sarek_explorer_qc(explorer_catalog(), explorer_sample())
+    })
+    plot_catalog <- shiny::reactive(sarek_explorer_plots(scoped_catalog()))
+    artifact_selector <- function(catalog, id, label) {
+      if (!NROW(catalog)) return(shiny::div(class = "empty-box", "No matching outputs were found for this run or sample."))
+      labels <- paste0(basename(as.character(catalog$file)),
+                       ifelse(!is.na(catalog$sample) & nzchar(catalog$sample),
+                              paste0(" · ", catalog$sample), ""))
+      labels <- make.unique(labels, sep = " · ")
+      shiny::selectInput(ns(id), label,
+                         stats::setNames(as.character(seq_len(NROW(catalog))), labels),
+                         selected = "1", selectize = FALSE)
+    }
+    selected_artifact <- function(catalog, value) {
+      index <- suppressWarnings(as.integer(value))
+      if (!length(index) || is.na(index) || index < 1L || index > NROW(catalog)) return(NULL)
+      catalog[index, , drop = FALSE]
+    }
+    output$qc_selector <- shiny::renderUI(artifact_selector(qc_catalog(), "qc_artifact", "QC report"))
+    output$plot_selector <- shiny::renderUI(artifact_selector(plot_catalog(), "plot_artifact", "Plot"))
+    output$qc_preview <- shiny::renderUI({
+      row <- selected_artifact(qc_catalog(), input$qc_artifact)
+      if (is.null(row)) return(shiny::div(class = "empty-box", "Choose an available QC report."))
+      sarek_explorer_preview(row$path[[1]], explorer_run()$output_dir)
+    })
+    output$plot_preview <- shiny::renderUI({
+      row <- selected_artifact(plot_catalog(), input$plot_artifact)
+      if (is.null(row)) return(shiny::div(class = "empty-box", "Choose an available plot."))
+      sarek_explorer_preview(row$path[[1]], explorer_run()$output_dir)
+    })
+    download_artifact <- function(catalog, value, target) {
+      row <- selected_artifact(catalog, value)
+      shiny::req(!is.null(row))
+      path <- sarek_explorer_file(row$path[[1]], explorer_run()$output_dir)
+      shiny::req(nzchar(path))
+      shiny::req(isTRUE(file.copy(path, target, overwrite = TRUE)))
+    }
+    output$download_qc <- shiny::downloadHandler(
+      filename = function() {
+        row <- selected_artifact(qc_catalog(), input$qc_artifact)
+        if (is.null(row)) "sarek-qc.html" else basename(row$file[[1]])
+      },
+      content = function(file) download_artifact(qc_catalog(), input$qc_artifact, file)
+    )
+    output$download_plot <- shiny::downloadHandler(
+      filename = function() {
+        row <- selected_artifact(plot_catalog(), input$plot_artifact)
+        if (is.null(row)) "sarek-plot.png" else basename(row$file[[1]])
+      },
+      content = function(file) download_artifact(plot_catalog(), input$plot_artifact, file)
+    )
+    explorer_variants <- shiny::reactive({
+      sarek_explorer_variants(
+        sarek_clinvar_sources(explorer_catalog()),
+        explorer_sample(),
+        explorer_run()$output_dir
+      )
+    })
+    report_catalog <- shiny::reactive({
+      catalog <- explorer_catalog()
+      annotated <- sarek_clinvar_outputs(catalog)
+      rbind(annotated, catalog[!catalog$path %in% annotated$path, , drop = FALSE])
+    })
+    report_variants <- shiny::reactive({
+      sarek_explorer_variants(report_catalog(), "All", explorer_run()$output_dir)
+    })
+    output$variant_scope <- shiny::renderUI({
+      rows <- explorer_variants()
+      shiny::tags$p(class = "muted",
+        NROW(rows), " records inspected in ", attr(rows, "files_scanned"),
+        " of ", attr(rows, "files_available"), " VCF files.",
+        if (isTRUE(attr(rows, "limited"))) " This is a bounded preview of the run's VCFs." else "")
+    })
+    output$clinvar_controls <- shiny::renderUI({
+      run <- explorer_run()
+      manifest <- sarek_results_read_manifest(run)
+      assembly <- if (is.null(manifest)) "Unknown" else sarek_text(manifest$reference$assembly, "Unknown")
+      catalog <- sarek_clinvar_sources(explorer_catalog())
+      if (explorer_sample() != "All") catalog <- sarek_results_filter_sample(catalog, explorer_sample())
+      labels <- make.unique(paste0(basename(as.character(catalog$file)), " · ", catalog$folder), sep = " · ")
+      current <- shiny::isolate(sarek_text(input$clinvar_reference))
+      default_ref <- Sys.getenv(paste0("CSL_SAREK_CLINVAR_VCF_", assembly), unset = "")
+      shiny::tagList(
+        shiny::tags$p(class = "muted", "Run assembly: ", assembly,
+                      ". The ClinVar VCF is read from the server; download and index the chosen release separately."),
+        shiny::selectInput(ns("clinvar_source"), "VCF to annotate",
+          choices = stats::setNames(as.character(seq_len(NROW(catalog))), labels), selectize = FALSE),
+        shiny::textInput(ns("clinvar_reference"), "Indexed ClinVar VCF path on server (.vcf.gz)",
+          value = if (nzchar(current)) current else default_ref),
+        shiny::selectInput(ns("clinvar_assembly"), "Assembly of ClinVar VCF",
+          choices = c("Confirm reference assembly" = "", "GRCh37", "GRCh38"), selected = "", selectize = FALSE)
+      )
+    })
+    output$clinvar_batch_selector <- shiny::renderUI({
+      catalog <- sarek_clinvar_sources(explorer_catalog())
+      if (explorer_sample() != "All") {
+        catalog <- sarek_results_filter_sample(catalog, explorer_sample())
+      }
+      if (!NROW(catalog)) {
+        return(shiny::tags$p("No original VCFs are available for this sample."))
+      }
+      labels <- make.unique(
+        paste0(basename(as.character(catalog$file)), " · ", catalog$folder),
+        sep = " · "
+      )
+      paths <- as.character(catalog$path)
+      selected <- shiny::isolate(input$clinvar_batch_files)
+      selected <- intersect(as.character(selected), paths)
+      shiny::tagList(
+        shiny::selectizeInput(
+          ns("clinvar_batch_files"), "Original VCFs to annotate",
+          choices = stats::setNames(paths, labels),
+          selected = selected, multiple = TRUE, width = "100%",
+          options = list(dropdownParent = "body")
+        ),
+        shiny::actionButton(ns("clinvar_batch_select_all"), "Select all VCFs")
+      )
+    })
+
+    shiny::observeEvent(input$clinvar_batch_select_all, {
+      catalog <- sarek_clinvar_sources(explorer_catalog())
+      if (explorer_sample() != "All") {
+        catalog <- sarek_results_filter_sample(catalog, explorer_sample())
+      }
+      shiny::updateSelectizeInput(
+        session, "clinvar_batch_files",
+        selected = as.character(catalog$path)
+      )
+    }, ignoreInit = TRUE)
+
+    output$clinvar_job_message <- shiny::renderUI({
+      message <- clinvar_job_state()
+      if (nzchar(message)) shiny::tags$p(class = "muted", message)
+    })
+    output$clinvar_jobs <- shiny::renderTable({
+      run_poll()
+      run_history_refresh()
+
+      jobs <- sarek_clinvar_jobs(explorer_run())
+      if (!NROW(jobs)) return(NULL)
+
+      shown <- jobs[, c(
+        "Source",
+        "Output",
+        "Job",
+        "Status",
+        "ExitCode",
+        "ErrorLog"
+      ), drop = FALSE]
+
+      names(shown) <- c(
+        "Source",
+        "Output",
+        "Job",
+        "Status",
+        "Exit code",
+        "Error log"
+      )
+
+      shown
+    }, striped = TRUE, bordered = TRUE, rownames = FALSE)
+
+    output$clinvar_log_selector <- shiny::renderUI({
+      run_poll()
+      run_history_refresh()
+
+      jobs <- sarek_clinvar_jobs(explorer_run())
+      if (!NROW(jobs)) return(NULL)
+
+      labels <- paste0(
+        jobs$Source,
+        " · ",
+        jobs$Status,
+        " · job ",
+        jobs$Job
+      )
+
+      choices <- stats::setNames(
+        as.character(seq_len(NROW(jobs))),
+        labels
+      )
+
+      selected <- shiny::isolate(
+        sarek_text(input$clinvar_log_job, "1")
+      )
+
+      if (!selected %in% unname(choices)) {
+        selected <- unname(choices)[[1]]
+      }
+
+      shiny::selectInput(
+        ns("clinvar_log_job"),
+        "ClinVar job log",
+        choices = choices,
+        selected = selected,
+        selectize = FALSE
+      )
+    })
+
+    output$clinvar_log <- shiny::renderText({
+      run_poll()
+      run_history_refresh()
+
+      jobs <- sarek_clinvar_jobs(explorer_run())
+
+      if (!NROW(jobs)) {
+        return("No ClinVar jobs have been submitted.")
+      }
+
+      index <- suppressWarnings(
+        as.integer(input$clinvar_log_job)
+      )
+
+      if (!length(index) || is.na(index) ||
+          index < 1L || index > NROW(jobs)) {
+        return("Select a ClinVar job to view its log.")
+      }
+
+      row <- jobs[index, , drop = FALSE]
+
+      heading <- paste(
+        "Job", row$Job[[1]],
+        "·", row$Status[[1]],
+        if (nzchar(row$ExitCode[[1]])) {
+          paste("· exit", row$ExitCode[[1]])
+        } else {
+          ""
+        }
+      )
+
+      if (!nzchar(row$LogText[[1]])) {
+        return(paste(heading, "\n\nNo log output is available yet."))
+      }
+
+      paste(heading, "\n\n", row$LogText[[1]])
+    })
+
+    shiny::observeEvent(input$start_clinvar_batch, {
+      tryCatch({
+        shiny::req(is.function(clinvar_submit_handler))
+        run <- explorer_run()
+        status <- if (is.function(run_status_handler)) {
+          run_status_handler(run)
+        } else {
+          list(state = run$status)
+        }
+        if (!identical(sarek_normalize_slurm_state(status$state), "COMPLETED")) {
+          stop("Wait for the Sarek run to complete before starting ClinVar annotation.", call. = FALSE)
+        }
+        manifest <- sarek_results_read_manifest(run)
+        if (is.null(manifest)) {
+          stop("The recorded Sarek manifest is unavailable.", call. = FALSE)
+        }
+        catalog <- sarek_clinvar_sources(explorer_catalog())
+        if (explorer_sample() != "All") {
+          catalog <- sarek_results_filter_sample(catalog, explorer_sample())
+        }
+        selected <- unique(as.character(input$clinvar_batch_files))
+        selected <- selected[!is.na(selected) & nzchar(selected)]
+        if (!length(selected)) {
+          stop("Select at least one original VCF.", call. = FALSE)
+        }
+        if (!all(selected %in% as.character(catalog$path))) {
+          stop("The VCF selection changed. Select the files again.", call. = FALSE)
+        }
+        submitted <- character()
+        skipped <- character()
+        failed <- character()
+        previous <- sarek_clinvar_jobs(run)
+        output_dir <- normalizePath(run$output_dir, winslash = "/", mustWork = TRUE)
+        for (path in selected) {
+          row <- catalog[which(as.character(catalog$path) == path)[1L], , drop = FALSE]
+          label <- basename(row$file[[1]])
+          relative <- substring(dirname(path), nchar(output_dir) + 2L)
+          target <- file.path(
+            output_dir, "annotation", "clinvar", relative,
+            paste0(
+              sub("\\.vcf(\\.gz)?$", "", basename(path), ignore.case = TRUE),
+              ".clinvar.vcf.gz"
+            )
+          )
+          completed <- NROW(previous) > 0L && any(
+            !is.na(previous$Path) & previous$Path == target &
+              !is.na(previous$Status) & previous$Status == "COMPLETED"
+          )
+          if (file.exists(target) || completed) {
+            reason <- if (file.exists(target)) {
+              "output already exists"
+            } else {
+              "completed job recorded"
+            }
+            skipped <- c(skipped, paste0(label, " (", reason, ")"))
+            next
+          }
+          tryCatch({
+            job <- clinvar_submit_handler(
+              run, manifest, path,
+              input$clinvar_reference, input$clinvar_assembly
+            )
+            submitted <- c(submitted, paste0(label, " (job ", job$job_id, ")"))
+          }, error = function(error) {
+            failed <- c(failed, paste0(label, ": ", conditionMessage(error)))
+          })
+        }
+        clinvar_job_state(paste(
+          if (length(submitted)) {
+            paste("Submitted", length(submitted), "job(s):", paste(submitted, collapse = "; "))
+          } else {
+            "No jobs submitted."
+          },
+          if (length(skipped)) {
+            paste("Skipped:", paste(skipped, collapse = "; "))
+          } else {
+            ""
+          },
+          if (length(failed)) {
+            paste("Could not submit:", paste(failed, collapse = "; "))
+          } else {
+            ""
+          }
+        ))
+        run_history_refresh(Sys.time())
+      }, error = function(error) clinvar_job_state(conditionMessage(error)))
+    }, ignoreInit = TRUE)
+
+    shiny::observeEvent(input$start_clinvar, {
+      tryCatch({
+        shiny::req(is.function(clinvar_submit_handler))
+        run <- explorer_run()
+        status <- if (is.function(run_status_handler)) run_status_handler(run) else list(state = run$status)
+        if (!identical(sarek_normalize_slurm_state(status$state), "COMPLETED")) {
+          stop("Wait for the Sarek run to complete before starting ClinVar annotation.", call. = FALSE)
+        }
+        catalog <- sarek_clinvar_sources(explorer_catalog())
+        if (explorer_sample() != "All") catalog <- sarek_results_filter_sample(catalog, explorer_sample())
+        row <- selected_artifact(catalog, input$clinvar_source)
+        if (is.null(row)) stop("Select a source VCF first.", call. = FALSE)
+        manifest <- sarek_results_read_manifest(run)
+        if (is.null(manifest)) stop("The recorded Sarek manifest is unavailable.", call. = FALSE)
+        submitted <- clinvar_submit_handler(run, manifest, row$path[[1]],
+                                             input$clinvar_reference, input$clinvar_assembly)
+        clinvar_job_state(paste("ClinVar job", submitted$job_id, "submitted for", basename(row$file[[1]]),
+                                 ". Refresh after it completes to view annotated records."))
+        run_history_refresh(Sys.time())
+      }, error = function(error) clinvar_job_state(conditionMessage(error)))
+    }, ignoreInit = TRUE)
+    clinvar_view_catalog <- shiny::reactive({
+      catalog <- sarek_clinvar_outputs(explorer_catalog())
+      if (explorer_sample() != "All") {
+        catalog <- sarek_results_filter_sample(catalog, explorer_sample())
+      }
+      if (!NROW(catalog)) return(catalog)
+      catalog <- catalog[!duplicated(catalog$path), , drop = FALSE]
+      catalog[order(catalog$folder, catalog$file), , drop = FALSE]
+    })
+
+    output$clinvar_output_selector <- shiny::renderUI({
+      catalog <- clinvar_view_catalog()
+      if (!NROW(catalog)) {
+        return(shiny::tags$p(
+          "No annotated VCF outputs were found for this run and sample. ",
+          "Check the annotation jobs above and refresh after completion."
+        ))
+      }
+
+      callers <- vapply(seq_len(NROW(catalog)), function(i) {
+        sarek_explorer_caller(catalog$folder[[i]], catalog$file[[i]])
+      }, character(1))
+      labels <- paste0(
+        callers, " | ", catalog$folder, "/", basename(catalog$file)
+      )
+      paths <- as.character(catalog$path)
+      selected <- shiny::isolate(sarek_text(input$clinvar_output_file))
+      if (!selected %in% paths) selected <- paths[[1]]
+
+      shiny::selectInput(
+        ns("clinvar_output_file"), "Annotated VCF to view",
+        choices = stats::setNames(paths, labels),
+        selected = selected, selectize = FALSE, width = "100%"
+      )
+    })
+
+    output$clinvar_multi_selector <- shiny::renderUI({
+      catalog <- clinvar_view_catalog()
+      if (!NROW(catalog)) {
+        return(shiny::tags$p("No annotated VCF outputs are available."))
+      }
+      callers <- vapply(seq_len(NROW(catalog)), function(i) {
+        sarek_explorer_caller(catalog$folder[[i]], catalog$file[[i]])
+      }, character(1))
+      paths <- as.character(catalog$path)
+      labels <- make.unique(
+        paste0(callers, " | ", catalog$folder, "/", basename(catalog$file)),
+        sep = " · "
+      )
+      previous <- shiny::isolate(input$clinvar_multi_files)
+      selected <- if (is.null(previous)) paths else intersect(as.character(previous), paths)
+      shiny::selectizeInput(
+        ns("clinvar_multi_files"), "Annotated VCFs",
+        choices = stats::setNames(paths, labels),
+        selected = selected, multiple = TRUE, width = "100%"
+      )
+    })
+
+    clinvar_multi_catalog <- shiny::reactive({
+      catalog <- clinvar_view_catalog()
+      selected <- unique(as.character(input$clinvar_multi_files))
+      selected <- selected[!is.na(selected) & nzchar(selected)]
+      catalog[catalog$path %in% selected, , drop = FALSE]
+    })
+
+    clinvar_multi_data <- shiny::eventReactive(input$clinvar_scan_multi, {
+      catalog <- clinvar_multi_catalog()
+      if (!NROW(catalog)) {
+        return(list(
+          rows = sarek_explorer_empty_variants(), matches = 0L,
+          files = 0L, error = "Select at least one annotated VCF."
+        ))
+      }
+      tryCatch(
+        sarek_explorer_clinsig_files(
+          catalog, explorer_run()$output_dir, preview_limit = 1000L
+        ),
+        error = function(error) list(
+          rows = sarek_explorer_empty_variants(), matches = 0L,
+          files = 0L, error = conditionMessage(error)
+        )
+      )
+    }, ignoreInit = TRUE)
+
+    output$clinvar_multi_scope <- shiny::renderUI({
+      if (is.null(input$clinvar_scan_multi) || input$clinvar_scan_multi < 1L) {
+        return(shiny::tags$p(
+          class = "muted",
+          "Choose annotated VCFs above, then click Scan selected VCFs."
+        ))
+      }
+      data <- clinvar_multi_data()
+      if (nzchar(data$error)) {
+        return(shiny::tags$p(class = "muted", data$error))
+      }
+      shiny::tags$p(
+        class = "muted",
+        data$matches, " records with CLNSIG found across ",
+        data$files, " annotated VCF(s). Showing ",
+        NROW(data$rows), " in the table. CSV export includes all matches."
+      )
+    })
+
+    output$clinvar_multi_table <- shiny::renderTable({
+      data <- clinvar_multi_data()
+      if (nzchar(data$error) || !NROW(data$rows)) return(NULL)
+      data$rows
+    }, striped = TRUE, bordered = TRUE, rownames = FALSE)
+
+    output$download_clinvar_multi <- shiny::downloadHandler(
+      filename = function() "sarek_clinvar_all_matches.csv",
+      content = function(file) {
+        catalog <- clinvar_multi_catalog()
+        shiny::req(NROW(catalog) > 0L)
+        sarek_explorer_clinsig_files(
+          catalog, explorer_run()$output_dir,
+          preview_limit = 0L, csv_path = file
+        )
+      }
+    )
+
+    clinvar_view_file <- shiny::reactive({
+      catalog <- clinvar_view_catalog()
+      selected <- sarek_text(input$clinvar_output_file)
+      catalog[which(as.character(catalog$path) == selected), , drop = FALSE]
+    })
+
+    clinvar_view_data <- shiny::reactive({
+      file <- clinvar_view_file()
+      result <- list(
+        rows = sarek_explorer_empty_variants(),
+        error = "", limited = FALSE
+      )
+      if (NROW(file) != 1L) return(result)
+
+      tryCatch({
+        rows <- sarek_explorer_variants(
+          file,
+          sample = explorer_sample(),
+          output_dir = explorer_run()$output_dir,
+          max_files = 1L,
+          max_records = 1500L,
+          strict = TRUE
+        )
+        list(
+          rows = rows, error = "",
+          limited = isTRUE(attr(rows, "limited"))
+        )
+      }, error = function(error) {
+        result$error <- conditionMessage(error)
+        result
+      })
+    })
+
+    clinvar_has_classification <- function(rows) {
+      values <- trimws(as.character(rows$ClinVar))
+      !is.na(values) & nzchar(values) & values != "."
+    }
+
+    clinvar_variants <- shiny::reactive({
+      rows <- clinvar_view_data()$rows
+      if (identical(input$clinvar_record_mode, "classified")) {
+        rows <- rows[clinvar_has_classification(rows), , drop = FALSE]
+      }
+      rows
+    })
+
+    clinvar_view_job <- shiny::reactive({
+      run_poll()
+      run_history_refresh()
+      file <- clinvar_view_file()
+      if (NROW(file) != 1L) return(NULL)
+      jobs <- sarek_clinvar_jobs(explorer_run())
+      jobs <- jobs[which(jobs$Path == file$path[[1]]), , drop = FALSE]
+      if (!NROW(jobs)) return(NULL)
+      utils::tail(jobs, 1L)
+    })
+
+    output$clinvar_scope <- shiny::renderUI({
+      file <- clinvar_view_file()
+      if (NROW(file) != 1L) {
+        return(shiny::tags$p(class = "muted", "Select an annotated VCF above."))
+      }
+
+      preview <- clinvar_view_data()
+      rows <- preview$rows
+      job <- clinvar_view_job()
+      n_classified <- sum(clinvar_has_classification(rows))
+
+      message <- if (nzchar(preview$error)) {
+        paste("Could not read the selected VCF:", preview$error)
+      } else if (!NROW(rows)) {
+        "The selected VCF has a header but contains no variant records."
+      } else if (!n_classified && preview$limited) {
+        paste(
+          "No ClinVar classifications were found in these first 1,500 records.",
+          "Later records have not been inspected."
+        )
+      } else if (!n_classified) {
+        "No ClinVar classifications were found in this file."
+      } else {
+        ""
+      }
+
+      shiny::tagList(
+        shiny::tags$p(
+          shiny::tags$strong("Viewing one file: "),
+          basename(file$file[[1]])
+        ),
+        shiny::tags$div(
+          style = "overflow-wrap:anywhere; margin-bottom:10px;",
+          shiny::tags$code(file$path[[1]])
+        ),
+        if (!is.null(job)) shiny::tags$p(
+          "Latest recorded job: ", job$Job[[1]],
+          " | ", job$Status[[1]],
+          " | Exit code: ", job$ExitCode[[1]]
+        ),
+        if (!nzchar(preview$error)) shiny::tags$p(
+          NROW(rows), " records read; ",
+          n_classified, " with a ClinVar classification; ",
+          NROW(clinvar_variants()), " in the current preview mode. ",
+          if (preview$limited) {
+            "Preview capped at the first 1,500 records; these are not full-file counts."
+          } else {
+            "All records in this file were read."
+          }
+        ),
+        if (nzchar(message)) shiny::tags$p(
+          style = if (nzchar(preview$error)) "color:#a12622;" else "",
+          message
+        ),
+        shiny::tags$p(
+          class = "muted",
+          "Table searches apply only to loaded preview records. ",
+          "CSV export uses the selected preview mode before table searches. ",
+          "The VCF download contains the complete selected file."
+        )
+      )
+    })
+
+    explorer_table <- function(id, values) {
+      if (requireNamespace("DT", quietly = TRUE)) {
+        output[[id]] <- DT::renderDT({
+          DT::datatable(values(), rownames = FALSE, filter = "top",
+                        options = list(pageLength = 25, scrollX = TRUE, deferRender = TRUE,
+                          autoWidth = FALSE, columnDefs = list(
+                            list(width = "220px", targets = c(10, 11, 13, 14, 15, 16)),
+                            list(width = "145px", targets = "_all"))),
+                        class = "stripe hover compact")
+        })
+      } else {
+        output[[id]] <- shiny::renderTable(utils::head(values(), 100L))
+      }
+    }
+    explorer_table("variants_table", explorer_variants)
+    explorer_table("clinvar_table", clinvar_variants)
+    output$download_variants <- shiny::downloadHandler(
+      filename = function() "sarek-inspected-variants.csv",
+      content = function(file) utils::write.csv(explorer_variants(), file, row.names = FALSE, na = "")
+    )
+    output$download_clinvar <- shiny::downloadHandler(
+      filename = function() {
+        selected <- clinvar_view_file()
+        if (NROW(selected) != 1L) return("clinvar-preview.csv")
+        stem <- sub("\\.vcf(\\.gz)?$", "", basename(selected$file[[1]]))
+        paste0(stem, "-", sarek_text(input$clinvar_record_mode, "all"), "-preview.csv")
+      },
+      content = function(file) {
+        shiny::req(NROW(clinvar_view_file()) == 1L)
+        shiny::req(!nzchar(clinvar_view_data()$error))
+        utils::write.csv(clinvar_variants(), file, row.names = FALSE, na = "")
+      }
+    )
+    output$download_clinvar_vcf <- shiny::downloadHandler(
+      filename = function() {
+        selected <- clinvar_view_file()
+        if (NROW(selected) != 1L) return("clinvar.vcf.gz")
+        basename(selected$file[[1]])
+      },
+      content = function(file) {
+        selected <- clinvar_view_file()
+        shiny::req(NROW(selected) == 1L)
+        path <- sarek_explorer_file(
+          selected$path[[1]], explorer_run()$output_dir
+        )
+        shiny::req(nzchar(path))
+        if (!file.copy(path, file, overwrite = TRUE)) {
+          stop("Could not copy the selected VCF for download.")
+        }
+      }
+    )
+    report_oncoplot <- shiny::reactiveVal(NULL)
+    shiny::observeEvent(input$build_oncoplot, {
+      run <- explorer_run()
+      data <- tryCatch(
+        sarek_report_oncoplot_data(
+          explorer_catalog(), sarek_text(run$output_dir),
+          sarek_results_read_manifest(run)
+        ),
+        error = function(error) list(message = conditionMessage(error))
+      )
+      if (!is.null(data$message)) {
+        shiny::showNotification(data$message, type = "warning", duration = 12)
+      }
+      report_oncoplot(list(
+        run_key = sarek_text(run$run_dir, sarek_text(run$output_dir)), data = data
+      ))
+    })
+
+    report_ui <- shiny::reactive({
+      run <- explorer_run()
+      saved <- report_oncoplot()
+      summary <- if (!is.null(saved) &&
+                     identical(saved$run_key, sarek_text(run$run_dir, sarek_text(run$output_dir))))
+        saved$data else NULL
+      sarek_explorer_report_ui(
+        run, explorer_catalog(), sarek_explorer_empty_variants(),
+        sarek_results_read_manifest(run), oncoplot = summary
+      )
+    })
+
+    output$report_view <- shiny::renderUI(report_ui())
+    output$download_report <- shiny::downloadHandler(
+      filename = function() paste0(sarek_text(explorer_run()$run_id, "sarek"), "-report.html"),
+      content = function(file) writeLines(sarek_explorer_report_html(report_ui()), file, useBytes = TRUE)
+    )
+
     shiny::observeEvent(input$open_selected_results, {
       run <- selected_run()
-      shiny::updateSelectInput(session, "results_run", selected = sarek_text(run$run_id))
-      shiny::updateTabsetPanel(session, "sarek_sections", selected = "results")
+      shiny::updateSelectInput(session, "explorer_run", selected = sarek_text(run$run_id))
+      shiny::updateTabsetPanel(session, "sarek_sections", selected = "explorer")
     }, ignoreInit = TRUE)
 
     invalidate_confirmation <- function() {

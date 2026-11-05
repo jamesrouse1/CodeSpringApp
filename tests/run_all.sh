@@ -8,6 +8,8 @@ lab_root="${1:-$(cd -- "$repo_root/../CodeSpringLab-fix" && pwd)}"
 (cd "$repo_root" && Rscript --vanilla tests/test_sarek_bam_inspector.R)
 (cd "$repo_root" && bash tests/test_sarek_samtools_launcher.sh)
 (cd "$repo_root" && Rscript --vanilla tests/test_sarek_manifest_shiny.R)
+(cd "$repo_root" && Rscript --vanilla tests/test_sarek_explorer.R)
+(cd "$repo_root" && Rscript --vanilla tests/test_sarek_clinvar.R)
 (cd "$repo_root" && Rscript --vanilla tests/test_sarek_nextflow_input.R)
 (cd "$repo_root" && Rscript --vanilla tests/test_sarek_sex_fallback.R)
 (cd "$repo_root" && Rscript --vanilla tests/test_sarek_live_activity.R)

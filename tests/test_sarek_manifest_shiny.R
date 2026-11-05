@@ -10,6 +10,9 @@ source(file.path(repo_root, "R", "sarek_manifest.R"), local = FALSE)
 source(file.path(repo_root, "R", "sarek_bam_inspector.R"), local = FALSE)
 source(file.path(repo_root, "R", "sarek_nextflow_input.R"), local = FALSE)
 source(file.path(repo_root, "R", "sarek_submission.R"), local = FALSE)
+source(file.path(repo_root, "R", "sarek_results.R"), local = FALSE)
+source(file.path(repo_root, "R", "sarek_explorer.R"), local = FALSE)
+source(file.path(repo_root, "R", "sarek_clinvar.R"), local = FALSE)
 source(file.path(repo_root, "R", "sarek_manifest_shiny.R"), local = FALSE)
 
 assert_true <- function(value, message) {
@@ -184,9 +187,13 @@ assert_true(grepl("Previous and active Sarek runs", ui_text, fixed = TRUE), "The
 assert_true(grepl("sarek_test-selected_run_status", ui_text, fixed = TRUE), "The selected-run progress output is missing.")
 assert_true(grepl("sarek_test-sarek_sections", ui_text, fixed = TRUE), "The top-level Sarek tab navigation is missing.")
 assert_true(
-  all(vapply(c("Prepare job", "Run status", "Results"), grepl, logical(1), x = ui_text, fixed = TRUE)),
-  "The Prepare job, Run status, and Results tabs are not all visible."
+  all(vapply(c("Prepare job", "Run status", "Files", "Results Explorer", "QC", "Variants",
+               "ClinVar", "Plots", "Report"), grepl, logical(1), x = ui_text, fixed = TRUE)),
+  "The Sarek files and explorer tabs are not all visible."
 )
+assert_true(grepl("sarek_test-download_plot", ui_text, fixed = TRUE), "Plot download is missing.")
+assert_true(grepl("sarek_test-download_report", ui_text, fixed = TRUE), "Report download is missing.")
+assert_true(grepl("sarek_test-save_results_root", ui_text, fixed = TRUE), "Default Sarek results setting is missing.")
 assert_true(grepl("sarek_test-results_run_selector", ui_text, fixed = TRUE), "The results run selector is missing.")
 assert_true(grepl("sarek_test-results_file_table", ui_text, fixed = TRUE), "The searchable result file table is missing.")
 assert_true(grepl("sarek_test-browse_input_folder", ui_text, fixed = TRUE), "Input folder browsing is missing.")
@@ -274,7 +281,7 @@ shiny::testServer(
       submission_capture$nextflow_input <- nextflow_input
       list(
         status = "submitted",
-        job_id = "424242",
+        controller_pid = "424242",
         run_dir = file.path(results_root, manifest$manifest_id),
         output_dir = file.path(results_root, manifest$manifest_id, "results"),
         work_dir = file.path(work_root, manifest$manifest_id),
@@ -389,10 +396,10 @@ shiny::testServer(
     session$flushReact()
     assert_true(submission_capture$count == 1L, "The confirmed submission did not call the backend exactly once.")
     assert_true(submission_capture$nextflow_input$step == "mapping", "The backend received the wrong starting step.")
-    assert_true(identical(submission_state()$result$job_id, "424242"), "The submitted Slurm job ID was not recorded.")
+    assert_true(identical(submission_state()$result$controller_pid, "424242"), "The detached controller PID was not recorded.")
     submission_status_html <- paste(as.character(output$submission_status), collapse = "\n")
     assert_true(grepl("sarek-validation-panel-success", submission_status_html, fixed = TRUE), "Successful submission did not render a green status panel.")
-    assert_true(grepl("424242", submission_status_html, fixed = TRUE), "The submitted Slurm job ID is not visible.")
+    assert_true(grepl("Nextflow controller PID: 424242", submission_status_html, fixed = TRUE), "The detached controller PID is not visible.")
 
     session$setInputs(preset = "changed_after_confirmation")
     session$flushReact()

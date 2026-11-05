@@ -26,6 +26,16 @@ sarek_submission_require_helpers <- function() {
 sarek_submission_requested_tools <- function(analysis_mode, preset = "core") {
   analysis_mode <- sarek_text(analysis_mode)
   preset <- sarek_text(preset, "core")
+  if (identical(preset, "small_variants_vep")) {
+    return(switch(
+      analysis_mode,
+      germline = "haplotypecaller,vep",
+      tumor_only = "mutect2,vep",
+      matched_tumor_normal = "mutect2,vep",
+      annotation_only = "vep",
+      stop("Unsupported Sarek analysis mode: ", analysis_mode, call. = FALSE)
+    ))
+  }
   if (!identical(preset, "core")) {
     stop("Unsupported Sarek analysis preset: ", preset, call. = FALSE)
   }
@@ -891,10 +901,25 @@ sarek_run_status <- function(run, runner = NULL, squeue = "squeue", sacct = "sac
     state <- toupper(scalar("status", "SUBMITTED"))
   }
 
+  status_source <- if (runtime_state %in% terminal) "runtime" else "controller"
+
+  # Older Slurm controllers could exit zero at their time limit and record
+  # COMPLETED even though Slurm marked the job TIMEOUT.
+  if (identical(state, "COMPLETED") &&
+      grepl("^[0-9]+$", scalar("job_id"))) {
+    scheduler <- suppressWarnings(sarek_query_slurm_job(
+      scalar("job_id"), runner = runner, squeue = squeue, sacct = sacct
+    ))
+    if (scheduler$state %in% c("TIMEOUT", "FAILED", "CANCELLED", "OUT_OF_MEMORY")) {
+      state <- scheduler$state
+      status_source <- scheduler$source
+    }
+  }
+
   list(
     state = state,
     elapsed = "",
-    source = if (runtime_state %in% terminal) "runtime" else "controller",
+    source = status_source,
     exit_code = sarek_text(runtime["exit_code"]),
     started_at = sarek_text(runtime["started_at"]),
     ended_at = sarek_text(runtime["ended_at"]),
@@ -1023,8 +1048,13 @@ sarek_parse_slurm_job_id <- function(output) {
 
 
 sarek_submission_write_values <- function(path, values) {
+  keys <- names(values)
   values <- as.character(values)
-  names(values) <- names(values)
+  if (length(keys) != length(values) ||
+      anyNA(keys) || any(!nzchar(trimws(keys))) || anyDuplicated(keys)) {
+    stop("Cannot write metadata: field names must be present and unique.", call. = FALSE)
+  }
+  names(values) <- keys
   sarek_write_text_atomic(
     c(
       "field\tvalue",
@@ -1445,3 +1475,6 @@ sarek_resume_run <- function(
     controller_time = "not_applicable"
   )
 }
+
+
+

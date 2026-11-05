@@ -385,18 +385,27 @@ SAREK_MANIFEST_HELPERS <- file.path(APP_ROOT, "R", "sarek_manifest.R")
 SAREK_BAM_INSPECTOR_HELPERS <- file.path(APP_ROOT, "R", "sarek_bam_inspector.R")
 SAREK_NEXTFLOW_INPUT_HELPERS <- file.path(APP_ROOT, "R", "sarek_nextflow_input.R")
 SAREK_SUBMISSION_HELPERS <- file.path(APP_ROOT, "R", "sarek_submission.R")
+SAREK_RESULTS_HELPERS <- file.path(APP_ROOT, "R", "sarek_results.R")
+SAREK_EXPLORER_HELPERS <- file.path(APP_ROOT, "R", "sarek_explorer.R")
+SAREK_CLINVAR_HELPERS <- file.path(APP_ROOT, "R", "sarek_clinvar.R")
 SAREK_MANIFEST_SHINY <- file.path(APP_ROOT, "R", "sarek_manifest_shiny.R")
 CUTRUN_NFCORE_HELPERS <- file.path(APP_ROOT, "R", "cutrun_nfcore_submission.R")
 if (!file.exists(SAREK_MANIFEST_HELPERS)) stop("Sarek manifest helpers are missing: ", SAREK_MANIFEST_HELPERS)
 if (!file.exists(SAREK_BAM_INSPECTOR_HELPERS)) stop("Sarek BAM inspector helpers are missing: ", SAREK_BAM_INSPECTOR_HELPERS)
 if (!file.exists(SAREK_NEXTFLOW_INPUT_HELPERS)) stop("Sarek Nextflow input helpers are missing: ", SAREK_NEXTFLOW_INPUT_HELPERS)
 if (!file.exists(SAREK_SUBMISSION_HELPERS)) stop("Sarek submission helpers are missing: ", SAREK_SUBMISSION_HELPERS)
+if (!file.exists(SAREK_RESULTS_HELPERS)) stop("Sarek results helpers are missing: ", SAREK_RESULTS_HELPERS)
+if (!file.exists(SAREK_EXPLORER_HELPERS)) stop("Sarek explorer helpers are missing: ", SAREK_EXPLORER_HELPERS)
+if (!file.exists(SAREK_CLINVAR_HELPERS)) stop("Sarek ClinVar helpers are missing: ", SAREK_CLINVAR_HELPERS)
 if (!file.exists(SAREK_MANIFEST_SHINY)) stop("Sarek Shiny module is missing: ", SAREK_MANIFEST_SHINY)
 if (!file.exists(CUTRUN_NFCORE_HELPERS)) stop("CUT&RUN nf-core helpers are missing: ", CUTRUN_NFCORE_HELPERS)
 source(SAREK_MANIFEST_HELPERS, local = FALSE)
 source(SAREK_BAM_INSPECTOR_HELPERS, local = FALSE)
 source(SAREK_NEXTFLOW_INPUT_HELPERS, local = FALSE)
 source(SAREK_SUBMISSION_HELPERS, local = FALSE)
+source(SAREK_RESULTS_HELPERS, local = FALSE)
+source(SAREK_EXPLORER_HELPERS, local = FALSE)
+source(SAREK_CLINVAR_HELPERS, local = FALSE)
 source(SAREK_MANIFEST_SHINY, local = FALSE)
 source(CUTRUN_NFCORE_HELPERS, local = TRUE)
 SAREK_USER_STORAGE_ROOT <- normalizePath(
@@ -407,13 +416,18 @@ SAREK_USER_STORAGE_ROOT <- normalizePath(
   winslash = "/",
   mustWork = FALSE
 )
-SAREK_RESULTS_ROOT <- normalizePath(
+SAREK_RESULTS_ROOT_FALLBACK <- normalizePath(
   Sys.getenv(
     "CSL_SAREK_RESULTS_ROOT",
     unset = file.path(SAREK_USER_STORAGE_ROOT, "csl_results", "sarek")
   ),
   winslash = "/",
   mustWork = FALSE
+)
+SAREK_RESULTS_ROOT_PREFERENCE_PATH <- file.path(SAREK_USER_STORAGE_ROOT, ".codespring", "sarek_results_root")
+SAREK_RESULTS_ROOT <- sarek_results_read_default_root(
+  SAREK_RESULTS_ROOT_PREFERENCE_PATH,
+  fallback = SAREK_RESULTS_ROOT_FALLBACK
 )
 SAREK_WORK_ROOT <- normalizePath(
   Sys.getenv(
@@ -1390,7 +1404,7 @@ ANALYSIS_CATALOG <- data.frame(
   label = c("FetchNGS", "Sarek WGS", "RNA-seq", "scRNA-seq", "ATAC-seq", "CUT&RUN", "ChIP-seq"),
   description = c(
     "Retrieve public sequencing data and metadata through nf-core/fetchngs",
-    "Discover WGS inputs and build a user-confirmed nf-core/sarek manifest",
+    "Prepare, run, and explore nf-core/sarek genome analyses",
     "Gene expression, transcript quantification, differential expression, and pathway analysis",
     "Single-cell QC, normalization, integration, clustering, annotation, and result visualization",
     "Chromatin accessibility, signal tracks, peak calling, and differential accessibility",
@@ -17151,7 +17165,7 @@ ui <- fluidPage(
         div(class = "project-card",
             div(class = "eyebrow", "Whole-genome analysis"),
             h3("Sarek WGS"),
-            tags$p(class = "muted small-note", "Discover inputs and confirm a portable analysis manifest."))
+            tags$p(class = "muted small-note", "Prepare and submit a Sarek analysis, follow its progress, browse output files, and explore QC, variants, and plots."))
       )
     ),
     mainPanel(
@@ -17389,8 +17403,12 @@ server <- function(input, output, session) {
     "sarek_manifest",
     default_results_root = SAREK_RESULTS_ROOT,
     default_work_root = SAREK_WORK_ROOT,
+    results_root_preference_path = SAREK_RESULTS_ROOT_PREFERENCE_PATH,
     created_by = CURRENT_USER,
     samtools = SAREK_SAMTOOLS,
+    clinvar_submit_handler = function(run, manifest, source, reference, assembly) {
+      sarek_clinvar_submit(run, manifest, source, reference, assembly)
+    },
     max_auto_bam_inspections = SAREK_MAX_AUTO_BAM_INSPECTIONS,
     submit_handler = function(manifest, nextflow_input) {
       sarek_submit_run(
