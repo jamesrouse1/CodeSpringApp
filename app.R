@@ -534,6 +534,11 @@ RNA_EXAMPLE_DESIGN_DIR <- normalizePath(file.path(SCRIPTS_DIR, "test", "manifest
 CUTRUN_EXAMPLE_ROOT <- Sys.getenv("CSL_CUTRUN_EXAMPLE_ROOT", unset = "/grid/bsr/data/data/bsr_readable_data/CodeSpringFlow/examples/cutrun_nfcore_GSE145187")
 CUTRUN_EXAMPLE_FASTQ_DIR <- normalizePath(file.path(CUTRUN_EXAMPLE_ROOT, "fastq"), winslash = "/", mustWork = FALSE)
 CUTRUN_EXAMPLE_DESIGN_DIR <- normalizePath(file.path(CUTRUN_EXAMPLE_ROOT, "manifest"), winslash = "/", mustWork = FALSE)
+# A second, two-condition example (GSE228533: NUT carcinoma 10-15 H3K27me3,
+# DMSO vs tazemetostat) gives DiffBind a real contrast to test.
+CUTRUN_DIFF_EXAMPLE_ROOT <- Sys.getenv("CSL_CUTRUN_DIFF_EXAMPLE_ROOT", unset = "/grid/bsr/data/data/bsr_readable_data/CodeSpringFlow/examples/cutrun_nfcore_GSE228533")
+CUTRUN_DIFF_EXAMPLE_FASTQ_DIR <- normalizePath(file.path(CUTRUN_DIFF_EXAMPLE_ROOT, "fastq"), winslash = "/", mustWork = FALSE)
+CUTRUN_DIFF_EXAMPLE_DESIGN_DIR <- normalizePath(file.path(CUTRUN_DIFF_EXAMPLE_ROOT, "manifest"), winslash = "/", mustWork = FALSE)
 ATAC_EXAMPLE_FASTQ_DIR <- normalizePath(file.path(SCRIPTS_DIR, "test", "fastq_atac"), winslash = "/", mustWork = FALSE)
 ATAC_EXAMPLE_DESIGN_DIR <- normalizePath(file.path(SCRIPTS_DIR, "test", "manifest_atac"), winslash = "/", mustWork = FALSE)
 CHIP_EXAMPLE_FASTQ_DIR <- normalizePath(file.path(SCRIPTS_DIR, "test", "fastq_chip"), winslash = "/", mustWork = FALSE)
@@ -1681,7 +1686,10 @@ migrate_user_legacy_projects <- function() {
   invisible(migrated)
 }
 
-example_dataset_paths <- function(key) {
+example_dataset_paths <- function(key, variant = "") {
+  if (identical(analysis_key(key), "cutrun") && identical(variant, "differential")) {
+    return(list(name = "example_cutrun_diff", fastq_dir = CUTRUN_DIFF_EXAMPLE_FASTQ_DIR, design_dir = CUTRUN_DIFF_EXAMPLE_DESIGN_DIR, species = "human"))
+  }
   switch(
     analysis_key(key),
     rna = list(name = "example_dataset", fastq_dir = RNA_EXAMPLE_FASTQ_DIR, design_dir = RNA_EXAMPLE_DESIGN_DIR),
@@ -1696,7 +1704,7 @@ example_dataset_paths <- function(key) {
 is_bundled_example_design <- function(path) {
   path <- normalizePath(path %||% "", winslash = "/", mustWork = FALSE)
   examples <- normalizePath(
-    c(file.path(RNA_EXAMPLE_DESIGN_DIR, "design_matrix.txt"), file.path(CUTRUN_EXAMPLE_DESIGN_DIR, "design_matrix.txt"), file.path(ATAC_EXAMPLE_DESIGN_DIR, "design_matrix.txt"), file.path(CHIP_EXAMPLE_DESIGN_DIR, "design_matrix.txt")),
+    c(file.path(RNA_EXAMPLE_DESIGN_DIR, "design_matrix.txt"), file.path(CUTRUN_EXAMPLE_DESIGN_DIR, "design_matrix.txt"), file.path(CUTRUN_DIFF_EXAMPLE_DESIGN_DIR, "design_matrix.txt"), file.path(ATAC_EXAMPLE_DESIGN_DIR, "design_matrix.txt"), file.path(CHIP_EXAMPLE_DESIGN_DIR, "design_matrix.txt")),
     winslash = "/", mustWork = FALSE
   )
   nzchar(path) && path %in% examples
@@ -19086,7 +19094,15 @@ server <- function(input, output, session) {
       if (!is.null(example) && !scrna_example_selected) div(
         class = "read-source-note",
         tags$strong(paste("Bundled", analysis_label(new_analysis_key), "example")),
-        tags$p(if (identical(new_analysis_key, "scrna")) "Use the shared PBMC 3k filtered 10x matrix. Results default to your own ~/csl_results folder." else if (identical(new_analysis_key, "cutrun")) "Use the shared K562 CUT&RUN demo (GSE145187): H3K4me3 and H3K27me3 with two replicates each, plus matched IgG controls, on human GRCh38. Results are written only to your own results folder." else "Use the small example FASTQs and design matrix included with CodeSpringLab. Results are written only to your own results folder."),
+        tags$p(if (identical(new_analysis_key, "scrna")) "Use the shared PBMC 3k filtered 10x matrix. Results default to your own ~/csl_results folder." else if (identical(new_analysis_key, "cutrun")) "Choose a shared public CUT&RUN demo on human GRCh38. Results are written only to your own results folder." else "Use the small example FASTQs and design matrix included with CodeSpringLab. Results are written only to your own results folder."),
+        if (identical(new_analysis_key, "cutrun")) radioButtons(
+          "example_cutrun_variant", NULL,
+          choices = c(
+            "Peak calling: K562 H3K4me3 and H3K27me3, 2 replicates each with IgG (GSE145187)" = "peaks",
+            "Differential peaks: NUT carcinoma H3K27me3, DMSO vs tazemetostat, 2 replicates each with IgG (GSE228533)" = "differential"
+          ),
+          selected = "peaks"
+        ),
         actionButton("use_example_dataset", "Use Example Dataset", class = "btn-default")
       ) else NULL,
       if (scrna_example_selected) tagList(
@@ -19319,10 +19335,10 @@ server <- function(input, output, session) {
 
   observeEvent(input$use_example_dataset, {
     key <- analysis_key(input$new_project_analysis %||% input$analysis %||% "RNA-seq")
-    example <- example_dataset_paths(key)
+    example <- example_dataset_paths(key, input$example_cutrun_variant %||% "")
     if (is.null(example)) return()
     current_name <- trimws(input$new_project_name %||% "")
-    if (!nzchar(current_name) || grepl("^example_(dataset|rnaseq|cutrun|atac|chip|pbmc3k)$", current_name)) {
+    if (!nzchar(current_name) || grepl("^example_(dataset|rnaseq|cutrun|cutrun_diff|atac|chip|pbmc3k)$", current_name)) {
       updateTextInput(session, "new_project_name", value = example$name)
     }
     new_fastq_folders(character(0))
