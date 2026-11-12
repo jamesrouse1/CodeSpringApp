@@ -566,6 +566,11 @@ PROJECT_FILE_INVENTORY_CACHE <- new.env(parent = emptyenv())
 CUTRUN_DEFAULT_SPIKEIN_INDEX <- "/grid/bsr/data/data/utama/genome/ecoli_k12/bowtie2_index/ecoli_k12_mg1655"
 CUTRUN_DEFAULT_SPIKEIN_NAME <- "ecoli"
 CUTRUN_SPIKEIN_GENOME_CHOICES <- c("E. coli K-12 MG1655" = CUTRUN_DEFAULT_SPIKEIN_INDEX)
+CUTRUN_NFCORE_NORMALISATION_CHOICES <- c(
+  "CPM (counts per million)" = "CPM",
+  "Spike-in (E. coli K-12)" = "Spikein",
+  "None (raw counts)" = "None"
+)
 GSEAPY_GENESET_OPTIONS <- c(
   "MSigDB_Hallmark_2020",
   "KEGG_2021_Human",
@@ -13324,12 +13329,14 @@ cutrun_diffbind_sample_sheet <- function(project, reference_condition, min_repli
     if (!NROW(design)) stop("The selected CUT&RUN comparison has no samples in design_matrix.txt.")
   }
 
+  nfcore <- is_nfcore_cutrun_project(project)
+  nfcore_spikein <- nfcore && identical(cutrun_nfcore_project_normalisation(project), "Spikein")
   rows <- lapply(seq_len(NROW(design)), function(i) {
     sample <- as.character(design$sample[[i]])
     metrics <- cutrun_alignment_values(project, sample)
-    use_spikein <-
-      !is_nfcore_cutrun_project(project) &&
-      identical(track, "spikein")
+    # nf-core runs follow the normalisation they were submitted with;
+    # native runs follow the SEACR track configuration.
+    use_spikein <- if (nfcore) nfcore_spikein else identical(track, "spikein")
     data.frame(
       SampleID = sample,
       CellType = trimws(as.character(design$cell_type[[i]] %||% "all")),
@@ -13340,7 +13347,7 @@ cutrun_diffbind_sample_sheet <- function(project, reference_condition, min_repli
       Peaks = cutrun_peak_source_file(project, peak_source_id, sample, sources = sources),
       PeakSource = peak_source_label,
       PeakCount = cutrun_peak_source_total(project, peak_source_id, sample, sources = sources),
-      Spikein = if (use_spikein) cutrun_spikein_bam(project, sample) else "",
+      Spikein = if (!use_spikein) "" else if (nfcore) cutrun_nfcore_spikein_bam_path(project, sample) else cutrun_spikein_bam(project, sample),
       normalization_mode = if (use_spikein) "spikein" else "none",
       stringsAsFactors = FALSE
     )
@@ -21902,9 +21909,21 @@ server <- function(input, output, session) {
                     "SEACR is the primary peak caller. MACS2 is optional."
                   ),
 
+                  selectInput(
+                    "cutrun_nfcore_normalisation",
+                    "Track normalisation",
+                    choices = CUTRUN_NFCORE_NORMALISATION_CHOICES,
+                    selected = selected_choice(
+                      input$cutrun_nfcore_normalisation,
+                      unname(CUTRUN_NFCORE_NORMALISATION_CHOICES),
+                      "CPM"
+                    ),
+                    selectize = FALSE
+                  ),
+
                   tags$p(
                     class = "muted small-note",
-                    "The current nf-core integration uses CPM normalization."
+                    "Spike-in aligns every sample to E. coli K-12 and scales it by 10,000 / E. coli-aligned reads. Use it only when the libraries contain E. coli carry-over or added spike-in DNA: a sample with no E. coli reads is left unscaled. The scale factors are in the MultiQC report and the run's results folder."
                   )
                 )
               ),
@@ -22030,7 +22049,7 @@ server <- function(input, output, session) {
             uiOutput("cutrun_diffbind_jobs_ui"),
             tags$p(class = "muted small-note", "Choose a completed MACS2, shared-overlap, or SEACR peak set. Each peak source is stored in a separate differential-results folder, so the same comparison can be run with more than one peak definition."),
             tags$p(class = "muted small-note", "Only comparisons with at least two biological replicates per condition and at least the selected number of peaks in every sample are selectable. The default minimum is 100 peaks per sample."),
-            tags$p(class = "muted small-note", "DiffBind count normalization still follows the signal configuration selected in the SEACR panel: spike-in uses the E. coli BAMs; CPM/raw configurations use genomic background normalization. Peak-source selection does not rescale MACS2 or overlap BED files."),
+            tags$p(class = "muted small-note", if (is_nfcore_cutrun_project(p)) "DiffBind count normalization follows the nf-core run: a spike-in run uses its E. coli BAMs; CPM and raw runs use genomic background normalization. Peak-source selection does not rescale MACS2 or overlap BED files." else "DiffBind count normalization still follows the signal configuration selected in the SEACR panel: spike-in uses the E. coli BAMs; CPM/raw configurations use genomic background normalization. Peak-source selection does not rescale MACS2 or overlap BED files."),
             tags$details(
               tags$summary("Advanced consensus setting"),
               numericInput("cutrun_diffbind_min_replicates", "Replicates that must support a peak", value = 1, min = 1, step = 1),
@@ -23919,7 +23938,11 @@ server <- function(input, output, session) {
           result <- cutrun_nfcore_submit_run(
             project = p,
             run_id = "nfcore_cutandrun",
-            normalisation_mode = "CPM",
+            normalisation_mode = selected_choice(
+              input$cutrun_nfcore_normalisation,
+              unname(CUTRUN_NFCORE_NORMALISATION_CHOICES),
+              "CPM"
+            ),
             include_macs2 = isTRUE(
               input$cutrun_nfcore_include_macs2
             ),

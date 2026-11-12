@@ -681,6 +681,57 @@ cutrun_nfcore_reference_params <- function(project) {
   )
 }
 
+# Spike-in genome for normalisation_mode = "Spikein". iGenomes is switched
+# off for CodeSpring runs, so nf-core cannot look up its default
+# K12-MG1655 genome and both paths must be given explicitly. nf-core then
+# scales each sample by normalisation_c / reads aligned to the spike-in.
+cutrun_nfcore_spikein_defaults <- function() {
+  root <- "/grid/bsr/data/data/utama/genome/ecoli_k12"
+  list(
+    fasta = Sys.getenv(
+      "CSL_CUTRUN_NFCORE_SPIKEIN_FASTA",
+      unset = file.path(root, "ecoli_k12_mg1655.fa")
+    ),
+    bowtie2 = Sys.getenv(
+      "CSL_CUTRUN_NFCORE_SPIKEIN_BOWTIE2",
+      unset = file.path(root, "bowtie2_index")
+    )
+  )
+}
+
+cutrun_nfcore_spikein_params <- function(
+  spikein = cutrun_nfcore_spikein_defaults()
+) {
+  fasta <- trimws(as.character(spikein$fasta %||% "")[1])
+  bowtie2 <- trimws(as.character(spikein$bowtie2 %||% "")[1])
+
+  if (!nzchar(fasta) || !file.exists(fasta)) {
+    stop(
+      "Spike-in genome FASTA is missing: ", fasta,
+      call. = FALSE
+    )
+  }
+
+  index_files <- c(
+    Sys.glob(file.path(bowtie2, "*.bt2")),
+    Sys.glob(file.path(bowtie2, "*.bt2l"))
+  )
+
+  if (!dir.exists(bowtie2) || length(index_files) < 6L) {
+    stop(
+      "A complete spike-in Bowtie2 index was not found in: ", bowtie2,
+      call. = FALSE
+    )
+  }
+
+  list(
+    spikein_fasta = normalizePath(fasta, winslash = "/", mustWork = TRUE),
+    spikein_bowtie2 = normalizePath(bowtie2, winslash = "/", mustWork = TRUE),
+    normalisation_c = 10000L,
+    save_spikein_aligned = TRUE
+  )
+}
+
 cutrun_nfcore_params <- function(
   project,
   paths,
@@ -695,13 +746,8 @@ cutrun_nfcore_params <- function(
     c("CPM", "RPKM", "BPM", "None", "Spikein")
   )
 
-  if (identical(normalisation_mode, "Spikein")) {
-    stop(
-      "Spike-in normalisation is not wired into the ",
-      "CodeSpring nf-core CUT&RUN backend yet. ",
-      "Use CPM for the initial integration.",
-      call. = FALSE
-    )
+  spikein <- if (identical(normalisation_mode, "Spikein")) {
+    cutrun_nfcore_spikein_params()
   }
 
   seacr_stringent <- match.arg(
@@ -749,7 +795,8 @@ cutrun_nfcore_params <- function(
       consensus_peak_mode = "group",
       replicate_threshold = 1L,
       dt_calc_all_matrix = FALSE
-    )
+    ),
+    spikein
   )
 
   if (isTRUE(include_macs2)) {

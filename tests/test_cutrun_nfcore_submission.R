@@ -414,4 +414,111 @@ assert(
   "Launch script does not use the Singularity profile."
 )
 
+# -------------------------------------------------------------------------
+# Spike-in normalisation
+
+spike_root <- file.path(root, "spikein_genome")
+spike_index <- file.path(spike_root, "bowtie2_index")
+dir.create(spike_index, recursive = TRUE)
+spike_fasta <- file.path(spike_root, "ecoli.fa")
+writeLines(c(">ecoli", "ACGT"), spike_fasta)
+
+Sys.setenv(
+  CSL_CUTRUN_NFCORE_SPIKEIN_FASTA = spike_fasta,
+  CSL_CUTRUN_NFCORE_SPIKEIN_BOWTIE2 = spike_index
+)
+on.exit(
+  Sys.unsetenv(c(
+    "CSL_CUTRUN_NFCORE_SPIKEIN_FASTA",
+    "CSL_CUTRUN_NFCORE_SPIKEIN_BOWTIE2"
+  )),
+  add = TRUE
+)
+
+incomplete <- tryCatch(
+  app_env$cutrun_nfcore_build_bundle(
+    project = project,
+    run_id = "spikein_incomplete",
+    runtime = runtime,
+    normalisation_mode = "Spikein"
+  ),
+  error = function(e) conditionMessage(e)
+)
+assert(
+  is.character(incomplete) &&
+    grepl("spike-in Bowtie2 index", incomplete, fixed = TRUE) &&
+    !dir.exists(file.path(dirname(paths$run_dir), "spikein_incomplete")),
+  "An incomplete spike-in index was not rejected before writing the run."
+)
+
+file.create(file.path(
+  spike_index,
+  paste0("ecoli", c(".1", ".2", ".3", ".4", ".rev.1", ".rev.2"), ".bt2")
+))
+
+spike_bundle <- app_env$cutrun_nfcore_build_bundle(
+  project = project,
+  run_id = "spikein_test",
+  runtime = runtime,
+  normalisation_mode = "Spikein"
+)
+spike_params <- jsonlite::read_json(
+  spike_bundle$paths$params_path,
+  simplifyVector = TRUE
+)
+assert(
+  identical(spike_params$normalisation_mode, "Spikein") &&
+    identical(spike_params$spikein_fasta, normalizePath(spike_fasta, winslash = "/")) &&
+    identical(spike_params$spikein_bowtie2, normalizePath(spike_index, winslash = "/")) &&
+    identical(as.numeric(spike_params$normalisation_c), 10000) &&
+    isTRUE(spike_params$save_spikein_aligned),
+  "Spike-in params were not written for nf-core."
+)
+assert(
+  is.null(params$spikein_fasta) && is.null(params$save_spikein_aligned),
+  "CPM runs should not carry spike-in params."
+)
+
+assert(
+  identical(
+    app_env$cutrun_nfcore_run_normalisation(spike_bundle$paths$params_path)$mode,
+    "Spikein"
+  ) &&
+    identical(
+      app_env$cutrun_nfcore_run_normalisation(file.path(root, "missing.json"))$mode,
+      "CPM"
+    ),
+  "The run's normalisation mode was not read back from params.json."
+)
+
+spike_log_dir <- file.path(root, "out", "02_alignment", "bowtie2", "spikein", "log")
+dir.create(spike_log_dir, recursive = TRUE)
+writeLines(c(
+  "100000 reads; of these:",
+  "  100000 (100.00%) were paired; of these:",
+  "    99000 (99.00%) aligned concordantly 0 times",
+  "    800 (0.80%) aligned concordantly exactly 1 time",
+  "    200 (0.20%) aligned concordantly >1 times",
+  "1.00% overall alignment rate"
+), file.path(spike_log_dir, "target__S_R1.spikein.bowtie2.log"))
+writeLines(c(
+  "100000 reads; of these:",
+  "    100000 (100.00%) aligned concordantly 0 times",
+  "    0 (0.00%) aligned concordantly exactly 1 time",
+  "    0 (0.00%) aligned concordantly >1 times"
+), file.path(spike_log_dir, "target__S_R2.spikein.bowtie2.log"))
+
+spiked <- list(mode = "Spikein", constant = 10000)
+s1 <- app_env$cutrun_nfcore_spikein_summary(file.path(root, "out"), "target__S_R1", spiked)
+s2 <- app_env$cutrun_nfcore_spikein_summary(file.path(root, "out"), "target__S_R2", spiked)
+s_cpm <- app_env$cutrun_nfcore_spikein_summary(
+  file.path(root, "out"), "target__S_R1", list(mode = "CPM", constant = 10000)
+)
+assert(
+  identical(s1$mapped_reads, "2000") && identical(s1$scale_factor, "10") &&
+    identical(s2$scale_factor, "1") &&
+    identical(s_cpm$scale_factor, ""),
+  "Spike-in reads or scale factors were not parsed like nf-core."
+)
+
 cat("CUT&RUN nf-core submission bundle: PASS\n")
