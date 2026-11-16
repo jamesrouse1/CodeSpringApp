@@ -283,11 +283,36 @@ APP_RUNTIME <- new.env(parent = emptyenv())
 APP_RUNTIME$active_sessions <- 0L
 APP_RUNTIME$idle_generation <- 0L
 
-access_token_valid <- function(query_string) {
+access_token_valid <- function(query_string, stage = "session") {
   if (!nzchar(ACCESS_TOKEN)) return(TRUE)
   query_string <- sub("^\\?", "", as.character(query_string %||% ""))
-  supplied <- tryCatch(shiny::parseQueryString(query_string)[["token"]] %||% "", error = function(e) "")
-  identical(as.character(supplied), ACCESS_TOKEN)
+  query <- tryCatch(shiny::parseQueryString(query_string), error = function(e) list())
+  supplied <- query[["token"]] %||% ""
+  identical(as.character(supplied), ACCESS_TOKEN) || consume_open_ticket(query[["ticket"]] %||% "", stage)
+}
+
+# One-time "open tickets" let CodeSpringHub hand a researcher a link to their results without putting
+# the app's long-lived access token into a chat. The Hub (running as the same Unix user) writes
+# ~/.codespringweb/open_tickets/<ticket> containing an expiry time; the link works once, within
+# that time, and the ticket file is deleted when used.
+OPEN_TICKET_RE <- "^[A-Za-z0-9_-]{32,64}$"
+consume_open_ticket <- function(ticket, stage = "session") {
+  # A page load is two checks: the page request ("page"), then its live session ("session").
+  # The page check turns the ticket into a short-lived ".redeemed" file that only the session
+  # check accepts, so the same link can't be opened again.
+  ticket <- as.character(ticket %||% "")
+  if (!grepl(OPEN_TICKET_RE, ticket)) return(FALSE)
+  dir <- file.path(Sys.getenv("CSL_WEB_HOME", unset = file.path(CURRENT_HOME, ".codespringweb")), "open_tickets")
+  path <- file.path(dir, if (identical(stage, "page")) ticket else paste0(ticket, ".redeemed"))
+  if (!file.exists(path)) return(FALSE)
+  owner_ok <- identical(as.character(file.info(path)$uname), CURRENT_USER)
+  expires <- suppressWarnings(as.numeric(readLines(path, n = 1, warn = FALSE)))
+  valid <- isTRUE(owner_ok) && length(expires) == 1 && is.finite(expires) && as.numeric(Sys.time()) <= expires
+  unlink(path)
+  if (valid && identical(stage, "page")) {
+    writeLines(as.character(as.numeric(Sys.time()) + 120), file.path(dir, paste0(ticket, ".redeemed")))
+  }
+  valid
 }
 
 register_authorized_session <- function(session) {
@@ -308,8 +333,22 @@ register_authorized_session <- function(session) {
   invisible(NULL)
 }
 
+# A BSR-managed shared install keeps one pinned CodeSpringApp and CodeSpringLab side by side in a
+# folder marked with a CODESPRING_MANAGED_INSTALL file; those checkouts may live outside home.
+is_managed_install <- function(path) {
+  nzchar(path %||% "") && file.exists(file.path(dirname(normalizePath(path, winslash = "/", mustWork = FALSE)), "CODESPRING_MANAGED_INSTALL"))
+}
+
 find_codespringlab_root <- function() {
   env_root <- Sys.getenv("CSL_CODESPRINGLAB_ROOT", unset = "")
+  app_root <- Sys.getenv("CSL_WEB_APP_ROOT", unset = getwd())
+  managed_lab <- if (is_managed_install(app_root)) file.path(dirname(normalizePath(app_root, winslash = "/", mustWork = FALSE)), "CodeSpringLab") else ""
+  if (!nzchar(env_root) && nzchar(managed_lab) && dir.exists(file.path(managed_lab, "scripts_DoNotTouch"))) {
+    return(normalizePath(managed_lab, winslash = "/", mustWork = FALSE))
+  }
+  if (nzchar(env_root) && is_managed_install(env_root) && dir.exists(file.path(env_root, "scripts_DoNotTouch"))) {
+    return(normalizePath(env_root, winslash = "/", mustWork = FALSE))
+  }
   if (nzchar(env_root) && !path_is_within(env_root, CURRENT_HOME)) {
     stop(
       "Refusing CSL_CODESPRINGLAB_ROOT outside the effective user's home (",
@@ -534,6 +573,11 @@ RNA_EXAMPLE_DESIGN_DIR <- normalizePath(file.path(SCRIPTS_DIR, "test", "manifest
 CUTRUN_EXAMPLE_ROOT <- Sys.getenv("CSL_CUTRUN_EXAMPLE_ROOT", unset = "/grid/bsr/data/data/bsr_readable_data/CodeSpringFlow/examples/cutrun_nfcore_GSE145187")
 CUTRUN_EXAMPLE_FASTQ_DIR <- normalizePath(file.path(CUTRUN_EXAMPLE_ROOT, "fastq"), winslash = "/", mustWork = FALSE)
 CUTRUN_EXAMPLE_DESIGN_DIR <- normalizePath(file.path(CUTRUN_EXAMPLE_ROOT, "manifest"), winslash = "/", mustWork = FALSE)
+# A second, two-condition example (GSE228533: NUT carcinoma 10-15 H3K27me3,
+# DMSO vs tazemetostat) gives DiffBind a real contrast to test.
+CUTRUN_DIFF_EXAMPLE_ROOT <- Sys.getenv("CSL_CUTRUN_DIFF_EXAMPLE_ROOT", unset = "/grid/bsr/data/data/bsr_readable_data/CodeSpringFlow/examples/cutrun_nfcore_GSE228533")
+CUTRUN_DIFF_EXAMPLE_FASTQ_DIR <- normalizePath(file.path(CUTRUN_DIFF_EXAMPLE_ROOT, "fastq"), winslash = "/", mustWork = FALSE)
+CUTRUN_DIFF_EXAMPLE_DESIGN_DIR <- normalizePath(file.path(CUTRUN_DIFF_EXAMPLE_ROOT, "manifest"), winslash = "/", mustWork = FALSE)
 ATAC_EXAMPLE_FASTQ_DIR <- normalizePath(file.path(SCRIPTS_DIR, "test", "fastq_atac"), winslash = "/", mustWork = FALSE)
 ATAC_EXAMPLE_DESIGN_DIR <- normalizePath(file.path(SCRIPTS_DIR, "test", "manifest_atac"), winslash = "/", mustWork = FALSE)
 CHIP_EXAMPLE_FASTQ_DIR <- normalizePath(file.path(SCRIPTS_DIR, "test", "fastq_chip"), winslash = "/", mustWork = FALSE)
@@ -561,6 +605,11 @@ PROJECT_FILE_INVENTORY_CACHE <- new.env(parent = emptyenv())
 CUTRUN_DEFAULT_SPIKEIN_INDEX <- "/grid/bsr/data/data/utama/genome/ecoli_k12/bowtie2_index/ecoli_k12_mg1655"
 CUTRUN_DEFAULT_SPIKEIN_NAME <- "ecoli"
 CUTRUN_SPIKEIN_GENOME_CHOICES <- c("E. coli K-12 MG1655" = CUTRUN_DEFAULT_SPIKEIN_INDEX)
+CUTRUN_NFCORE_NORMALISATION_CHOICES <- c(
+  "CPM (counts per million)" = "CPM",
+  "Spike-in (E. coli K-12)" = "Spikein",
+  "None (raw counts)" = "None"
+)
 GSEAPY_GENESET_OPTIONS <- c(
   "MSigDB_Hallmark_2020",
   "KEGG_2021_Human",
@@ -1681,7 +1730,10 @@ migrate_user_legacy_projects <- function() {
   invisible(migrated)
 }
 
-example_dataset_paths <- function(key) {
+example_dataset_paths <- function(key, variant = "") {
+  if (identical(analysis_key(key), "cutrun") && identical(variant, "differential")) {
+    return(list(name = "example_cutrun_diff", fastq_dir = CUTRUN_DIFF_EXAMPLE_FASTQ_DIR, design_dir = CUTRUN_DIFF_EXAMPLE_DESIGN_DIR, species = "human"))
+  }
   switch(
     analysis_key(key),
     rna = list(name = "example_dataset", fastq_dir = RNA_EXAMPLE_FASTQ_DIR, design_dir = RNA_EXAMPLE_DESIGN_DIR),
@@ -1696,7 +1748,7 @@ example_dataset_paths <- function(key) {
 is_bundled_example_design <- function(path) {
   path <- normalizePath(path %||% "", winslash = "/", mustWork = FALSE)
   examples <- normalizePath(
-    c(file.path(RNA_EXAMPLE_DESIGN_DIR, "design_matrix.txt"), file.path(CUTRUN_EXAMPLE_DESIGN_DIR, "design_matrix.txt"), file.path(ATAC_EXAMPLE_DESIGN_DIR, "design_matrix.txt"), file.path(CHIP_EXAMPLE_DESIGN_DIR, "design_matrix.txt")),
+    c(file.path(RNA_EXAMPLE_DESIGN_DIR, "design_matrix.txt"), file.path(CUTRUN_EXAMPLE_DESIGN_DIR, "design_matrix.txt"), file.path(CUTRUN_DIFF_EXAMPLE_DESIGN_DIR, "design_matrix.txt"), file.path(ATAC_EXAMPLE_DESIGN_DIR, "design_matrix.txt"), file.path(CHIP_EXAMPLE_DESIGN_DIR, "design_matrix.txt")),
     winslash = "/", mustWork = FALSE
   )
   nzchar(path) && path %in% examples
@@ -13316,12 +13368,14 @@ cutrun_diffbind_sample_sheet <- function(project, reference_condition, min_repli
     if (!NROW(design)) stop("The selected CUT&RUN comparison has no samples in design_matrix.txt.")
   }
 
+  nfcore <- is_nfcore_cutrun_project(project)
+  nfcore_spikein <- nfcore && identical(cutrun_nfcore_project_normalisation(project), "Spikein")
   rows <- lapply(seq_len(NROW(design)), function(i) {
     sample <- as.character(design$sample[[i]])
     metrics <- cutrun_alignment_values(project, sample)
-    use_spikein <-
-      !is_nfcore_cutrun_project(project) &&
-      identical(track, "spikein")
+    # nf-core runs follow the normalisation they were submitted with;
+    # native runs follow the SEACR track configuration.
+    use_spikein <- if (nfcore) nfcore_spikein else identical(track, "spikein")
     data.frame(
       SampleID = sample,
       CellType = trimws(as.character(design$cell_type[[i]] %||% "all")),
@@ -13332,7 +13386,7 @@ cutrun_diffbind_sample_sheet <- function(project, reference_condition, min_repli
       Peaks = cutrun_peak_source_file(project, peak_source_id, sample, sources = sources),
       PeakSource = peak_source_label,
       PeakCount = cutrun_peak_source_total(project, peak_source_id, sample, sources = sources),
-      Spikein = if (use_spikein) cutrun_spikein_bam(project, sample) else "",
+      Spikein = if (!use_spikein) "" else if (nfcore) cutrun_nfcore_spikein_bam_path(project, sample) else cutrun_spikein_bam(project, sample),
       normalization_mode = if (use_spikein) "spikein" else "none",
       stringsAsFactors = FALSE
     )
@@ -17601,7 +17655,7 @@ ui <- fluidPage(
 MAIN_UI <- ui
 ui <- function(request) {
   query_string <- tryCatch(request$QUERY_STRING %||% "", error = function(e) "")
-  if (access_token_valid(query_string)) return(MAIN_UI)
+  if (access_token_valid(query_string, stage = "page")) return(MAIN_UI)
   fluidPage(
     tags$head(tags$title("CodeSpringApp access denied")),
     div(
@@ -19086,7 +19140,15 @@ server <- function(input, output, session) {
       if (!is.null(example) && !scrna_example_selected) div(
         class = "read-source-note",
         tags$strong(paste("Bundled", analysis_label(new_analysis_key), "example")),
-        tags$p(if (identical(new_analysis_key, "scrna")) "Use the shared PBMC 3k filtered 10x matrix. Results default to your own ~/csl_results folder." else if (identical(new_analysis_key, "cutrun")) "Use the shared K562 CUT&RUN demo (GSE145187): H3K4me3 and H3K27me3 with two replicates each, plus matched IgG controls, on human GRCh38. Results are written only to your own results folder." else "Use the small example FASTQs and design matrix included with CodeSpringLab. Results are written only to your own results folder."),
+        tags$p(if (identical(new_analysis_key, "scrna")) "Use the shared PBMC 3k filtered 10x matrix. Results default to your own ~/csl_results folder." else if (identical(new_analysis_key, "cutrun")) "Choose a shared public CUT&RUN demo on human GRCh38. Results are written only to your own results folder." else "Use the small example FASTQs and design matrix included with CodeSpringLab. Results are written only to your own results folder."),
+        if (identical(new_analysis_key, "cutrun")) radioButtons(
+          "example_cutrun_variant", NULL,
+          choices = c(
+            "Peak calling: K562 H3K4me3 and H3K27me3, 2 replicates each with IgG (GSE145187)" = "peaks",
+            "Differential peaks: NUT carcinoma H3K27me3, DMSO vs tazemetostat, 2 replicates each with IgG (GSE228533)" = "differential"
+          ),
+          selected = "peaks"
+        ),
         actionButton("use_example_dataset", "Use Example Dataset", class = "btn-default")
       ) else NULL,
       if (scrna_example_selected) tagList(
@@ -19319,10 +19381,10 @@ server <- function(input, output, session) {
 
   observeEvent(input$use_example_dataset, {
     key <- analysis_key(input$new_project_analysis %||% input$analysis %||% "RNA-seq")
-    example <- example_dataset_paths(key)
+    example <- example_dataset_paths(key, input$example_cutrun_variant %||% "")
     if (is.null(example)) return()
     current_name <- trimws(input$new_project_name %||% "")
-    if (!nzchar(current_name) || grepl("^example_(dataset|rnaseq|cutrun|atac|chip|pbmc3k)$", current_name)) {
+    if (!nzchar(current_name) || grepl("^example_(dataset|rnaseq|cutrun|cutrun_diff|atac|chip|pbmc3k)$", current_name)) {
       updateTextInput(session, "new_project_name", value = example$name)
     }
     new_fastq_folders(character(0))
@@ -21886,9 +21948,21 @@ server <- function(input, output, session) {
                     "SEACR is the primary peak caller. MACS2 is optional."
                   ),
 
+                  selectInput(
+                    "cutrun_nfcore_normalisation",
+                    "Track normalisation",
+                    choices = CUTRUN_NFCORE_NORMALISATION_CHOICES,
+                    selected = selected_choice(
+                      input$cutrun_nfcore_normalisation,
+                      unname(CUTRUN_NFCORE_NORMALISATION_CHOICES),
+                      "CPM"
+                    ),
+                    selectize = FALSE
+                  ),
+
                   tags$p(
                     class = "muted small-note",
-                    "The current nf-core integration uses CPM normalization."
+                    "Spike-in aligns every sample to E. coli K-12 and scales it by 10,000 / E. coli-aligned reads. Use it only when the libraries contain E. coli carry-over or added spike-in DNA: a sample with no E. coli reads is left unscaled. The scale factors are in the MultiQC report and the run's results folder."
                   )
                 )
               ),
@@ -22014,7 +22088,7 @@ server <- function(input, output, session) {
             uiOutput("cutrun_diffbind_jobs_ui"),
             tags$p(class = "muted small-note", "Choose a completed MACS2, shared-overlap, or SEACR peak set. Each peak source is stored in a separate differential-results folder, so the same comparison can be run with more than one peak definition."),
             tags$p(class = "muted small-note", "Only comparisons with at least two biological replicates per condition and at least the selected number of peaks in every sample are selectable. The default minimum is 100 peaks per sample."),
-            tags$p(class = "muted small-note", "DiffBind count normalization still follows the signal configuration selected in the SEACR panel: spike-in uses the E. coli BAMs; CPM/raw configurations use genomic background normalization. Peak-source selection does not rescale MACS2 or overlap BED files."),
+            tags$p(class = "muted small-note", if (is_nfcore_cutrun_project(p)) "DiffBind count normalization follows the nf-core run: a spike-in run uses its E. coli BAMs; CPM and raw runs use genomic background normalization. Peak-source selection does not rescale MACS2 or overlap BED files." else "DiffBind count normalization still follows the signal configuration selected in the SEACR panel: spike-in uses the E. coli BAMs; CPM/raw configurations use genomic background normalization. Peak-source selection does not rescale MACS2 or overlap BED files."),
             tags$details(
               tags$summary("Advanced consensus setting"),
               numericInput("cutrun_diffbind_min_replicates", "Replicates that must support a peak", value = 1, min = 1, step = 1),
@@ -23903,7 +23977,11 @@ server <- function(input, output, session) {
           result <- cutrun_nfcore_submit_run(
             project = p,
             run_id = "nfcore_cutandrun",
-            normalisation_mode = "CPM",
+            normalisation_mode = selected_choice(
+              input$cutrun_nfcore_normalisation,
+              unname(CUTRUN_NFCORE_NORMALISATION_CHOICES),
+              "CPM"
+            ),
             include_macs2 = isTRUE(
               input$cutrun_nfcore_include_macs2
             ),
@@ -27457,6 +27535,45 @@ server <- function(input, output, session) {
 }
 
 MAIN_SERVER <- server
+
+# Deep links: ?token=...&project=<analysis>/<name>&view=results opens that project on the chosen tab.
+# CodeSpringHub uses this so "open the results" from a Claude chat lands on the right Results Explorer.
+# Only the user's own saved projects can be opened (the same list the project menu shows).
+DEEP_LINK_VIEWS <- c(results = "Results Explorer", progress = "Progress", logs = "Logs")
+
+deep_link_target <- function(query_string) {
+  query <- tryCatch(shiny::parseQueryString(sub("^\\?", "", as.character(query_string %||% ""))), error = function(e) list())
+  project_id <- trimws(as.character(query[["project"]] %||% ""))
+  if (!nzchar(project_id)) return(NULL)
+  project <- tryCatch(discover_projects()[[project_id]], error = function(e) NULL)
+  if (is.null(project)) return(NULL)
+  view <- tolower(trimws(as.character(query[["view"]] %||% "results")))
+  list(project = project, tab = DEEP_LINK_VIEWS[[if (view %in% names(DEEP_LINK_VIEWS)) view else "results"]])
+}
+
+apply_deep_link <- function(target, input, session) {
+  if (is.null(target)) return(invisible(NULL))
+  project <- target$project
+  # The project menu falls back to the last-used project, so select it there and in the analysis menu.
+  write_last_project_id(project$id)
+  updateSelectInput(session, "analysis", selected = analysis_label(project$analysis_key))
+  # The project menu is rebuilt after the analysis changes; select the project once it is listed,
+  # then open the tab. Give up after a few rounds so the person stays in control of the menus.
+  attempts <- 0L
+  opener <- observeEvent(input$project_id, {
+    attempts <<- attempts + 1L
+    if (identical(input$project_id, project$id)) {
+      updateTabsetPanel(session, "web_main_tabs", selected = target$tab)
+      opener$destroy()
+    } else if (attempts > 5L) {
+      opener$destroy()
+    } else {
+      updateSelectInput(session, "project_id", selected = project$id)
+    }
+  }, ignoreInit = FALSE)
+  invisible(NULL)
+}
+
 server <- function(input, output, session) {
   observeEvent(
     session$clientData$url_search,
@@ -27467,7 +27584,10 @@ server <- function(input, output, session) {
         return(invisible(NULL))
       }
       register_authorized_session(session)
+      target <- deep_link_target(query_string)
+      if (!is.null(target)) write_last_project_id(target$project$id)
       MAIN_SERVER(input, output, session)
+      apply_deep_link(target, input, session)
     },
     once = TRUE,
     ignoreNULL = TRUE

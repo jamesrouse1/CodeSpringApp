@@ -86,7 +86,15 @@ path_within_user_home() {
   [[ "$resolved" == "$USER_HOME" || "$resolved" == "$USER_HOME/"* ]]
 }
 
-if ! path_within_user_home "$APP_DIR"; then
+# A BSR-managed shared install (one pinned copy of CodeSpringApp + CodeSpringLab for everyone) is
+# marked by a CODESPRING_MANAGED_INSTALL file in the folder that holds both checkouts.
+managed_install() {
+  local parent
+  parent="$(cd "$(dirname "$1")" 2>/dev/null && pwd -P)" || return 1
+  [[ -f "$parent/CODESPRING_MANAGED_INSTALL" ]]
+}
+
+if ! path_within_user_home "$APP_DIR" && ! managed_install "$APP_DIR"; then
   printf '\033[31mRefusing to start a CodeSpringApp checkout outside %s\033[0m\n' "$USER_HOME"
   printf 'Log in as %s and clone or pull CodeSpringApp inside that user home.\n' "$USER_NAME"
   exit 1
@@ -98,6 +106,8 @@ export LOGNAME="$USER_NAME"
 
 if [[ -n "${CSL_CODESPRINGLAB_ROOT:-}" ]]; then
   CSL_ROOT="$CSL_CODESPRINGLAB_ROOT"
+elif managed_install "$APP_DIR" && [[ -d "$(dirname "$APP_DIR")/CodeSpringLab/scripts_DoNotTouch" ]]; then
+  CSL_ROOT="$(dirname "$APP_DIR")/CodeSpringLab"
 elif [[ -d "$USER_HOME/CodeSpringLab/scripts_DoNotTouch" ]]; then
   CSL_ROOT="$USER_HOME/CodeSpringLab"
 else
@@ -106,7 +116,7 @@ fi
 LOG_DIR="${CSL_WEB_LOG_DIR:-$USER_HOME/.codespringweb}"
 FETCHNGS_RESULTS_ROOT="${CSL_FETCHNGS_RESULTS_ROOT:-$USER_HOME/csl_results/fetchngs}"
 FETCHNGS_RUNTIME_ROOT="${CSL_FETCHNGS_RUNTIME_ROOT:-$USER_HOME/.codespringflow}"
-if ! path_within_user_home "$CSL_ROOT"; then
+if ! path_within_user_home "$CSL_ROOT" && ! managed_install "$CSL_ROOT"; then
   printf '\033[31mRefusing CodeSpringLab root outside %s:\033[0m %s\n' "$USER_HOME" "$CSL_ROOT"
   exit 1
 fi

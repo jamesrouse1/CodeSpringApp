@@ -352,4 +352,48 @@ assert(
   "group-level tasks should not be attributed to a single replicate"
 )
 
+# -------------------------------------------------------------------------
+# Two bundled CUT&RUN examples: peak calling (default) and differential
+# -------------------------------------------------------------------------
+
+peaks_example <- app_env$example_dataset_paths("cutrun")
+diff_example <- app_env$example_dataset_paths("cutrun", "differential")
+
+assert(
+  identical(peaks_example$design_dir, app_env$CUTRUN_EXAMPLE_DESIGN_DIR) &&
+    identical(app_env$example_dataset_paths("cutrun", "peaks")$name, "example_cutrun"),
+  "the default CUT&RUN example should stay the K562 peak-calling demo"
+)
+assert(
+  identical(diff_example$name, "example_cutrun_diff") &&
+    identical(diff_example$design_dir, app_env$CUTRUN_DIFF_EXAMPLE_DESIGN_DIR) &&
+    identical(diff_example$species, "human"),
+  "the differential variant should point at the two-condition example"
+)
+assert(
+  is.null(app_env$example_dataset_paths("rna", "differential")$design_dir) ||
+    identical(app_env$example_dataset_paths("rna", "differential")$design_dir, app_env$RNA_EXAMPLE_DESIGN_DIR),
+  "the CUT&RUN variant must not change other analyses' examples"
+)
+assert(
+  isTRUE(app_env$is_bundled_example_design(file.path(app_env$CUTRUN_DIFF_EXAMPLE_DESIGN_DIR, "design_matrix.txt"))),
+  "the differential example design should be recognised as bundled"
+)
+
+diff_design_path <- file.path(app_env$CUTRUN_DIFF_EXAMPLE_DESIGN_DIR, "design_matrix.txt")
+if (file.exists(diff_design_path)) {
+  diff_design <- utils::read.delim(diff_design_path, check.names = FALSE, stringsAsFactors = FALSE)
+  targets <- diff_design[diff_design$mark != "IgG", , drop = FALSE]
+  assert(
+    setequal(unique(targets$condition), c("DMSO", "Taz")) &&
+      all(table(targets$condition) == 2L) &&
+      all(targets$control_sample %in% diff_design$sample),
+    "the differential example needs two conditions with two replicates and matched IgG"
+  )
+  assert(
+    all(file.exists(file.path(app_env$CUTRUN_DIFF_EXAMPLE_FASTQ_DIR, unlist(strsplit(diff_design$filename, ","))))),
+    "every FASTQ named in the differential example design should exist"
+  )
+}
+
 cat("CUT&RUN nf-core workshop fixes: PASS\n")

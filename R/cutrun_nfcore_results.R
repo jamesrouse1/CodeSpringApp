@@ -736,6 +736,31 @@ cutrun_nfcore_bam_path <- function(
 }
 
 
+# Sorted E. coli BAM from a spike-in run (kept via save_spikein_aligned).
+# DiffBind uses it to normalise counts to the spike-in.
+cutrun_nfcore_spikein_bam_path <- function(
+  project,
+  sample
+) {
+  paths <- cutrun_nfcore_results_paths(project)
+  files <- cutrun_nfcore_result_files(
+    file.path(paths$alignment, "spikein"),
+    "\\.spikein\\.sorted\\.bam$"
+  )
+
+  if (!length(files)) {
+    return("")
+  }
+
+  cutrun_nfcore_match_sample_file(project, sample, files)
+}
+
+cutrun_nfcore_project_normalisation <- function(project) {
+  cutrun_nfcore_run_normalisation(
+    cutrun_nfcore_submission_paths(project)$params_path
+  )$mode
+}
+
 cutrun_nfcore_bigwig_path <- function(
   project,
   sample
@@ -1099,6 +1124,78 @@ cutrun_nfcore_output_inventory <- function(
   result
 }
 
+# The normalisation a run was submitted with, from its params.json.
+# Runs from before the option existed were always CPM.
+cutrun_nfcore_run_normalisation <- function(params_path) {
+  params <- if (file.exists(params_path)) {
+    tryCatch(
+      jsonlite::read_json(params_path),
+      error = function(e) list()
+    )
+  } else {
+    list()
+  }
+
+  mode <- trimws(as.character(params$normalisation_mode %||% "CPM")[1])
+  constant <- suppressWarnings(
+    as.numeric(params$normalisation_c %||% 10000)[1]
+  )
+
+  list(
+    mode = if (nzchar(mode)) mode else "CPM",
+    constant = if (is.finite(constant)) constant else 10000
+  )
+}
+
+# Spike-in reads and the scale factor nf-core applied to one sample. nf-core
+# divides normalisation_c by the concordantly aligned spike-in pairs, and
+# leaves a sample unscaled (factor 1) when none aligned.
+cutrun_nfcore_spikein_summary <- function(
+  output_dir,
+  nfcore_sample,
+  normalisation
+) {
+  empty <- list(mapped_reads = "", scale_factor = "")
+
+  if (!identical(normalisation$mode, "Spikein")) {
+    return(empty)
+  }
+
+  log_path <- file.path(
+    output_dir,
+    "02_alignment",
+    "bowtie2",
+    "spikein",
+    "log",
+    paste0(nfcore_sample, ".spikein.bowtie2.log")
+  )
+
+  if (!file.exists(log_path)) {
+    return(empty)
+  }
+
+  lines <- readLines(log_path, warn = FALSE)
+  count <- function(pattern) {
+    hit <- grep(pattern, lines, value = TRUE, fixed = TRUE)
+    if (!length(hit)) {
+      return(0)
+    }
+    value <- suppressWarnings(
+      as.numeric(strsplit(trimws(hit[[1]]), " ", fixed = TRUE)[[1]][[1]])
+    )
+    if (is.finite(value)) value else 0
+  }
+
+  pairs <- count("aligned concordantly exactly 1 time") +
+    count("aligned concordantly >1 times")
+  factor <- if (pairs > 0) normalisation$constant / pairs else 1
+
+  list(
+    mapped_reads = format(2 * pairs, scientific = FALSE, trim = TRUE),
+    scale_factor = format(signif(factor, 6), scientific = FALSE, trim = TRUE)
+  )
+}
+
 cutrun_nfcore_alignment_summary_table <- function(project) {
   paths <- cutrun_nfcore_submission_paths(project)
 
@@ -1160,6 +1257,7 @@ cutrun_nfcore_alignment_summary_table <- function(project) {
   # One row per sample, not per sequencing lane.
   mapping <- mapping[!duplicated(as.character(mapping$codespring_sample)), , drop = FALSE]
 
+  normalisation <- cutrun_nfcore_run_normalisation(paths$params_path)
   bowtie2 <- read_multiqc("multiqc_bowtie2.txt")
   flagstat <- read_multiqc("multiqc_samtools_flagstat.txt")
   general <- read_multiqc("multiqc_general_stats.txt")
@@ -1230,6 +1328,12 @@ cutrun_nfcore_alignment_summary_table <- function(project) {
       nfcore_group,
       "_R",
       replicate
+    )
+
+    spikein <- cutrun_nfcore_spikein_summary(
+      paths$output_dir,
+      nfcore_sample,
+      normalisation
     )
 
     bt <- exact_sample_row(bowtie2, nfcore_sample)
@@ -1367,9 +1471,9 @@ cutrun_nfcore_alignment_summary_table <- function(project) {
       deduplicated_reads = processed_mapped_reads,
       fragments_used_for_signal = fragments_used,
       duplicate_fraction = duplicate_fraction,
-      normalization_mode = "CPM",
-      spikein_mapped_reads = "",
-      spikein_scale_factor = "",
+      normalization_mode = normalisation$mode,
+      spikein_mapped_reads = spikein$mapped_reads,
+      spikein_scale_factor = spikein$scale_factor,
       normalized_bedgraph = bedgraph,
       overall_alignment_rate = overall_rate,
       properly_paired_percent = properly_paired_pct,
