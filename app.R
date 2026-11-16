@@ -283,11 +283,36 @@ APP_RUNTIME <- new.env(parent = emptyenv())
 APP_RUNTIME$active_sessions <- 0L
 APP_RUNTIME$idle_generation <- 0L
 
-access_token_valid <- function(query_string) {
+access_token_valid <- function(query_string, stage = "session") {
   if (!nzchar(ACCESS_TOKEN)) return(TRUE)
   query_string <- sub("^\\?", "", as.character(query_string %||% ""))
-  supplied <- tryCatch(shiny::parseQueryString(query_string)[["token"]] %||% "", error = function(e) "")
-  identical(as.character(supplied), ACCESS_TOKEN)
+  query <- tryCatch(shiny::parseQueryString(query_string), error = function(e) list())
+  supplied <- query[["token"]] %||% ""
+  identical(as.character(supplied), ACCESS_TOKEN) || consume_open_ticket(query[["ticket"]] %||% "", stage)
+}
+
+# One-time "open tickets" let CodeSpringHub hand a researcher a link to their results without putting
+# the app's long-lived access token into a chat. The Hub (running as the same Unix user) writes
+# ~/.codespringweb/open_tickets/<ticket> containing an expiry time; the link works once, within
+# that time, and the ticket file is deleted when used.
+OPEN_TICKET_RE <- "^[A-Za-z0-9_-]{32,64}$"
+consume_open_ticket <- function(ticket, stage = "session") {
+  # A page load is two checks: the page request ("page"), then its live session ("session").
+  # The page check turns the ticket into a short-lived ".redeemed" file that only the session
+  # check accepts, so the same link can't be opened again.
+  ticket <- as.character(ticket %||% "")
+  if (!grepl(OPEN_TICKET_RE, ticket)) return(FALSE)
+  dir <- file.path(Sys.getenv("CSL_WEB_HOME", unset = file.path(CURRENT_HOME, ".codespringweb")), "open_tickets")
+  path <- file.path(dir, if (identical(stage, "page")) ticket else paste0(ticket, ".redeemed"))
+  if (!file.exists(path)) return(FALSE)
+  owner_ok <- identical(as.character(file.info(path)$uname), CURRENT_USER)
+  expires <- suppressWarnings(as.numeric(readLines(path, n = 1, warn = FALSE)))
+  valid <- isTRUE(owner_ok) && length(expires) == 1 && is.finite(expires) && as.numeric(Sys.time()) <= expires
+  unlink(path)
+  if (valid && identical(stage, "page")) {
+    writeLines(as.character(as.numeric(Sys.time()) + 120), file.path(dir, paste0(ticket, ".redeemed")))
+  }
+  valid
 }
 
 register_authorized_session <- function(session) {
@@ -308,8 +333,22 @@ register_authorized_session <- function(session) {
   invisible(NULL)
 }
 
+# A BSR-managed shared install keeps one pinned CodeSpringApp and CodeSpringLab side by side in a
+# folder marked with a CODESPRING_MANAGED_INSTALL file; those checkouts may live outside home.
+is_managed_install <- function(path) {
+  nzchar(path %||% "") && file.exists(file.path(dirname(normalizePath(path, winslash = "/", mustWork = FALSE)), "CODESPRING_MANAGED_INSTALL"))
+}
+
 find_codespringlab_root <- function() {
   env_root <- Sys.getenv("CSL_CODESPRINGLAB_ROOT", unset = "")
+  app_root <- Sys.getenv("CSL_WEB_APP_ROOT", unset = getwd())
+  managed_lab <- if (is_managed_install(app_root)) file.path(dirname(normalizePath(app_root, winslash = "/", mustWork = FALSE)), "CodeSpringLab") else ""
+  if (!nzchar(env_root) && nzchar(managed_lab) && dir.exists(file.path(managed_lab, "scripts_DoNotTouch"))) {
+    return(normalizePath(managed_lab, winslash = "/", mustWork = FALSE))
+  }
+  if (nzchar(env_root) && is_managed_install(env_root) && dir.exists(file.path(env_root, "scripts_DoNotTouch"))) {
+    return(normalizePath(env_root, winslash = "/", mustWork = FALSE))
+  }
   if (nzchar(env_root) && !path_is_within(env_root, CURRENT_HOME)) {
     stop(
       "Refusing CSL_CODESPRINGLAB_ROOT outside the effective user's home (",
@@ -17616,7 +17655,7 @@ ui <- fluidPage(
 MAIN_UI <- ui
 ui <- function(request) {
   query_string <- tryCatch(request$QUERY_STRING %||% "", error = function(e) "")
-  if (access_token_valid(query_string)) return(MAIN_UI)
+  if (access_token_valid(query_string, stage = "page")) return(MAIN_UI)
   fluidPage(
     tags$head(tags$title("CodeSpringApp access denied")),
     div(
@@ -27496,6 +27535,45 @@ server <- function(input, output, session) {
 }
 
 MAIN_SERVER <- server
+
+# Deep links: ?token=...&project=<analysis>/<name>&view=results opens that project on the chosen tab.
+# CodeSpringHub uses this so "open the results" from a Claude chat lands on the right Results Explorer.
+# Only the user's own saved projects can be opened (the same list the project menu shows).
+DEEP_LINK_VIEWS <- c(results = "Results Explorer", progress = "Progress", logs = "Logs")
+
+deep_link_target <- function(query_string) {
+  query <- tryCatch(shiny::parseQueryString(sub("^\\?", "", as.character(query_string %||% ""))), error = function(e) list())
+  project_id <- trimws(as.character(query[["project"]] %||% ""))
+  if (!nzchar(project_id)) return(NULL)
+  project <- tryCatch(discover_projects()[[project_id]], error = function(e) NULL)
+  if (is.null(project)) return(NULL)
+  view <- tolower(trimws(as.character(query[["view"]] %||% "results")))
+  list(project = project, tab = DEEP_LINK_VIEWS[[if (view %in% names(DEEP_LINK_VIEWS)) view else "results"]])
+}
+
+apply_deep_link <- function(target, input, session) {
+  if (is.null(target)) return(invisible(NULL))
+  project <- target$project
+  # The project menu falls back to the last-used project, so select it there and in the analysis menu.
+  write_last_project_id(project$id)
+  updateSelectInput(session, "analysis", selected = analysis_label(project$analysis_key))
+  # The project menu is rebuilt after the analysis changes; select the project once it is listed,
+  # then open the tab. Give up after a few rounds so the person stays in control of the menus.
+  attempts <- 0L
+  opener <- observeEvent(input$project_id, {
+    attempts <<- attempts + 1L
+    if (identical(input$project_id, project$id)) {
+      updateTabsetPanel(session, "web_main_tabs", selected = target$tab)
+      opener$destroy()
+    } else if (attempts > 5L) {
+      opener$destroy()
+    } else {
+      updateSelectInput(session, "project_id", selected = project$id)
+    }
+  }, ignoreInit = FALSE)
+  invisible(NULL)
+}
+
 server <- function(input, output, session) {
   observeEvent(
     session$clientData$url_search,
@@ -27506,7 +27584,10 @@ server <- function(input, output, session) {
         return(invisible(NULL))
       }
       register_authorized_session(session)
+      target <- deep_link_target(query_string)
+      if (!is.null(target)) write_last_project_id(target$project$id)
       MAIN_SERVER(input, output, session)
+      apply_deep_link(target, input, session)
     },
     once = TRUE,
     ignoreNULL = TRUE

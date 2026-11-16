@@ -1,0 +1,73 @@
+#!/usr/bin/env Rscript
+# codespring-run: start and follow CodeSpringApp pipelines without the browser.
+#
+#   codespring-run catalog                 what can be run, with allowed references and options (JSON)
+#   codespring-run check  SPEC.json        validate a request and print the exact plan; submits nothing
+#   codespring-run start  SPEC.json        create the project and submit the run (one controller job)
+#   codespring-run status PROJECT_ID       progress of a run started with `start`
+#   codespring-run resume PROJECT_ID       restart a failed or stopped run; finished steps are kept
+#   codespring-run drive  RUN_SPEC.json    (internal) the controller job's loop
+#
+# Used by CodeSpringHub so that runs started from a Claude chat use exactly CodeSpringApp's
+# scripts, references, resources and folders. Output is always one JSON object on stdout;
+# exit status 0 = ok, 2 = request refused (see "errors"), 1 = unexpected failure.
+
+args <- commandArgs(trailingOnly = TRUE)
+file_arg <- sub("^--file=", "", grep("^--file=", commandArgs(), value = TRUE)[1])
+app_dir <- normalizePath(file.path(dirname(normalizePath(file_arg)), ".."), mustWork = TRUE)
+
+emit <- function(x, status = 0L) {
+  cat(jsonlite::toJSON(x, auto_unbox = TRUE, pretty = TRUE, null = "null", force = TRUE), "\n")
+  quit(save = "no", status = status)
+}
+usage <- "usage: codespring-run catalog | check SPEC.json | start SPEC.json | status PROJECT_ID | resume PROJECT_ID"
+if (!length(args)) emit(list(ok = FALSE, errors = usage), 2L)
+
+Sys.setenv(CSL_WEB_APP_ROOT = app_dir)
+app <- new.env(parent = globalenv())
+loaded <- tryCatch({
+  old <- setwd(app_dir)
+  # app.R prints nothing we need; keep stdout clean for the JSON answer.
+  invisible(utils::capture.output(sys.source(file.path(app_dir, "app.R"), envir = app), type = "output"))
+  sys.source(file.path(app_dir, "R", "hub_bridge.R"), envir = app)
+  setwd(old)
+  TRUE
+}, error = function(e) e)
+if (inherits(loaded, "error")) emit(list(ok = FALSE, errors = paste("CodeSpringApp could not load:", conditionMessage(loaded))), 1L)
+
+read_spec <- function(path) {
+  if (is.na(path) || !file.exists(path)) emit(list(ok = FALSE, errors = "Give a readable JSON request file."), 2L)
+  tryCatch(jsonlite::fromJSON(path, simplifyVector = FALSE), error = function(e) emit(list(ok = FALSE, errors = paste("Not valid JSON:", conditionMessage(e))), 2L))
+}
+
+result <- tryCatch(switch(args[[1]],
+  catalog = c(list(ok = TRUE), app$hub_catalog()),
+  check = {
+    spec <- read_spec(args[2])
+    if (!identical(spec$pipeline %||% "", "rnaseq")) list(ok = FALSE, errors = "Only pipeline 'rnaseq' can be started from the Hub so far; run other analyses in CodeSpringApp.")
+    else {
+      chk <- app$hub_check_rnaseq(spec)
+      if (isTRUE(chk$ok)) list(ok = TRUE, plan = app$hub_plan(chk)) else chk
+    }
+  },
+  start = {
+    spec <- read_spec(args[2])
+    if (!identical(spec$pipeline %||% "", "rnaseq")) list(ok = FALSE, errors = "Only pipeline 'rnaseq' can be started from the Hub so far.")
+    else app$hub_start(spec)
+  },
+  status = {
+    if (is.na(args[2])) list(ok = FALSE, errors = usage) else app$hub_status(args[2])
+  },
+  resume = {
+    if (is.na(args[2])) list(ok = FALSE, errors = usage) else app$hub_resume(args[2])
+  },
+  drive = {
+    ok <- app$hub_drive(args[2])
+    list(ok = isTRUE(ok))
+  },
+  list(ok = FALSE, errors = usage)
+), error = function(e) {
+  if (inherits(e, "hub_error")) list(ok = FALSE, errors = conditionMessage(e)) else list(ok = FALSE, errors = paste("Unexpected error:", conditionMessage(e)), unexpected = TRUE)
+})
+
+emit(result, if (isTRUE(result$ok)) 0L else if (isTRUE(result$unexpected)) 1L else 2L)
