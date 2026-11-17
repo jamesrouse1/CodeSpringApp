@@ -156,13 +156,64 @@ dir.create(tickets, recursive = TRUE, showWarnings = FALSE)
 ticket <- paste(sample(c(letters, 0:9), 40, TRUE), collapse = "")
 writeLines(as.character(as.numeric(Sys.time()) + 60), file.path(tickets, ticket))
 assert(app$consume_open_ticket(ticket, "page"), "a fresh ticket opens the page")
-assert(app$consume_open_ticket(ticket, "session"), "...and its live session")
+assert(app$consume_open_ticket(ticket, "page"), "a page fetch (e.g. a link preview) doesn't spend the ticket")
+assert(app$consume_open_ticket(ticket, "session"), "...and its live session spends it")
 assert(!app$consume_open_ticket(ticket, "page") && !app$consume_open_ticket(ticket, "session"), "a ticket works only once")
+assert(!length(list.files(tickets, all.files = TRUE, no.. = TRUE)), "nothing is left behind in open_tickets")
 old_ticket <- paste(sample(c(letters, 0:9), 40, TRUE), collapse = "")
 writeLines(as.character(as.numeric(Sys.time()) - 1), file.path(tickets, old_ticket))
 assert(!app$consume_open_ticket(old_ticket, "page"), "an expired ticket is refused")
+assert(!app$consume_open_ticket(old_ticket, "session"), "...by its live session too")
 assert(!app$consume_open_ticket("../../etc/passwd", "page"), "ticket names are validated")
 pass("deep links and one-time tickets")
+
+# ---- reloads and reconnects after a ticket is redeemed -------------------------------------------
+old_access_token <- app$ACCESS_TOKEN
+assign("ACCESS_TOKEN", "launcher-token-for-tests", envir = app)
+new_ticket <- function(ttl = 60) {
+  t <- paste(sample(c(letters, LETTERS, 0:9), 43, TRUE), collapse = "")
+  writeLines(as.character(as.numeric(Sys.time()) + ttl), file.path(tickets, t))
+  t
+}
+# A fake Shiny session: records the key URL and messages, and serves the registered key response.
+fake_session <- function() {
+  env <- new.env()
+  env$messages <- list()
+  env$registerDataObj <- function(name, data, filterFunc) { env$data_obj <- list(data = data, filter = filterFunc); "session/abc/dataobj/key" }
+  env$sendCustomMessage <- function(type, message) env$messages[[length(env$messages) + 1]] <- list(type = type, message = message)
+  env
+}
+t1 <- new_ticket()
+q1 <- paste0("?ticket=", t1, "&project=rna/x&view=progress")
+assert(identical(app$access_method(q1, "page"), "ticket"), "the Hub link opens the page")
+assert(identical(app$access_method(q1, "session"), "ticket"), "...and its live session")
+sess <- fake_session()
+app$remember_browser(sess)
+assert(identical(sess$messages[[1]]$type, "codespring-browser-key"), "the browser is told to collect its key")
+assert(!grepl(app$ACCESS_TOKEN, paste(unlist(sess$messages), collapse = " "), fixed = TRUE), "the access token is never sent to the browser")
+resp <- sess$data_obj$filter(sess$data_obj$data, list())
+set_cookie <- resp$headers[["Set-Cookie"]]
+assert(grepl("HttpOnly", set_cookie) && grepl("SameSite=Lax", set_cookie) && !grepl(app$ACCESS_TOKEN, set_cookie, fixed = TRUE),
+       "the key arrives as an HttpOnly cookie that isn't the access token")
+cookie <- paste0("other=1; ", sub(";.*$", "", set_cookie))
+# Reload or reconnect: the browser still sends the spent ticket (or none, once the address is cleaned).
+assert(identical(app$access_method(q1, "page", cookie), "browser") && identical(app$access_method(q1, "session", cookie), "browser"),
+       "a reload with the spent ticket still works in the browser that redeemed it")
+assert(identical(app$access_method("?project=rna/x&view=progress", "session", cookie), "browser"), "...and so does a reconnect without it")
+assert(is.na(app$access_method(q1, "page")) && is.na(app$access_method(q1, "session")), "a fresh browser can't reuse the spent ticket")
+assert(is.na(app$access_method(q1, "session", paste0(app$BROWSER_KEY_COOKIE, "=", strrep("0", 64)))), "made-up browser keys are refused")
+assert(is.na(app$access_method(q1, "session", sub("csa_key_[0-9a-f]+", "csa_key_000000000000", cookie))), "another launch's cookie is ignored")
+t2 <- new_ticket(ttl = -1)
+assert(is.na(app$access_method(paste0("?ticket=", t2), "page")) && is.na(app$access_method(paste0("?ticket=", t2), "session")),
+       "an expired ticket is refused")
+t3 <- new_ticket()
+assert(identical(app$access_method(paste0("?ticket=", t3), "session", cookie), "ticket") && !file.exists(file.path(tickets, t3)),
+       "a new ticket opened in a browser that has a key is still spent")
+assert(identical(app$access_method("?token=launcher-token-for-tests", "session"), "token"), "the launcher URL still works")
+assign("APP_RUNTIME", local({ e <- app$APP_RUNTIME; e$browser_keys <- character(0); e }), envir = app)
+assert(is.na(app$access_method("?project=rna/x", "session", cookie)), "keys last only as long as the app process")
+assign("ACCESS_TOKEN", old_access_token, envir = app)
+pass("reloads and reconnects after a ticket is redeemed")
 
 # ---- managed shared install ------------------------------------------------------------------
 suite <- tempfile("suite_"); dir.create(file.path(suite, "CodeSpringLab", "scripts_DoNotTouch"), recursive = TRUE)

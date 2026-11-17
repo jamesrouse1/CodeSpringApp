@@ -283,12 +283,23 @@ APP_RUNTIME <- new.env(parent = emptyenv())
 APP_RUNTIME$active_sessions <- 0L
 APP_RUNTIME$idle_generation <- 0L
 
-access_token_valid <- function(query_string, stage = "session") {
-  if (!nzchar(ACCESS_TOKEN)) return(TRUE)
+access_token_valid <- function(query_string, stage = "session", cookie_header = "") {
+  !is.na(access_method(query_string, stage, cookie_header))
+}
+
+# How a request is allowed in: "open" (no token configured), "token" (the launcher's private URL),
+# "browser" (this browser already redeemed a Hub ticket, see below) or "ticket"; NA when refused.
+access_method <- function(query_string, stage = "session", cookie_header = "") {
+  if (!nzchar(ACCESS_TOKEN)) return("open")
   query_string <- sub("^\\?", "", as.character(query_string %||% ""))
   query <- tryCatch(shiny::parseQueryString(query_string), error = function(e) list())
   supplied <- query[["token"]] %||% ""
-  identical(as.character(supplied), ACCESS_TOKEN) || consume_open_ticket(query[["ticket"]] %||% "", stage)
+  if (identical(as.character(supplied), ACCESS_TOKEN)) return("token")
+  # A ticket is checked before the browser key so that a ticket opened in a browser that already
+  # has a key is still spent rather than left usable until it expires.
+  if (consume_open_ticket(query[["ticket"]] %||% "", stage)) return("ticket")
+  if (browser_key_valid(cookie_header)) return("browser")
+  NA_character_
 }
 
 # One-time "open tickets" let CodeSpringHub hand a researcher a link to their results without putting
@@ -296,24 +307,100 @@ access_token_valid <- function(query_string, stage = "session") {
 # ~/.codespringweb/open_tickets/<ticket> containing an expiry time; the link works once, within
 # that time, and the ticket file is deleted when used.
 OPEN_TICKET_RE <- "^[A-Za-z0-9_-]{32,64}$"
-consume_open_ticket <- function(ticket, stage = "session") {
-  # A page load is two checks: the page request ("page"), then its live session ("session").
-  # The page check turns the ticket into a short-lived ".redeemed" file that only the session
-  # check accepts, so the same link can't be opened again.
-  ticket <- as.character(ticket %||% "")
-  if (!grepl(OPEN_TICKET_RE, ticket)) return(FALSE)
-  dir <- file.path(Sys.getenv("CSL_WEB_HOME", unset = file.path(CURRENT_HOME, ".codespringweb")), "open_tickets")
-  path <- file.path(dir, if (identical(stage, "page")) ticket else paste0(ticket, ".redeemed"))
+open_ticket_dir <- function() {
+  file.path(Sys.getenv("CSL_WEB_HOME", unset = file.path(CURRENT_HOME, ".codespringweb")), "open_tickets")
+}
+open_ticket_live <- function(path) {
   if (!file.exists(path)) return(FALSE)
   owner_ok <- identical(as.character(file.info(path)$uname), CURRENT_USER)
   expires <- suppressWarnings(as.numeric(readLines(path, n = 1, warn = FALSE)))
-  valid <- isTRUE(owner_ok) && length(expires) == 1 && is.finite(expires) && as.numeric(Sys.time()) <= expires
-  unlink(path)
-  if (valid && identical(stage, "page")) {
-    writeLines(as.character(as.numeric(Sys.time()) + 120), file.path(dir, paste0(ticket, ".redeemed")))
-  }
-  valid
+  isTRUE(owner_ok) && length(expires) == 1 && is.finite(expires) && as.numeric(Sys.time()) <= expires
 }
+consume_open_ticket <- function(ticket, stage = "session") {
+  # A page load is two checks: the page request ("page"), then its live session ("session").
+  # The page check only looks: link previews and other prefetches fetch the page without running it,
+  # and must not use the ticket up before the person clicks. The live session (which needs a real
+  # browser) spends it, so the same link can't be opened again. The browser that spent it keeps
+  # working through a browser key (see below).
+  ticket <- as.character(ticket %||% "")
+  if (!grepl(OPEN_TICKET_RE, ticket)) return(FALSE)
+  path <- file.path(open_ticket_dir(), ticket)
+  if (identical(stage, "page")) return(open_ticket_live(path))
+  # Claim the file by renaming it, so two sessions racing for one ticket can't both win.
+  claimed <- paste0(path, ".spent.", Sys.getpid(), ".", random_hex(4))
+  if (!isTRUE(suppressWarnings(file.rename(path, claimed)))) return(FALSE)
+  on.exit(unlink(claimed), add = TRUE)
+  open_ticket_live(claimed)
+}
+
+# Browser keys: once a ticket's live session is allowed in, that browser gets an HttpOnly cookie
+# holding a random key known only to this app process, so reloads and reconnects (tunnel or Wi-Fi
+# drops, laptop wake) keep working for the life of the app without the ticket and without the
+# app's access token ever leaving the server. The cookie name is unique per app launch, so apps on
+# other localhost ports don't overwrite each other's keys.
+random_hex <- function(bytes) {
+  raw <- tryCatch({
+    con <- file("/dev/urandom", "rb", raw = TRUE)
+    on.exit(close(con))
+    readBin(con, "raw", bytes)
+  }, error = function(e) NULL)
+  if (length(raw) != bytes) raw <- as.raw(sample.int(256L, bytes, replace = TRUE) - 1L)
+  paste(as.character(raw), collapse = "")
+}
+BROWSER_KEY_COOKIE <- paste0("csa_key_", random_hex(6))
+APP_RUNTIME$browser_keys <- character(0)
+
+mint_browser_key <- function() {
+  key <- random_hex(32)
+  APP_RUNTIME$browser_keys <- c(APP_RUNTIME$browser_keys, key)
+  key
+}
+
+cookie_value <- function(cookie_header, name) {
+  parts <- strsplit(as.character(cookie_header %||% ""), ";", fixed = TRUE)[[1]]
+  parts <- trimws(parts)
+  hit <- parts[startsWith(parts, paste0(name, "="))]
+  if (!length(hit)) return("")
+  substring(hit[[1]], nchar(name) + 2L)
+}
+
+browser_key_valid <- function(cookie_header) {
+  key <- cookie_value(cookie_header, BROWSER_KEY_COOKIE)
+  nzchar(key) && grepl("^[0-9a-f]{64}$", key) && key %in% APP_RUNTIME$browser_keys
+}
+
+browser_key_cookie <- function(key) {
+  paste0(BROWSER_KEY_COOKIE, "=", key, "; Path=/; HttpOnly; SameSite=Lax")
+}
+
+# After a ticket session is allowed in: give the browser its key (through a session-only URL that
+# answers with Set-Cookie, so page script never sees the key) and take the spent ticket out of the
+# address bar, keeping project/view, so a reload doesn't send it again.
+remember_browser <- function(session) {
+  key <- mint_browser_key()
+  url <- session$registerDataObj("codespring_browser_key", key, function(data, req) {
+    shiny::httpResponse(204, "text/plain", "", headers = list(`Set-Cookie` = browser_key_cookie(data), `Cache-Control` = "no-store"))
+  })
+  session$sendCustomMessage("codespring-browser-key", list(url = url))
+  invisible(key)
+}
+
+BROWSER_KEY_SCRIPT <- tags$script(HTML("
+(function() {
+  function register() {
+    Shiny.addCustomMessageHandler('codespring-browser-key', function(message) {
+      fetch(message.url, {credentials: 'same-origin', cache: 'no-store'}).then(function(response) {
+        if (!response.ok) return;
+        var params = new URLSearchParams(window.location.search);
+        params.delete('ticket');
+        var search = params.toString();
+        window.history.replaceState(window.history.state, '', window.location.pathname + (search ? '?' + search : '') + window.location.hash);
+      });
+    });
+  }
+  if (window.Shiny && Shiny.addCustomMessageHandler) register(); else document.addEventListener('DOMContentLoaded', register);
+})();
+"))
 
 register_authorized_session <- function(session) {
   APP_RUNTIME$active_sessions <- APP_RUNTIME$active_sessions + 1L
@@ -17652,10 +17739,11 @@ ui <- fluidPage(
   )
 )
 
-MAIN_UI <- ui
+MAIN_UI <- tagList(ui, BROWSER_KEY_SCRIPT)
 ui <- function(request) {
   query_string <- tryCatch(request$QUERY_STRING %||% "", error = function(e) "")
-  if (access_token_valid(query_string, stage = "page")) return(MAIN_UI)
+  cookie_header <- tryCatch(request$HTTP_COOKIE %||% "", error = function(e) "")
+  if (access_token_valid(query_string, stage = "page", cookie_header = cookie_header)) return(MAIN_UI)
   fluidPage(
     tags$head(tags$title("CodeSpringApp access denied")),
     div(
@@ -27579,11 +27667,14 @@ server <- function(input, output, session) {
     session$clientData$url_search,
     {
       query_string <- isolate(session$clientData$url_search %||% "")
-      if (!access_token_valid(query_string)) {
+      cookie_header <- tryCatch(session$request$HTTP_COOKIE %||% "", error = function(e) "")
+      method <- access_method(query_string, cookie_header = cookie_header)
+      if (is.na(method)) {
         session$close()
         return(invisible(NULL))
       }
       register_authorized_session(session)
+      if (identical(method, "ticket")) remember_browser(session)
       target <- deep_link_target(query_string)
       if (!is.null(target)) write_last_project_id(target$project$id)
       MAIN_SERVER(input, output, session)
