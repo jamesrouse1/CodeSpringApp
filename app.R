@@ -283,36 +283,139 @@ APP_RUNTIME <- new.env(parent = emptyenv())
 APP_RUNTIME$active_sessions <- 0L
 APP_RUNTIME$idle_generation <- 0L
 
-access_token_valid <- function(query_string, stage = "session") {
-  if (!nzchar(ACCESS_TOKEN)) return(TRUE)
-  query_string <- sub("^\\?", "", as.character(query_string %||% ""))
-  query <- tryCatch(shiny::parseQueryString(query_string), error = function(e) list())
-  supplied <- query[["token"]] %||% ""
-  identical(as.character(supplied), ACCESS_TOKEN) || consume_open_ticket(query[["ticket"]] %||% "", stage)
+# How a page or live session is let in, like CodeSpringHub's portal:
+#   "open"    no access token configured (a plain local run)
+#   "token"   the launcher's private URL (?token=...)
+#   "browser" this browser already swapped a one-time Hub link for a key (an HttpOnly cookie)
+# NA when refused. One-time links themselves are handled by the page (see open_page_response).
+access_method <- function(query_string, cookie_header = "") {
+  if (!nzchar(ACCESS_TOKEN)) return("open")
+  query <- parse_query(query_string)
+  if (identical(as.character(query[["token"]] %||% ""), ACCESS_TOKEN)) return("token")
+  if (browser_key_valid(cookie_header)) return("browser")
+  NA_character_
 }
 
-# One-time "open tickets" let CodeSpringHub hand a researcher a link to their results without putting
-# the app's long-lived access token into a chat. The Hub (running as the same Unix user) writes
-# ~/.codespringweb/open_tickets/<ticket> containing an expiry time; the link works once, within
-# that time, and the ticket file is deleted when used.
+access_token_valid <- function(query_string, cookie_header = "") {
+  !is.na(access_method(query_string, cookie_header))
+}
+
+parse_query <- function(query_string) {
+  query_string <- sub("^\\?", "", as.character(query_string %||% ""))
+  tryCatch(shiny::parseQueryString(query_string), error = function(e) list())
+}
+
+# One-time links from CodeSpringHub, the same way the Hub's portal opens: the link carries a ticket
+# in its #fragment (http://localhost:PORT/?project=...#ticket=...), never the app's access token.
+# Browsers don't send a #fragment to the server, so link previews and prefetches can't use it up.
+# The page's script moves it into the address (?ticket=...); the page request then spends it (the
+# Hub, running as the same Unix user, wrote ~/.codespringweb/open_tickets/<ticket> holding an expiry
+# time) and answers with a redirect that gives this browser its key and drops the ticket from the
+# address. Reloads and reconnects (tunnel or Wi-Fi drops, laptop wake) then use the key for the
+# life of this app; the access token never leaves the server.
 OPEN_TICKET_RE <- "^[A-Za-z0-9_-]{32,64}$"
-consume_open_ticket <- function(ticket, stage = "session") {
-  # A page load is two checks: the page request ("page"), then its live session ("session").
-  # The page check turns the ticket into a short-lived ".redeemed" file that only the session
-  # check accepts, so the same link can't be opened again.
+open_ticket_dir <- function() {
+  file.path(Sys.getenv("CSL_WEB_HOME", unset = file.path(CURRENT_HOME, ".codespringweb")), "open_tickets")
+}
+
+consume_open_ticket <- function(ticket) {
   ticket <- as.character(ticket %||% "")
   if (!grepl(OPEN_TICKET_RE, ticket)) return(FALSE)
-  dir <- file.path(Sys.getenv("CSL_WEB_HOME", unset = file.path(CURRENT_HOME, ".codespringweb")), "open_tickets")
-  path <- file.path(dir, if (identical(stage, "page")) ticket else paste0(ticket, ".redeemed"))
-  if (!file.exists(path)) return(FALSE)
-  owner_ok <- identical(as.character(file.info(path)$uname), CURRENT_USER)
-  expires <- suppressWarnings(as.numeric(readLines(path, n = 1, warn = FALSE)))
-  valid <- isTRUE(owner_ok) && length(expires) == 1 && is.finite(expires) && as.numeric(Sys.time()) <= expires
-  unlink(path)
-  if (valid && identical(stage, "page")) {
-    writeLines(as.character(as.numeric(Sys.time()) + 120), file.path(dir, paste0(ticket, ".redeemed")))
+  path <- file.path(open_ticket_dir(), ticket)
+  # Claim the file by renaming it, so two requests racing for one ticket can't both win.
+  claimed <- paste0(path, ".spent.", Sys.getpid(), ".", random_hex(4))
+  if (!isTRUE(suppressWarnings(file.rename(path, claimed)))) return(FALSE)
+  on.exit(unlink(claimed), add = TRUE)
+  owner_ok <- identical(as.character(file.info(claimed)$uname), CURRENT_USER)
+  expires <- suppressWarnings(as.numeric(readLines(claimed, n = 1, warn = FALSE)))
+  isTRUE(owner_ok) && length(expires) == 1 && is.finite(expires) && as.numeric(Sys.time()) <= expires
+}
+
+random_hex <- function(bytes) {
+  raw <- tryCatch({
+    con <- file("/dev/urandom", "rb", raw = TRUE)
+    on.exit(close(con))
+    readBin(con, "raw", bytes)
+  }, error = function(e) NULL)
+  if (length(raw) != bytes) raw <- as.raw(sample.int(256L, bytes, replace = TRUE) - 1L)
+  paste(as.character(raw), collapse = "")
+}
+
+# Cookies ignore the port, so the name is unique per app launch: apps (and the Hub's portal) on
+# other localhost ports don't overwrite each other's keys.
+BROWSER_KEY_COOKIE <- paste0("csa_key_", random_hex(6))
+APP_RUNTIME$browser_keys <- character(0)
+
+mint_browser_key <- function() {
+  key <- random_hex(32)
+  APP_RUNTIME$browser_keys <- c(APP_RUNTIME$browser_keys, key)
+  key
+}
+
+cookie_value <- function(cookie_header, name) {
+  parts <- trimws(strsplit(as.character(cookie_header %||% ""), ";", fixed = TRUE)[[1]])
+  hit <- parts[startsWith(parts, paste0(name, "="))]
+  if (!length(hit)) return("")
+  substring(hit[[1]], nchar(name) + 2L)
+}
+
+browser_key_valid <- function(cookie_header) {
+  key <- cookie_value(cookie_header, BROWSER_KEY_COOKIE)
+  nzchar(key) && grepl("^[0-9a-f]{64}$", key) && key %in% APP_RUNTIME$browser_keys
+}
+
+# The address without its ticket, keeping project/view and anything else.
+query_without_ticket <- function(query_string) {
+  query <- parse_query(query_string)
+  query[["ticket"]] <- NULL
+  if (!length(query)) return("")
+  paste0("?", paste(vapply(names(query), function(k) paste0(utils::URLencode(k, reserved = TRUE), "=", utils::URLencode(as.character(query[[k]]), reserved = TRUE)), ""), collapse = "&"))
+}
+
+access_page <- function(title, message, script = NULL) {
+  fluidPage(
+    tags$head(tags$title(title)),
+    if (!is.null(script)) tags$script(HTML(script)),
+    div(
+      style = "max-width:720px;margin:80px auto;font-family:system-ui;padding:28px;border:1px solid #d8dee8;border-radius:10px;",
+      h2(title),
+      lapply(message, p)
+    )
+  )
+}
+
+# The page before the person is in: moves a #ticket into the address so the server can spend it.
+OPEN_LINK_SCRIPT <- "
+(function() {
+  var m = window.location.hash.match(/(?:^#|&)ticket=([A-Za-z0-9_-]{32,64})(?:&|$)/);
+  if (!m) return;
+  var params = new URLSearchParams(window.location.search);
+  params.set('ticket', m[1]);
+  window.location.replace(window.location.pathname + '?' + params.toString());
+})();
+"
+
+DENIED_TEXT <- c(
+  "This CodeSpringApp link has already been used or has expired, or it belongs to a different CodeSpringApp launch.",
+  "Ask Claude (BSR's Agent) for a new CodeSpringApp link, or open the exact private URL printed by your launcher."
+)
+
+# What the page answers when access_method refused it: spend a ?ticket=, or show the opening page.
+open_page_response <- function(request) {
+  query_string <- tryCatch(request$QUERY_STRING %||% "", error = function(e) "")
+  ticket <- parse_query(query_string)[["ticket"]] %||% ""
+  if (nzchar(ticket)) {
+    if (!consume_open_ticket(ticket)) return(access_page("Access denied", DENIED_TEXT))
+    path <- tryCatch(request$PATH_INFO %||% "/", error = function(e) "/")
+    if (!nzchar(path)) path <- "/"
+    return(shiny::httpResponse(302, "text/plain", "", headers = list(
+      Location = paste0(path, query_without_ticket(query_string)),
+      `Set-Cookie` = paste0(BROWSER_KEY_COOKIE, "=", mint_browser_key(), "; Path=/; HttpOnly; SameSite=Lax"),
+      `Cache-Control` = "no-store"
+    )))
   }
-  valid
+  # No ticket in the address: a #ticket link still to be moved there, or no access at all.
+  access_page("Access denied", DENIED_TEXT, OPEN_LINK_SCRIPT)
 }
 
 register_authorized_session <- function(session) {
@@ -17655,16 +17758,9 @@ ui <- fluidPage(
 MAIN_UI <- ui
 ui <- function(request) {
   query_string <- tryCatch(request$QUERY_STRING %||% "", error = function(e) "")
-  if (access_token_valid(query_string, stage = "page")) return(MAIN_UI)
-  fluidPage(
-    tags$head(tags$title("CodeSpringApp access denied")),
-    div(
-      style = "max-width:720px;margin:80px auto;font-family:system-ui;padding:28px;border:1px solid #d8dee8;border-radius:10px;",
-      h2("Access denied"),
-      p("This port belongs to a different private CodeSpringApp launch, or the private URL token is missing."),
-      p("Start CodeSpringApp from your own Unix account and open the exact private URL printed by your launcher.")
-    )
-  )
+  cookie_header <- tryCatch(request$HTTP_COOKIE %||% "", error = function(e) "")
+  if (access_token_valid(query_string, cookie_header)) return(MAIN_UI)
+  open_page_response(request)
 }
 # -------------------------------------------------------------------------
 # nf-core/cutandrun Results Explorer backend adapters
@@ -27579,7 +27675,8 @@ server <- function(input, output, session) {
     session$clientData$url_search,
     {
       query_string <- isolate(session$clientData$url_search %||% "")
-      if (!access_token_valid(query_string)) {
+      cookie_header <- tryCatch(session$request$HTTP_COOKIE %||% "", error = function(e) "")
+      if (!access_token_valid(query_string, cookie_header)) {
         session$close()
         return(invisible(NULL))
       }

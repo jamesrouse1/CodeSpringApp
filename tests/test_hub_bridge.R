@@ -153,15 +153,43 @@ assert(identical(app$deep_link_target(paste0("?project=", res$project_id, "&view
 
 tickets <- file.path(Sys.getenv("CSL_WEB_HOME"), "open_tickets")
 dir.create(tickets, recursive = TRUE, showWarnings = FALSE)
-ticket <- paste(sample(c(letters, 0:9), 40, TRUE), collapse = "")
-writeLines(as.character(as.numeric(Sys.time()) + 60), file.path(tickets, ticket))
-assert(app$consume_open_ticket(ticket, "page"), "a fresh ticket opens the page")
-assert(app$consume_open_ticket(ticket, "session"), "...and its live session")
-assert(!app$consume_open_ticket(ticket, "page") && !app$consume_open_ticket(ticket, "session"), "a ticket works only once")
-old_ticket <- paste(sample(c(letters, 0:9), 40, TRUE), collapse = "")
-writeLines(as.character(as.numeric(Sys.time()) - 1), file.path(tickets, old_ticket))
-assert(!app$consume_open_ticket(old_ticket, "page"), "an expired ticket is refused")
-assert(!app$consume_open_ticket("../../etc/passwd", "page"), "ticket names are validated")
+new_ticket <- function(ttl = 60) {
+  t <- paste(sample(c(letters, LETTERS, 0:9, "_", "-"), 43, TRUE), collapse = "")
+  writeLines(as.character(as.numeric(Sys.time()) + ttl), file.path(tickets, t))
+  t
+}
+# Requests to the page as httpuv hands them to ui(): with a private access token configured.
+app$ACCESS_TOKEN <- strrep("ab", 32)
+page <- function(query = "", cookie = "") app$ui(list(QUERY_STRING = query, HTTP_COOKIE = cookie, PATH_INFO = "/"))
+is_main <- function(x) identical(x, app$MAIN_UI)
+is_denied <- function(x) !inherits(x, "httpResponse") && !is_main(x) && grepl("Access denied", as.character(x))
+
+assert(is_main(page(paste0("?token=", app$ACCESS_TOKEN))), "the launcher's private URL still opens the app")
+assert(is_denied(page("")) && is_denied(page("?token=wrong")), "no token, no access")
+
+# A Hub link: http://localhost:PORT/?project=...&view=...#ticket=... The #fragment never reaches the
+# server, so a prefetch only gets the opening page and the ticket is untouched.
+ticket <- new_ticket()
+first <- page(paste0("?project=", res$project_id, "&view=progress"))
+assert(is_denied(first) && grepl("location.hash", as.character(first), fixed = TRUE), "a #ticket link first gets the page that moves the ticket into the address")
+assert(file.exists(file.path(tickets, ticket)), "...and a prefetch doesn't use the ticket up")
+
+# The page's script reloads with ?ticket=...: spent once, answered with a redirect that sets the key.
+swap <- page(paste0("?project=", res$project_id, "&view=progress&ticket=", ticket))
+assert(inherits(swap, "httpResponse") && swap$status == 302, "a fresh ticket is swapped (redirect)")
+assert(identical(swap$headers$Location, paste0("/?project=", utils::URLencode(res$project_id, reserved = TRUE), "&view=progress")), "the redirect keeps project/view and drops the ticket")
+set_cookie <- swap$headers$`Set-Cookie`
+assert(grepl("HttpOnly", set_cookie) && grepl("SameSite=Lax", set_cookie) && startsWith(set_cookie, app$BROWSER_KEY_COOKIE), "the key is an HttpOnly cookie unique to this launch")
+assert(!file.exists(file.path(tickets, ticket)) && !length(list.files(tickets, pattern = "spent")), "the ticket file is gone")
+cookie <- sub(";.*$", "", set_cookie)
+assert(is_main(page(paste0("?project=", res$project_id, "&view=progress"), cookie)), "with the key the page opens")
+assert(is_main(page("", paste0("other=1; ", cookie))) && app$access_token_valid("", cookie), "reloads and live sessions (reconnects) work with the key")
+assert(is_denied(page(paste0("?ticket=", ticket))), "a used ticket is refused in a fresh browser")
+assert(is_denied(page("", paste0(app$BROWSER_KEY_COOKIE, "=", strrep("0", 64)))), "a made-up key is refused")
+assert(is_denied(page("", paste0("csa_key_000000000000=", sub("^[^=]*=", "", cookie)))), "another launch's cookie name is refused")
+assert(is_denied(page(paste0("?ticket=", new_ticket(-1)))), "an expired ticket is refused")
+assert(is_denied(page("?ticket=../../etc/passwd")) && !app$consume_open_ticket("../../etc/passwd"), "ticket names are validated")
+app$ACCESS_TOKEN <- ""
 pass("deep links and one-time tickets")
 
 # ---- managed shared install ------------------------------------------------------------------
