@@ -6,6 +6,7 @@
 #   codespring-run start  SPEC.json        create the project and submit the run (one controller job)
 #   codespring-run status PROJECT_ID       progress of a run started with `start`
 #   codespring-run resume PROJECT_ID       restart a failed or stopped run; finished steps are kept
+#   codespring-run continue PROJECT_ID     start the next step of a run paused in one-step-at-a-time mode
 #   codespring-run drive  RUN_SPEC.json    (internal) the controller job's loop
 #
 # Used by CodeSpringHub so that runs started from a Claude chat use exactly CodeSpringApp's
@@ -20,7 +21,7 @@ emit <- function(x, status = 0L) {
   cat(jsonlite::toJSON(x, auto_unbox = TRUE, pretty = TRUE, null = "null", force = TRUE), "\n")
   quit(save = "no", status = status)
 }
-usage <- "usage: codespring-run catalog | check SPEC.json | start SPEC.json | status PROJECT_ID | resume PROJECT_ID"
+usage <- "usage: codespring-run catalog | check SPEC.json | start SPEC.json | status PROJECT_ID | resume PROJECT_ID | continue PROJECT_ID"
 if (!length(args)) emit(list(ok = FALSE, errors = usage), 2L)
 
 Sys.setenv(CSL_WEB_APP_ROOT = app_dir)
@@ -60,6 +61,9 @@ result <- tryCatch(switch(args[[1]],
   },
   resume = {
     if (is.na(args[2])) list(ok = FALSE, errors = usage) else app$hub_resume(args[2])
+  },
+  continue = {
+    if (is.na(args[2])) list(ok = FALSE, errors = usage) else app$hub_continue(args[2])
   },
   drive = {
     ok <- app$hub_drive(args[2])
