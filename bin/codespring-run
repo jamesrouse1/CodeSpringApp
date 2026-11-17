@@ -5,8 +5,13 @@
 #   codespring-run check  SPEC.json        validate a request and print the exact plan; submits nothing
 #   codespring-run start  SPEC.json        create the project and submit the run (one controller job)
 #   codespring-run status PROJECT_ID       progress of a run started with `start`
-#   codespring-run resume PROJECT_ID       restart a failed or stopped run; finished steps are kept
-#   codespring-run continue PROJECT_ID     start the next step of a run paused in one-step-at-a-time mode
+#   codespring-run resume PROJECT_ID       restart a failed, stopped or cancelled run; finished steps are kept
+#   codespring-run continue PROJECT_ID [--add rsem,kallisto] [--skip GSEA] [--mode all|step]
+#                                          start the next step of a paused run (one step at a time), or
+#                                          add RSEM/Kallisto to a finished run
+#   codespring-run cancel PROJECT_ID       stop the controller and cancel the run's queued/running Slurm jobs
+#   codespring-run qc PROJECT_ID [STEP]    per-sample QC so far (Cutadapt, FastQC, STAR, featureCounts, Kallisto)
+#   codespring-run report PROJECT_ID       (re)build the run's HTML report packet (plots, QC, DEG lists, methods)
 #   codespring-run drive  RUN_SPEC.json    (internal) the controller job's loop
 #
 # Used by CodeSpringHub so that runs started from a Claude chat use exactly CodeSpringApp's
@@ -21,7 +26,15 @@ emit <- function(x, status = 0L) {
   cat(jsonlite::toJSON(x, auto_unbox = TRUE, pretty = TRUE, null = "null", force = TRUE), "\n")
   quit(save = "no", status = status)
 }
-usage <- "usage: codespring-run catalog | check SPEC.json | start SPEC.json | status PROJECT_ID | resume PROJECT_ID | continue PROJECT_ID"
+usage <- paste("usage: codespring-run catalog | check SPEC.json | start SPEC.json | status PROJECT_ID | resume PROJECT_ID |",
+               "continue PROJECT_ID [--add IDS] [--skip STEPS] [--mode all|step] | cancel PROJECT_ID | qc PROJECT_ID [STEP] | report PROJECT_ID")
+
+flag_value <- function(name) {
+  i <- match(name, args)
+  if (is.na(i) || i == length(args)) return(NULL)
+  v <- trimws(strsplit(args[[i + 1]], ",", fixed = TRUE)[[1]])
+  v[nzchar(v)]
+}
 if (!length(args)) emit(list(ok = FALSE, errors = usage), 2L)
 
 Sys.setenv(CSL_WEB_APP_ROOT = app_dir)
@@ -31,6 +44,7 @@ loaded <- tryCatch({
   # app.R prints nothing we need; keep stdout clean for the JSON answer.
   invisible(utils::capture.output(sys.source(file.path(app_dir, "app.R"), envir = app), type = "output"))
   sys.source(file.path(app_dir, "R", "hub_bridge.R"), envir = app)
+  sys.source(file.path(app_dir, "R", "hub_report.R"), envir = app)
   setwd(old)
   TRUE
 }, error = function(e) e)
@@ -63,7 +77,18 @@ result <- tryCatch(switch(args[[1]],
     if (is.na(args[2])) list(ok = FALSE, errors = usage) else app$hub_resume(args[2])
   },
   continue = {
-    if (is.na(args[2])) list(ok = FALSE, errors = usage) else app$hub_continue(args[2])
+    if (is.na(args[2])) list(ok = FALSE, errors = usage)
+    else app$hub_continue(args[2], add = flag_value("--add") %||% character(0), skip = flag_value("--skip") %||% character(0),
+                          run_mode = flag_value("--mode"))
+  },
+  cancel = {
+    if (is.na(args[2])) list(ok = FALSE, errors = usage) else app$hub_cancel(args[2])
+  },
+  qc = {
+    if (is.na(args[2])) list(ok = FALSE, errors = usage) else app$hub_qc(args[2], if (length(args) >= 3 && !startsWith(args[3], "--")) args[3] else NULL)
+  },
+  report = {
+    if (is.na(args[2])) list(ok = FALSE, errors = usage) else app$hub_report(args[2])
   },
   drive = {
     ok <- app$hub_drive(args[2])
