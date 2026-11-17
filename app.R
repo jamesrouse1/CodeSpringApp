@@ -311,12 +311,13 @@ parse_query <- function(query_string) {
 # The page's script moves it into the address (?ticket=...); the page request then spends it (the
 # Hub, running as the same Unix user, wrote ~/.codespringweb/open_tickets/<ticket> holding an expiry
 # time) and answers with a redirect that gives this browser its key and drops the ticket from the
-# address. Reloads and reconnects (tunnel or Wi-Fi drops, laptop wake) then use the key for the
-# life of this app; the access token never leaves the server.
+# address. Like the portal's saved secret, the key is kept in the person's own
+# ~/.codespringweb/browser-key (600) and the cookie lasts 30 days, so reopening, reloads, reconnects
+# (tunnel or Wi-Fi drops, laptop wake), a closed browser and an app restart all keep working.
+# Deleting that file signs every browser out. The access token never leaves the server.
 OPEN_TICKET_RE <- "^[A-Za-z0-9_-]{32,64}$"
-open_ticket_dir <- function() {
-  file.path(Sys.getenv("CSL_WEB_HOME", unset = file.path(CURRENT_HOME, ".codespringweb")), "open_tickets")
-}
+web_home <- function() Sys.getenv("CSL_WEB_HOME", unset = file.path(CURRENT_HOME, ".codespringweb"))
+open_ticket_dir <- function() file.path(web_home(), "open_tickets")
 
 consume_open_ticket <- function(ticket) {
   ticket <- as.character(ticket %||% "")
@@ -341,16 +342,35 @@ random_hex <- function(bytes) {
   paste(as.character(raw), collapse = "")
 }
 
-# Cookies ignore the port, so the name is unique per app launch: apps (and the Hub's portal) on
-# other localhost ports don't overwrite each other's keys.
-BROWSER_KEY_COOKIE <- paste0("csa_key_", random_hex(6))
-APP_RUNTIME$browser_keys <- character(0)
+# Cookies ignore the port, so the name carries the Unix user: other people's apps reached through
+# the same browser don't overwrite this key, and it survives the app restarting on another port.
+BROWSER_KEY_COOKIE <- paste0("csa_key_", gsub("[^A-Za-z0-9_]", "_", CURRENT_USER))
+BROWSER_KEY_MAX_AGE <- 30L * 24L * 3600L
+BROWSER_KEY_RE <- "^[0-9a-f]{64}$"
+browser_key_file <- function() file.path(web_home(), "browser-key")
 
-mint_browser_key <- function() {
+# This person's saved browser key, or "" if there is none (or it isn't theirs). create = TRUE makes one.
+browser_key <- function(create = FALSE) {
+  path <- browser_key_file()
+  if (file.exists(path)) {
+    key <- suppressWarnings(tryCatch(readLines(path, n = 1, warn = FALSE), error = function(e) ""))
+    if (identical(as.character(file.info(path)$uname), CURRENT_USER) && length(key) == 1 && grepl(BROWSER_KEY_RE, key)) return(key)
+    if (!create) return("")
+  }
+  if (!create) return("")
+  dir.create(web_home(), recursive = TRUE, showWarnings = FALSE, mode = "0700")
+  old_umask <- Sys.umask("077")
+  on.exit(Sys.umask(old_umask), add = TRUE)
   key <- random_hex(32)
-  APP_RUNTIME$browser_keys <- c(APP_RUNTIME$browser_keys, key)
-  key
+  tmp <- paste0(path, ".", Sys.getpid(), ".", random_hex(4))
+  writeLines(key, tmp)
+  Sys.chmod(tmp, "0600")
+  file.rename(tmp, path)
+  # Two first-time swaps at once: whichever file landed last wins, and both hand out that one.
+  browser_key()
 }
+
+mint_browser_key <- function() browser_key(create = TRUE)
 
 cookie_value <- function(cookie_header, name) {
   parts <- trimws(strsplit(as.character(cookie_header %||% ""), ";", fixed = TRUE)[[1]])
@@ -361,7 +381,8 @@ cookie_value <- function(cookie_header, name) {
 
 browser_key_valid <- function(cookie_header) {
   key <- cookie_value(cookie_header, BROWSER_KEY_COOKIE)
-  nzchar(key) && grepl("^[0-9a-f]{64}$", key) && key %in% APP_RUNTIME$browser_keys
+  saved <- browser_key()
+  nzchar(key) && grepl(BROWSER_KEY_RE, key) && nzchar(saved) && identical(key, saved)
 }
 
 # The address without its ticket, keeping project/view and anything else.
@@ -410,7 +431,7 @@ open_page_response <- function(request) {
     if (!nzchar(path)) path <- "/"
     return(shiny::httpResponse(302, "text/plain", "", headers = list(
       Location = paste0(path, query_without_ticket(query_string)),
-      `Set-Cookie` = paste0(BROWSER_KEY_COOKIE, "=", mint_browser_key(), "; Path=/; HttpOnly; SameSite=Lax"),
+      `Set-Cookie` = paste0(BROWSER_KEY_COOKIE, "=", mint_browser_key(), "; Path=/; Max-Age=", BROWSER_KEY_MAX_AGE, "; HttpOnly; SameSite=Lax"),
       `Cache-Control` = "no-store"
     )))
   }
