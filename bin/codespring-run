@@ -6,8 +6,9 @@
 #   codespring-run start  SPEC.json        create the project and submit the run (one controller job)
 #   codespring-run status PROJECT_ID       progress of a run started with `start`
 #   codespring-run resume PROJECT_ID       restart a failed, stopped or cancelled run; finished steps are kept
-#   codespring-run continue PROJECT_ID [--add kallisto,rsem] [--skip GSEA] [--mode auto|step]
-#                                          go on after a pause, or add an optional step to a finished run
+#   codespring-run continue PROJECT_ID [--add rsem,kallisto] [--skip GSEA] [--mode all|step]
+#                                          start the next step of a paused run (one step at a time), or
+#                                          add RSEM/Kallisto to a finished run
 #   codespring-run cancel PROJECT_ID       stop the controller and cancel the run's queued/running Slurm jobs
 #   codespring-run qc PROJECT_ID [STEP]    per-sample QC so far (Cutadapt, FastQC, STAR, featureCounts, Kallisto)
 #   codespring-run report PROJECT_ID       (re)build the run's HTML report packet (plots, QC, DEG lists, methods)
@@ -26,7 +27,7 @@ emit <- function(x, status = 0L) {
   quit(save = "no", status = status)
 }
 usage <- paste("usage: codespring-run catalog | check SPEC.json | start SPEC.json | status PROJECT_ID | resume PROJECT_ID |",
-               "continue PROJECT_ID [--add IDS] [--skip STEPS] [--mode auto|step] | cancel PROJECT_ID | qc PROJECT_ID [STEP] | report PROJECT_ID")
+               "continue PROJECT_ID [--add IDS] [--skip STEPS] [--mode all|step] | cancel PROJECT_ID | qc PROJECT_ID [STEP] | report PROJECT_ID")
 
 flag_value <- function(name) {
   i <- match(name, args)
@@ -78,7 +79,7 @@ result <- tryCatch(switch(args[[1]],
   continue = {
     if (is.na(args[2])) list(ok = FALSE, errors = usage)
     else app$hub_continue(args[2], add = flag_value("--add") %||% character(0), skip = flag_value("--skip") %||% character(0),
-                          mode = flag_value("--mode"))
+                          run_mode = flag_value("--mode"))
   },
   cancel = {
     if (is.na(args[2])) list(ok = FALSE, errors = usage) else app$hub_cancel(args[2])

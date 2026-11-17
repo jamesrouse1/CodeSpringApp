@@ -14,12 +14,23 @@
 #
 # Bulk RNA-seq is the first pipeline wired up; others are listed in the catalog as "app only".
 #
-# A run can go straight through ("auto") or pause after every step ("step") so the person can look
-# at that step's QC and decide: continue, add an optional step (Kallisto, RSEM: the app's own), skip
-# one, or cancel. Per-sample jobs are submitted in waves that stay under the person's Slurm job
-# limit. Optional emails go only to the person's own address.
+# Spec version 2 adds, all optional and backward compatible with version 1:
+#   gsea.genesets  several gene-set databases in one run (gsea.geneset, one database, still works);
+#   quantifiers    extra quantification after featureCounts: "rsem" and/or "kallisto";
+#   run_mode       "all" (default) runs every step in order; "step" pauses after each step until
+#                  `codespring-run continue PROJECT_ID` (which can also add RSEM/Kallisto or skip
+#                  steps that haven't run);
+#   notify         optional emails, only to the person's own address.
+# Per-sample jobs are submitted in waves that stay under the person's Slurm job limit, and a run
+# can be cancelled at any point (`codespring-run cancel`).
 
 HUB_SPEC_VERSION <- 2L
+HUB_MAX_GENESETS <- 6L
+HUB_QUANTIFIERS <- c(rsem = "RSEM", kallisto = "Kallisto")
+HUB_QUANTIFIER_WHAT <- c(rsem = "Gene and transcript quantification from the STAR alignments (gene_id), and TPM matrices",
+                         kallisto = "Transcript quantification with Kallisto pseudo-alignment, and TPM matrices")
+HUB_RUN_MODES <- c("all", "step")
+HUB_RUN_MODE_WHAT <- c(all = "Run every step one after another", step = "Pause after each step: show its QC and wait for the go-ahead")
 HUB_MAX_SAMPLES <- local({ n <- suppressWarnings(as.integer(Sys.getenv("CSL_HUB_MAX_SAMPLES", unset = "96"))); if (is.na(n) || n < 2) 96L else n })
 HUB_MAX_FASTQ_DIRS <- 10L
 HUB_POLL_SECONDS <- as.numeric(Sys.getenv("CSL_HUB_POLL_SECONDS", unset = "30"))
@@ -27,17 +38,10 @@ HUB_NAME_RE <- "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"
 HUB_COLUMN_RE <- "^[A-Za-z][A-Za-z0-9_]{0,40}$"
 HUB_FAILED_STATES <- c("FAILED", "TIMEOUT", "NODE_FAIL", "OUT_OF_MEMORY", "CANCELLED", "CANCELLED+", "CA", "PREEMPTED", "BOOT_FAIL")
 
-# Optional steps are CodeSpringApp's own optional RNA-seq quantifiers, run exactly as the app runs them.
-HUB_OPTIONAL <- list(
-  kallisto = list(step = "Kallisto", after = "FastQC",
-                  what = "Transcript abundance (TPM) with Kallisto pseudo-alignment of the same reads"),
-  rsem = list(step = "RSEM", after = "STAR",
-              what = "Gene and transcript quantification with RSEM from STAR's transcriptome alignments")
-)
-HUB_STEP_ORDER <- c("Cutadapt", "FastQC", "STAR", "featureCounts", "Kallisto", "RSEM", "DESeq2", "GSEA")
+# Extra quantification (CodeSpringApp's own RSEM and Kallisto) runs at the end, after DESeq2/GSEA.
+HUB_STEP_ORDER <- c("Cutadapt", "FastQC", "STAR", "featureCounts", "DESeq2", "GSEA", "RSEM", "Kallisto")
 HUB_PER_SAMPLE_STEPS <- c("Cutadapt", "FastQC", "STAR", "featureCounts", "Kallisto", "RSEM")
 HUB_SKIPPABLE <- c("Kallisto", "RSEM", "GSEA")
-HUB_MODES <- c(auto = "Run every step one after another", step = "Pause after each step: show its QC and wait for the go-ahead")
 HUB_EMAIL_DOMAIN <- Sys.getenv("CSL_HUB_EMAIL_DOMAIN", unset = "cshl.edu")
 HUB_SLOT_RESERVE <- 2L  # Slurm submit slots kept free (matrix-build jobs, the person's other work)
 HUB_DONE_STATES <- c("COMPLETED", "COMPLETED+", "CD")
@@ -91,7 +95,7 @@ hub_catalog <- function() {
     codespringlab = CSL_ROOT,
     results_root = DEFAULT_RESULTS_ROOT,
     pipelines = list(
-      list(id = "rnaseq", name = "Bulk RNA-seq (CodeSpringLab: cutadapt, FastQC, STAR, featureCounts, DESeq2, GSEApy)",
+      list(id = "rnaseq", name = "Bulk RNA-seq (CodeSpringLab: cutadapt, FastQC, STAR, featureCounts, DESeq2, GSEApy; optional RSEM, Kallisto)",
            runnable_from_hub = TRUE, results_explorer = "RNA-seq Results Explorer"),
       list(id = "atac", name = "Bulk ATAC-seq", runnable_from_hub = FALSE, results_explorer = "ATAC Results Explorer"),
       list(id = "chip", name = "Bulk ChIP-seq", runnable_from_hub = FALSE, results_explorer = "ChIP Results Explorer"),
@@ -107,12 +111,12 @@ hub_catalog <- function() {
       adapters_r2 = as.list(adapter_choices_r2()[adapter_choices_r2() != "__custom__"]),
       features = c("gene_name", "gene_id"),
       gsea_genesets = GSEAPY_GENESET_OPTIONS,
-      optional_steps = lapply(names(HUB_OPTIONAL), function(id) list(id = id, step = HUB_OPTIONAL[[id]]$step,
-        what = HUB_OPTIONAL[[id]]$what, needs = HUB_OPTIONAL[[id]]$after, can_add = "when planning, at any pause, or after the run finishes")),
-      modes = as.list(HUB_MODES),
+      quantifiers = as.list(HUB_QUANTIFIERS),
+      run_modes = HUB_RUN_MODES,
       notify = list(email_to = hub_email_address(), every_hours = "0 (only when a step finishes, fails or pauses) to 24", default = "off"),
       batching = list(max_jobs_at_once = hub_submit_limit(), note = "Per-sample jobs go out in waves that stay under your Slurm job limit."),
-      limits = list(max_samples = HUB_MAX_SAMPLES, max_fastq_dirs = HUB_MAX_FASTQ_DIRS, min_replicates_per_group = 2L),
+      limits = list(max_samples = HUB_MAX_SAMPLES, max_fastq_dirs = HUB_MAX_FASTQ_DIRS, min_replicates_per_group = 2L,
+                    max_genesets = HUB_MAX_GENESETS),
       example = list(fastq_dir = RNA_EXAMPLE_FASTQ_DIR, design_matrix = file.path(RNA_EXAMPLE_DESIGN_DIR, "design_matrix.txt"),
                      species = "mouse", paired_end = TRUE, deseq2 = list(column = "treatment", reference = "control", comparison = "treated"))
     )
@@ -128,6 +132,27 @@ hub_flag <- function(x, default) {
   if (hub_error_value %in% c("true", "yes", "y", "1", "paired", "pe")) return(TRUE)
   if (hub_error_value %in% c("false", "no", "n", "0", "single", "se")) return(FALSE)
   stop(hub_error("Expected yes/no, got: ", x))
+}
+
+hub_gsea_sets <- function(gsea) {
+  # gsea.genesets (several) or gsea.geneset (one, spec version 1), in order, without repeats.
+  if (is.null(gsea)) return(character(0))
+  sets <- as.character(unlist(gsea$genesets %||% gsea$geneset %||% character(0)))
+  unique(trimws(sets[!is.na(sets)]))
+}
+
+hub_quantifiers <- function(x, add = function(...) NULL) {
+  # Extra quantification: "rsem" and/or "kallisto" ("none"/"skip" mean none), in the pipeline's order.
+  q <- tolower(trimws(as.character(unlist(x %||% character(0)))))
+  q <- unique(q[nzchar(q) & !q %in% c("none", "skip")])
+  bad <- q[!q %in% names(HUB_QUANTIFIERS)]
+  if (length(bad)) add("quantifiers must be rsem and/or kallisto (or none), not: ", paste(bad, collapse = ", "), ".")
+  intersect(names(HUB_QUANTIFIERS), q)
+}
+
+hub_gsea_report <- function(project, de, geneset) {
+  slug <- clean_name(geneset, "geneset")
+  file.path(project$data_dir, "gseapy", paste0(de$comparison, "_vs_", de$reference), slug, paste0("report.gseapy.", slug, ".csv"))
 }
 
 hub_read_design <- function(spec) {
@@ -218,13 +243,18 @@ hub_check_rnaseq <- function(spec) {
     }
   }
   gsea <- spec$gsea
+  sets <- hub_gsea_sets(gsea)
   if (!is.null(gsea)) {
     if (is.null(de)) add("GSEA needs a DESeq2 comparison.")
-    if (!(gsea$geneset %||% "") %in% GSEAPY_GENESET_OPTIONS) add("gsea.geneset must be one of: ", paste(GSEAPY_GENESET_OPTIONS, collapse = ", "), ".")
+    if (!length(sets)) add("gsea.genesets needs at least one gene set.")
+    bad_sets <- sets[!sets %in% GSEAPY_GENESET_OPTIONS]
+    if (length(bad_sets)) add("gsea.genesets must come from: ", paste(GSEAPY_GENESET_OPTIONS, collapse = ", "), " (not: ", paste(bad_sets, collapse = ", "), ").")
+    if (length(sets) > HUB_MAX_GENESETS) add("At most ", HUB_MAX_GENESETS, " gene sets in one run.")
+    gsea <- list(genesets = as.list(sets))
   }
-  mode <- tolower(trimws(as.character(spec$mode %||% "auto")))
-  if (!mode %in% names(HUB_MODES)) add("mode must be 'auto' (run straight through) or 'step' (pause after each step).")
-  optional <- hub_optional_ids(spec$optional, add)
+  quants <- hub_quantifiers(spec$quantifiers, add)
+  run_mode <- tolower(trimws(as.character(spec$run_mode %||% "all")))
+  if (!run_mode %in% HUB_RUN_MODES) add("run_mode must be 'all' or 'step'.")
   notify <- hub_check_notify(spec$notify, add)
   if (length(errors)) return(list(ok = FALSE, errors = errors))
 
@@ -234,8 +264,8 @@ hub_check_rnaseq <- function(spec) {
     new_fastq_dirs = paste(fastq_dirs, collapse = "\n"), new_paired_end = if (paired) "paired" else "single",
     new_species = species, new_genome_version = version
   ))
-  if (length(optional) && !rna_optional_quantifiers_available(project)) {
-    return(list(ok = FALSE, errors = "Kallisto and RSEM aren't available for this reference."))
+  if (length(quants) && !rna_optional_quantifiers_available(project)) {
+    return(list(ok = FALSE, errors = "RSEM and Kallisto aren't available for this reference (maize). Choose no extra quantification."))
   }
   if (dir_has_contents(project_result_dir(project))) {
     return(list(ok = FALSE, errors = paste0("A results folder for '", name, "' already exists (", project_result_dir(project),
@@ -255,17 +285,7 @@ hub_check_rnaseq <- function(spec) {
 
   list(ok = TRUE, project = project, design = design, paired = paired, species = species, version = version,
        trim = list(enabled = trim_on, adapter_r1 = a1_name, adapter_r2 = if (paired) a2_name else "", min_length = min_len),
-       feature = feature, deseq2 = de, gsea = gsea, reads = reads, mode = mode, optional = optional, notify = notify)
-}
-
-hub_optional_ids <- function(x, add = function(...) NULL) {
-  if (is.null(x) || !length(x)) return(character(0))
-  ids <- if (is.list(x) && !is.null(names(x))) {
-    names(x)[vapply(x, function(v) isTRUE(tryCatch(hub_flag(v, FALSE), error = function(e) FALSE)), logical(1))]
-  } else tolower(trimws(as.character(unlist(x))))
-  bad <- setdiff(ids, names(HUB_OPTIONAL))
-  if (length(bad)) add("optional steps must be from: ", paste(names(HUB_OPTIONAL), collapse = ", "), " (got: ", paste(bad, collapse = ", "), ").")
-  intersect(names(HUB_OPTIONAL), ids)
+       feature = feature, deseq2 = de, gsea = gsea, reads = reads, quantifiers = quants, run_mode = run_mode, notify = notify)
 }
 
 hub_check_notify <- function(x, add = function(...) NULL) {
@@ -295,9 +315,13 @@ hub_plan <- function(checked) {
   steps[[length(steps) + 1]] <- step("FastQC", n, paste("Read quality reports on", if (isTRUE(checked$trim$enabled)) "trimmed" else "raw", "reads"))
   steps[[length(steps) + 1]] <- step("STAR", n, paste("Align to", genome_resources(p)$label))
   steps[[length(steps) + 1]] <- step("featureCounts", n + 1L, paste0("Count reads per gene (", checked$feature, ") and build the count matrix"))
-  for (id in checked$optional) steps[[length(steps) + 1]] <- step(HUB_OPTIONAL[[id]]$step, n + 1L, paste("Optional:", HUB_OPTIONAL[[id]]$what))
   if (!is.null(checked$deseq2)) steps[[length(steps) + 1]] <- step("DESeq2", 1L, paste0("Differential expression: ", checked$deseq2$comparison, " vs ", checked$deseq2$reference, " (reference) on '", checked$deseq2$column, "'"))
-  if (!is.null(checked$gsea)) steps[[length(steps) + 1]] <- step("GSEA", 1L, paste("Pathway enrichment with", checked$gsea$geneset))
+  if (!is.null(checked$gsea)) {
+    sets <- hub_gsea_sets(checked$gsea)
+    steps[[length(steps) + 1]] <- step("GSEA", length(sets), paste("Pathway enrichment with", paste(sets, collapse = ", ")))
+  }
+  if ("rsem" %in% checked$quantifiers) steps[[length(steps) + 1]] <- step("RSEM", n + 1L, HUB_QUANTIFIER_WHAT[["rsem"]])
+  if ("kallisto" %in% checked$quantifiers) steps[[length(steps) + 1]] <- step("Kallisto", n + 1L, paste("Transcript quantification from the", if (isTRUE(checked$trim$enabled)) "trimmed" else "raw", "reads, and TPM matrices"))
   list(
     pipeline = "rnaseq",
     project_id = p$id,
@@ -308,9 +332,10 @@ hub_plan <- function(checked) {
     samples = checked$design$sample,
     groups = lapply(checked$design[, -c(1, NCOL(checked$design)), drop = FALSE], function(x) as.list(table(x))),
     steps = steps,
-    mode = list(id = checked$mode, what = HUB_MODES[[checked$mode]]),
-    optional_not_chosen = lapply(setdiff(names(HUB_OPTIONAL), checked$optional), function(id)
-      list(id = id, what = HUB_OPTIONAL[[id]]$what, note = "Can be added at any pause or after the run finishes")),
+    run_mode = checked$run_mode,
+    run_mode_what = HUB_RUN_MODE_WHAT[[checked$run_mode]],
+    quantifiers_not_chosen = lapply(setdiff(names(HUB_QUANTIFIERS), checked$quantifiers), function(id)
+      list(id = id, what = HUB_QUANTIFIER_WHAT[[id]], note = "Can be added at any pause or after the run finishes")),
     notify = if (isTRUE(checked$notify$email)) list(email_to = hub_email_address(), every_hours = checked$notify$every_hours,
       when = paste0("when each step finishes, fails or pauses", if (checked$notify$every_hours > 0) paste0(", and a summary every ", checked$notify$every_hours, " h") else "")) else "off",
     batching = list(max_jobs_at_once = hub_submit_limit(),
@@ -372,14 +397,15 @@ hub_start <- function(spec, starter = NULL) {
   utils::write.table(checked$design, p$design_matrix_path, sep = "\t", quote = FALSE, row.names = FALSE)
   cfg <- write_project_config(p)
   # Store the checked choices, so the controller never re-reads anything the caller could have changed.
-  spec$mode <- checked$mode
-  spec$optional <- as.list(checked$optional)
+  spec$gsea <- checked$gsea
+  spec$quantifiers <- as.list(checked$quantifiers)
+  spec$run_mode <- checked$run_mode
   spec$notify <- checked$notify
   spec$checked_at <- hub_now()
   hub_write_json(spec, hub_spec_path(p))
   hub_write_json(list(
     pipeline = "rnaseq", project_id = p$id, project_name = p$name, results_dir = project_result_dir(p),
-    state = "queued", started_by = "CodeSpringHub", user = CURRENT_USER, mode = checked$mode,
+    state = "queued", started_by = "CodeSpringHub", user = CURRENT_USER, run_mode = checked$run_mode,
     steps = lapply(plan$steps, function(s) list(step = s$step, state = "waiting", what = s$what)),
     created = hub_now()
   ), hub_status_path(p))
@@ -465,23 +491,25 @@ hub_resume <- function(project_id, starter = NULL) {
 
 # ---- continuing a paused run, adding or skipping steps ------------------------------------------
 
-hub_continue <- function(project_id, add = character(0), skip = character(0), mode = NULL, starter = NULL) {
+hub_continue <- function(project_id, add = character(0), skip = character(0), run_mode = NULL, starter = NULL) {
+  # Go on after a pause (one step at a time), optionally adding RSEM/Kallisto, skipping steps that
+  # haven't run, or switching run mode; or add RSEM/Kallisto to a finished run.
   st <- hub_status(project_id)
   if (!isTRUE(st$ok)) return(st)
   errors <- character(0)
   adder <- function(...) errors <<- c(errors, paste0(...))
-  add <- hub_optional_ids(add, adder)
+  add <- hub_quantifiers(add, adder)
   skip <- unique(as.character(unlist(skip %||% character(0))))
   if (!st$state %in% c("paused", "complete")) {
     adder("This run is ", st$state, ". Only a paused run can be continued, or a finished one given an optional step",
           if (st$state %in% c("failed", "stopped", "cancelled")) "; resume it instead" else "", ".")
   }
-  if (identical(st$state, "complete") && !length(add)) adder("This run has finished; say which optional step to add (", paste(names(HUB_OPTIONAL), collapse = ", "), ").")
-  if (!is.null(mode) && !mode %in% names(HUB_MODES)) adder("mode must be 'auto' or 'step'.")
+  if (identical(st$state, "complete") && !length(add)) adder("This run has finished; only extra quantification (", paste(names(HUB_QUANTIFIERS), collapse = ", "), ") can be added.")
+  if (!is.null(run_mode) && !run_mode %in% HUB_RUN_MODES) adder("run_mode must be 'all' or 'step'.")
   if (length(errors)) return(list(ok = FALSE, errors = errors))
 
   p <- hub_project(project_id)
-  if (length(add) && !rna_optional_quantifiers_available(p)) return(list(ok = FALSE, errors = "Kallisto and RSEM aren't available for this reference."))
+  if (length(add) && !rna_optional_quantifiers_available(p)) return(list(ok = FALSE, errors = "RSEM and Kallisto aren't available for this reference (maize)."))
   raw <- hub_read_json(hub_status_path(p))
   spec <- hub_read_json(hub_spec_path(p))
   have <- vapply(raw$steps, `[[`, "", "step")
@@ -492,14 +520,14 @@ hub_continue <- function(project_id, add = character(0), skip = character(0), mo
       paste(intersect(HUB_SKIPPABLE, waiting), collapse = ", "), "); not: ", paste(bad_skip, collapse = ", "), ".")))
   }
   for (id in add) {
-    step <- HUB_OPTIONAL[[id]]$step
+    step <- HUB_QUANTIFIERS[[id]]
     if (step %in% have) next
-    raw$steps[[length(raw$steps) + 1]] <- list(step = step, state = "waiting", what = paste("Optional:", HUB_OPTIONAL[[id]]$what), added = hub_now())
+    raw$steps[[length(raw$steps) + 1]] <- list(step = step, state = "waiting", what = HUB_QUANTIFIER_WHAT[[id]], added = hub_now())
   }
   raw$steps <- raw$steps[order(match(vapply(raw$steps, `[[`, "", "step"), HUB_STEP_ORDER))]
   for (i in seq_along(raw$steps)) if (raw$steps[[i]]$step %in% skip) raw$steps[[i]]$state <- "skipped"
-  spec$optional <- as.list(union(as.character(unlist(spec$optional)), add))
-  if (!is.null(mode)) { spec$mode <- mode; raw$mode <- mode }
+  spec$quantifiers <- as.list(intersect(names(HUB_QUANTIFIERS), union(as.character(unlist(spec$quantifiers)), add)))
+  if (!is.null(run_mode)) { spec$run_mode <- run_mode; raw$run_mode <- run_mode }
   hub_write_json(spec, hub_spec_path(p))
   if (!any(vapply(raw$steps, function(s) identical(s$state, "waiting"), logical(1)))) {
     raw$state <- "complete"
@@ -507,7 +535,12 @@ hub_continue <- function(project_id, add = character(0), skip = character(0), mo
     return(list(ok = TRUE, project_id = p$id, note = "Nothing left to run."))
   }
   res <- hub_relaunch(p, raw, starter)
-  if (isTRUE(res$ok)) res$steps <- lapply(raw$steps, function(s) list(step = s$step, state = s$state))
+  if (isTRUE(res$ok)) {
+    res$continued <- TRUE
+    nxt <- Filter(function(s) identical(s$state, "waiting"), raw$steps)
+    res$next_step <- if (length(nxt)) nxt[[1]]$step else NULL
+    res$steps <- lapply(raw$steps, function(s) list(step = s$step, state = s$state))
+  }
   res
 }
 
@@ -619,7 +652,7 @@ hub_step_entries <- function(p, spec) {
   min_len <- as.integer(spec$trim$min_length %||% 20L)
   feature <- spec$feature %||% "gene_name"
   de <- spec$deseq2
-  gsea <- spec$gsea
+  gsea_sets <- hub_gsea_sets(spec$gsea)
   deg_file <- if (!is.null(de)) file.path(p$data_dir, "deseq2", sprintf("DEG_%s_vs_%s(ref).txt", de$comparison, de$reference)) else ""
   matrix_ready <- function(name) { f <- file.path(p$data_dir, "counts", name); file.exists(f) && file.size(f) > 0 }
   all_samples <- function() project_samples(p)
@@ -638,8 +671,12 @@ hub_step_entries <- function(p, spec) {
                 done = function() matrix_ready("rsem_tpm_matrix.txt")),
     DESeq2 = list(run = function(s) submit_deseq2_job(p, de$column, de$reference, de$comparison),
                   done = function() file.exists(deg_file) && file.size(deg_file) > 0),
-    GSEA = list(run = function(s) submit_gseapy_job(p, de$column, de$reference, de$comparison, gsea$geneset),
-                done = function() length(list.files(file.path(p$data_dir, "gseapy"), pattern = "^report\\.gseapy\\..*\\.csv$", recursive = TRUE)) > 0)
+    GSEA = list(run = function(s) {
+                  # One job per gene-set database; each writes to its own gseapy/<comparison>/<set>/ folder.
+                  todo <- gsea_sets[!file.exists(vapply(gsea_sets, function(g) hub_gsea_report(p, de, g), ""))]
+                  paste(vapply(todo, function(g) paste(submit_gseapy_job(p, de$column, de$reference, de$comparison, g), collapse = "\n"), ""), collapse = "\n")
+                },
+                done = function() length(gsea_sets) > 0 && all(file.exists(vapply(gsea_sets, function(g) hub_gsea_report(p, de, g), ""))))
   )
 }
 
@@ -738,8 +775,10 @@ hub_drive <- function(spec_path) {
   # Re-check the stored choices (the file sits in the person's results folder and could be edited).
   bad <- character(0)
   spec$notify <- hub_check_notify(spec$notify, function(...) bad <<- c(bad, paste0(...)))
-  if (!identical(spec$mode, "step")) spec$mode <- "auto"
-  spec$optional <- as.list(hub_optional_ids(spec$optional, function(...) bad <<- c(bad, paste0(...))))
+  if (!identical(spec$run_mode, "step")) spec$run_mode <- "all"
+  spec$quantifiers <- as.list(hub_quantifiers(spec$quantifiers, function(...) bad <<- c(bad, paste0(...))))
+  sets <- hub_gsea_sets(spec$gsea)
+  if (length(sets) > HUB_MAX_GENESETS || any(!sets %in% GSEAPY_GENESET_OPTIONS)) bad <- c(bad, "gene sets outside BSR's list.")
   if (length(bad)) {
     hub_update_status(p, state = "failed", error = paste("The stored request was changed:", paste(bad, collapse = " ")), controller_pid = NULL)
     return(invisible(FALSE))
@@ -766,7 +805,7 @@ hub_drive <- function(spec_path) {
     hub_set_step(p, name, "complete")
     later <- names_all[seq_along(names_all) > i]
     later <- later[vapply(st$steps[seq_along(names_all) > i], function(s) identical(s$state, "waiting"), logical(1))]
-    if (identical(spec$mode, "step") && length(later)) {
+    if (identical(spec$run_mode, "step") && length(later)) {
       hub_update_status(p, state = "paused", paused_after = name, next_step = later[[1]], controller_pid = NULL)
       hub_notify(p, spec, paste(name, "finished; waiting for you"), hub_status_text(p))
       return(invisible(TRUE))
@@ -775,7 +814,7 @@ hub_drive <- function(spec_path) {
   }
   # The post-run packet: one HTML page with the app's plots and small result files.
   report <- tryCatch(hub_report(p$id)$report, error = function(e) NULL)
-  hub_update_status(p, state = "complete", finished = hub_now(), controller_pid = NULL)
+  hub_update_status(p, state = "complete", finished = hub_now(), controller_pid = NULL, paused_after = NULL, next_step = NULL)
   hub_notify(p, spec, "finished", c(hub_status_text(p), if (!is.null(report)) c("", paste("Report (open in a browser):", report))))
   invisible(TRUE)
 }
@@ -917,6 +956,18 @@ hub_tick <- function(p, spec) {
   }
 }
 
+hub_step_progress <- function(project, step) {
+  # How many samples a running per-sample step has finished, where the app can tell cheaply.
+  samples <- tryCatch(project_samples(project), error = function(e) character(0))
+  if (!length(samples)) return(NULL)
+  done <- tryCatch(switch(step,
+    Cutadapt = , FastQC = length(completed_samples_for_step(project, step, samples)),
+    STAR = { f <- file.path(project$data_dir, "star", samples, paste0(samples, "Aligned.sortedByCoord.out.bam")); sum(file.exists(f) & file.size(f) > 0) },
+    NULL), error = function(e) NULL)
+  if (is.null(done)) return(NULL)
+  list(samples_done = as.integer(done), samples_total = length(samples))
+}
+
 hub_status <- function(project_id) {
   p <- discover_projects()[[project_id]]
   if (is.null(p)) return(list(ok = FALSE, errors = paste("No CodeSpringApp project called", project_id)))
@@ -944,11 +995,15 @@ hub_status <- function(project_id) {
   jobs <- tryCatch(job_history(p), error = function(e) data.frame())
   for (i in seq_along(st$steps)) if (!st$steps[[i]]$state %in% c("waiting", "skipped")) {
     st$steps[[i]]$jobs <- hub_step_counts(p, st$steps[[i]]$step, jobs)
+    if (identical(st$steps[[i]]$state, "running")) {
+      prog <- hub_step_progress(p, st$steps[[i]]$step)
+      if (!is.null(prog)) st$steps[[i]] <- c(st$steps[[i]], prog)
+    }
   }
   st$next_actions <- switch(st$state,
-    paused = c(paste("continue: run", st$next_step), "add an optional step", "skip an optional step or GSEA", "switch to running straight through", "cancel"),
+    paused = c(paste("continue: run", st$next_step), "add RSEM or Kallisto", "skip RSEM, Kallisto or GSEA", "switch to running every step (run_mode all)", "cancel"),
     running = , queued = c("wait (ask again any time)", "look at QC so far", "cancel"),
-    complete = c("open the results", "add an optional step"),
+    complete = c("open the results", "add RSEM or Kallisto"),
     failed = , stopped = , cancelled = c("resume (finished steps are kept)"),
     cancelling = c("wait: the run is stopping"),
     character(0))
