@@ -67,7 +67,23 @@ refused(base_spec(design_matrix_path = NULL, design = list(columns = list("sampl
 refused(base_spec(design_matrix_path = NULL, design = list(columns = list("sample", "treatment", "filename"),
   rows = list(list("a", "x", "missing_R1.fq.gz,missing_R2.fq.gz"), list("b", "x", "control1_R1_001.fastq.gz,control1_R2_001.fastq.gz"))), deseq2 = NULL),
   "aren't in the FASTQ folders", "every read file must exist")
+refused(base_spec(gsea = list(genesets = list("MSigDB_Hallmark_2020", "my_sets.gmt"))), "gsea.genesets", "every gene set must be listed")
+refused(base_spec(gsea = list(genesets = as.list(head(app$GSEAPY_GENESET_OPTIONS, 7)))), "At most 6 gene sets", "gene sets are capped")
+refused(base_spec(quantifiers = list("salmon")), "quantifiers", "only RSEM and Kallisto")
+refused(base_spec(run_mode = "fast"), "run_mode", "only all or step")
 pass("check refuses anything outside the BSR pipeline's options")
+
+# ---- spec version 2: several gene sets, RSEM/Kallisto, one step at a time ------------------------
+v2 <- app$hub_check_rnaseq(base_spec(project_name = "hubtest_v2", gsea = list(genesets = list("MSigDB_Hallmark_2020", "Reactome_Pathways_2024")),
+                                     quantifiers = list("rsem", "kallisto"), run_mode = "step"))
+assert(isTRUE(v2$ok), paste("v2 options accepted:", paste(v2$errors, collapse = "; ")))
+plan2 <- app$hub_plan(v2)
+assert(identical(vapply(plan2$steps, `[[`, "", "step"), c("Cutadapt", "FastQC", "STAR", "featureCounts", "DESeq2", "GSEA", "RSEM", "Kallisto")), "extra quantification runs at the end")
+assert(plan2$steps[[6]]$jobs == 2L && grepl("Reactome", plan2$steps[[6]]$what), "one GSEA job per gene set")
+assert(identical(plan2$run_mode, "step"), "plan shows the run mode")
+none <- app$hub_check_rnaseq(base_spec(project_name = "hubtest_none", quantifiers = list("none"), gsea = list(geneset = "MSigDB_Hallmark_2020")))
+assert(isTRUE(none$ok) && !length(none$quantifiers) && identical(app$hub_gsea_sets(none$gsea), "MSigDB_Hallmark_2020"), "'none' and the v1 single gene set still work")
+pass("several gene sets, RSEM/Kallisto and run mode are checked and planned")
 
 # ---- start (fake controller), status, resume ---------------------------------------------------
 started_commands <- character(0)
@@ -87,6 +103,33 @@ assert(isTRUE(resumed$ok) && length(started_commands) == 2, "a stopped run can b
 failing <- app$hub_start(base_spec(project_name = "hubtest_fail"), starter = function(command) "no pid")
 assert(!isTRUE(failing$ok) && !dir.exists(file.path(Sys.getenv("CSL_RESULTS_ROOT"), "hubtest_fail")), "a failed start leaves nothing behind")
 pass("start, status and resume")
+
+# ---- one step at a time: the controller pauses after each step (fake submitters, no Slurm) -------
+submitted <- character(0)
+for (fn in c("submit_cutadapt_jobs", "submit_fastqc_jobs", "submit_star_jobs", "submit_featurecounts_jobs", "submit_deseq2_job",
+             "submit_gseapy_job", "submit_rsem_jobs", "submit_kallisto_jobs")) {
+  local({ name <- fn; assign(name, function(...) { submitted <<- c(submitted, name); "Submitted batch job 1" }, envir = app) })
+}
+assign("hub_wait_step", function(project, step, done) list(ok = TRUE), envir = app)
+stepped <- app$hub_start(base_spec(project_name = "hubtest_step", run_mode = "step", gsea = list(genesets = list("MSigDB_Hallmark_2020", "KEGG_2021_Human"))), starter = starter)
+assert(isTRUE(stepped$ok), paste("step-mode run starts:", paste(stepped$errors, collapse = "; ")))
+spec_path <- file.path(stepped$results_dir, "log", "codespring_hub_spec.json")
+app$hub_drive(spec_path)
+st <- app$hub_status(stepped$project_id)
+assert(identical(st$state, "paused") && identical(st$paused_after, "Cutadapt") && identical(submitted, "submit_cutadapt_jobs"), "pauses after the first step")
+refused_resume <- app$hub_resume(stepped$project_id, starter = starter)
+assert(!isTRUE(refused_resume$ok), "a paused run is continued, not resumed")
+cont <- app$hub_continue(stepped$project_id, starter = starter)
+assert(isTRUE(cont$ok) && identical(cont$next_step, "FastQC"), "continue names the next step")
+app$hub_drive(spec_path)
+st <- app$hub_status(stepped$project_id)
+assert(identical(st$paused_after, "FastQC") && identical(tail(submitted, 1), "submit_fastqc_jobs"), "...and runs only that step")
+for (i in 1:4) { app$hub_continue(stepped$project_id, starter = starter); app$hub_drive(spec_path) }
+st <- app$hub_status(stepped$project_id)
+assert(identical(st$state, "complete"), "the last step finishes the run instead of pausing")
+assert(sum(submitted == "submit_gseapy_job") == 2L, "GSEA submits one job per gene set")
+assert(!isTRUE(app$hub_continue(stepped$project_id, starter = starter)$ok), "a finished run can't be continued")
+pass("one step at a time: pause, continue, finish")
 
 # ---- deep links and one-time tickets ----------------------------------------------------------
 target <- app$deep_link_target(paste0("?token=x&project=", res$project_id, "&view=results"))
