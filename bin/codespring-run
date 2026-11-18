@@ -44,6 +44,7 @@ loaded <- tryCatch({
   # app.R prints nothing we need; keep stdout clean for the JSON answer.
   invisible(utils::capture.output(sys.source(file.path(app_dir, "app.R"), envir = app), type = "output"))
   sys.source(file.path(app_dir, "R", "hub_bridge.R"), envir = app)
+  sys.source(file.path(app_dir, "R", "hub_peaks.R"), envir = app)
   sys.source(file.path(app_dir, "R", "hub_report.R"), envir = app)
   setwd(old)
   TRUE
@@ -59,16 +60,12 @@ result <- tryCatch(switch(args[[1]],
   catalog = c(list(ok = TRUE), app$hub_catalog()),
   check = {
     spec <- read_spec(args[2])
-    if (!identical(spec$pipeline %||% "", "rnaseq")) list(ok = FALSE, errors = "Only pipeline 'rnaseq' can be started from the Hub so far; run other analyses in CodeSpringApp.")
-    else {
-      chk <- app$hub_check_rnaseq(spec)
-      if (isTRUE(chk$ok)) list(ok = TRUE, plan = app$hub_plan(chk)) else chk
-    }
+    chk <- app$hub_check(spec)  # rnaseq, atac or chip; anything else is refused
+    if (isTRUE(chk$ok)) list(ok = TRUE, plan = app$hub_plan(chk)) else chk
   },
   start = {
     spec <- read_spec(args[2])
-    if (!identical(spec$pipeline %||% "", "rnaseq")) list(ok = FALSE, errors = "Only pipeline 'rnaseq' can be started from the Hub so far.")
-    else app$hub_start(spec)
+    app$hub_start(spec)
   },
   status = {
     if (is.na(args[2])) list(ok = FALSE, errors = usage) else app$hub_status(args[2])

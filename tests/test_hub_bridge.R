@@ -26,6 +26,7 @@ app <- new.env(parent = globalenv())
 old <- setwd(repo_root)
 invisible(utils::capture.output(sys.source("app.R", envir = app)))
 sys.source(file.path("R", "hub_bridge.R"), envir = app)
+sys.source(file.path("R", "hub_peaks.R"), envir = app)
 sys.source(file.path("R", "hub_report.R"), envir = app)
 setwd(old)
 
@@ -46,7 +47,9 @@ base_spec <- function(...) {
 # ---- catalog ------------------------------------------------------------------------------------
 cat_ <- app$hub_catalog()
 assert(identical(cat_$pipelines[[1]]$id, "rnaseq") && isTRUE(cat_$pipelines[[1]]$runnable_from_hub), "RNA-seq is the runnable pipeline")
-assert(!any(vapply(cat_$pipelines[-1], function(p) isTRUE(p$runnable_from_hub), logical(1))), "other pipelines are app-only for now")
+runnable <- vapply(cat_$pipelines, function(p) p$id, "")[vapply(cat_$pipelines, function(p) isTRUE(p$runnable_from_hub), logical(1))]
+assert(identical(runnable, c("rnaseq", "atac", "chip")), "RNA-seq, ATAC and ChIP run from the Hub; the rest are app-only for now")
+assert(identical(cat_$atac$default_adapter, "Nextera Transposase ATAC") && identical(cat_$chip$macs2$default_qvalue, "0.01"), "ATAC and ChIP use the app's defaults")
 assert("mouse_gencodeM39" %in% vapply(cat_$rnaseq$references, `[[`, "", "genome_version"), "references come from the app's catalog")
 assert(!"__custom__" %in% unlist(cat_$rnaseq$adapters_r1), "custom adapter sequences are not offered to the Hub")
 pass("catalog lists BSR pipelines and the app's own options")
@@ -341,6 +344,85 @@ assert(!grepl("base64,[A-Za-z0-9+/=]*\n", html), "embedded data has no line brea
 assert(grepl("hasn't finished", html, fixed = TRUE), "a report made mid-run says so")
 assert(identical(app$hub_status(res$project_id)$report, rep_$report), "status points to the report")
 pass("report packet: app plots and small files embedded, big ones listed, text escaped")
+
+# ---- ATAC-seq and ChIP-seq ---------------------------------------------------------------------------
+test_dir <- file.path(lab_root, "scripts_DoNotTouch", "test")
+peak_spec <- function(kind, ...) {
+  spec <- list(pipeline = kind, project_name = paste0("hubtest_", kind), fastq_dirs = list(file.path(test_dir, paste0("fastq_", kind))),
+               paired_end = identical(kind, "atac"), species = "mouse",
+               design_matrix_path = file.path(test_dir, paste0("manifest_", kind), "design_matrix.txt"),
+               diffbind = if (identical(kind, "atac")) list(column = "condition", reference = "day1", comparison = "day3")
+                          else list(column = "condition", reference = "control", comparison = "siGATA"))
+  changes <- list(...)
+  for (key in names(changes)) spec[key] <- list(changes[[key]])
+  Filter(Negate(is.null), spec)
+}
+atac <- app$hub_check(peak_spec("atac"))
+assert(isTRUE(atac$ok), paste("ATAC example accepted:", paste(atac$errors, collapse = "; ")))
+ap <- app$hub_plan(atac)
+assert(identical(vapply(ap$steps, `[[`, "", "step"), c("Cutadapt", "FastQC", "Bowtie2", "MACS2 Peaks", "Differential Peaks")), "ATAC runs the app's steps in order")
+assert(grepl("Nextera", ap$steps[[1]]$what) && grepl("q 0.05", ap$steps[[4]]$what), "ATAC uses the app's defaults (Nextera adapters, MACS2 q 0.05)")
+chip <- app$hub_check(peak_spec("chip"))
+assert(isTRUE(chip$ok), paste("ChIP example accepted:", paste(chip$errors, collapse = "; ")))
+cp <- app$hub_plan(chip)
+assert(identical(vapply(cp$steps, `[[`, "", "step"), c("Cutadapt", "FastQC", "Bowtie2", "MACS2 Peaks", "Differential Peaks", "Peak Annotation")), "ChIP adds HOMER annotation")
+assert(cp$steps[[4]]$jobs == 4L && identical(cp$roles, list(chip = 4L, input = 1L)), "ChIP MACS2 runs per target, against the matched input")
+refusedp <- function(spec, pattern, label) { r <- app$hub_check(spec); assert(!isTRUE(r$ok) && any(grepl(pattern, r$errors)), paste(label, "->", paste(r$errors, collapse = " | "))) }
+refusedp(peak_spec("atac", paired_end = FALSE), "paired-end", "ATAC needs paired-end reads")
+refusedp(peak_spec("atac", macs2 = list(qvalue = 5)), "qvalue", "MACS2 q-value must be in (0, 1]")
+refusedp(peak_spec("chip", macs2 = list(peak_type = "wide")), "peak_type", "only narrow or broad peaks")
+refusedp(peak_spec("atac", diffbind = list(column = "condition", reference = "day1", comparison = "day9")), "diffbind", "DiffBind groups must exist")
+bad_ctrl <- file.path(test_home, "chip_bad_design.txt")
+d <- utils::read.delim(file.path(test_dir, "manifest_chip", "design_matrix.txt"), colClasses = "character", check.names = FALSE)
+d$control_sample[1] <- "siGATA_rep2"; utils::write.table(d, bad_ctrl, sep = "\t", quote = FALSE, row.names = FALSE)
+refusedp(peak_spec("chip", design_matrix_path = bad_ctrl), "control_sample must name an input", "a target's control must be an input row")
+refusedp(peak_spec("cutrun"), "Only these pipelines", "other pipelines stay in the app")
+pass("ATAC and ChIP are checked and planned with the app's steps and defaults")
+
+# A step-by-step ChIP run with stand-in submitters: every step calls the app's own function, MACS2 only for targets.
+calls <- list()
+for (fn in c("submit_cutadapt_jobs", "submit_fastqc_jobs", "submit_chip_bowtie2_jobs", "submit_chip_macs2_jobs", "submit_chip_diffbind_job", "submit_peak_annotation_job")) {
+  local({ name <- fn; assign(name, function(...) { a <- list(...); calls[[length(calls) + 1]] <<- list(fn = name, samples = a[["samples"]] %||% (if (length(a) >= 4) a[[length(a)]] else NULL)); "Submitted batch job 1" }, envir = app) })
+}
+real_run_step2 <- app$hub_run_step
+assign("hub_run_step", function(p, name, entry, spec) { s <- if (is.function(entry$samples)) entry$samples() else app$project_samples(p); entry$run(s); list(ok = TRUE) }, envir = app)
+cs <- app$hub_start(peak_spec("chip", project_name = "hubtest_chip_run", run_mode = "step"), starter = starter)
+assert(isTRUE(cs$ok), paste("ChIP run starts:", paste(cs$errors, collapse = "; ")))
+chip_spec <- file.path(cs$results_dir, "log", "codespring_hub_spec.json")
+for (i in 1:6) { if (i > 1) app$hub_continue(cs$project_id, starter = starter); app$hub_drive(chip_spec) }
+assert(identical(app$hub_status(cs$project_id)$state, "complete"), "the ChIP run completes step by step")
+fns <- vapply(calls, `[[`, "", "fn")
+assert(identical(fns, c("submit_cutadapt_jobs", "submit_fastqc_jobs", "submit_chip_bowtie2_jobs", "submit_chip_macs2_jobs", "submit_chip_diffbind_job", "submit_peak_annotation_job")), "each ChIP step calls the app's own submit function, in order")
+macs <- calls[[which(fns == "submit_chip_macs2_jobs")]]$samples
+assert(!"input" %in% macs && length(macs) == 4L, "MACS2 is submitted for the four targets, not the input")
+assign("hub_run_step", real_run_step2, envir = app)
+pass("a ChIP run goes step by step through the app's own submitters")
+
+# QC and report from the tools' own outputs.
+cp2 <- app$hub_project(cs$project_id)
+for (smp in c("siGATA_rep1", "input")) {
+  dir.create(file.path(cp2$data_dir, "bowtie2", smp), recursive = TRUE, showWarnings = FALSE)
+  writeLines(c("sample\t" , paste0("mapped_reads\t", 1000000), paste0("deduplicated_reads\t", 800000)), file.path(cp2$data_dir, "bowtie2", smp, paste0(smp, "_alignment_summary.txt")))
+}
+dir.create(file.path(cp2$data_dir, "macs2", "siGATA_rep1"), recursive = TRUE, showWarnings = FALSE)
+writeLines("peak_count\t12345", file.path(cp2$data_dir, "macs2", "siGATA_rep1", "siGATA_rep1_macs2_summary.txt"))
+q <- app$hub_qc(cs$project_id)
+row <- Filter(function(r) identical(r$sample, "siGATA_rep1"), q$samples)[[1]]
+assert(identical(row$bowtie2$kept_after_dedup_pct, 80) && identical(row$macs2$peaks, 12345) && identical(row$role, "chip"), "QC reads Bowtie2's and MACS2's own summaries")
+inp <- Filter(function(r) identical(r$sample, "input"), q$samples)[[1]]
+assert(is.null(inp$macs2) && identical(inp$role, "input"), "inputs have no peaks of their own")
+assert(grepl("12,345", q$summary$macs2$peaks_per_sample), "the summary gives peaks per sample")
+db <- file.path(cp2$data_dir, "diffbind", "siGATA_vs_control")
+dir.create(db, recursive = TRUE, showWarnings = FALSE)
+grDevices::png(file.path(db, "diffbind_volcano_byDiffPeaks.png"), width = 200, height = 200); plot(1:3); invisible(grDevices::dev.off())
+writeLines(c("seqnames\tstart\tend\twidth\tstrand\tConc\tFold\tp.value\tFDR", "chr1\t100\t300\t201\t*\t5\t2.1\t1e-6\t1e-4", "chr2\t500\t700\t201\t*\t4\t-1.5\t1e-5\t1e-3"),
+           file.path(db, "DifferentialPeaks_siGATA_vs_control.txt"))
+rp <- app$hub_report(cs$project_id)
+html <- paste(readLines(rp$report, warn = FALSE), collapse = "\n")
+assert(identical(rp$peak_summary$siGATA_vs_control, list(differential_peaks = 2L, gained = 1L, lost = 1L)), "DiffBind counts come from its own table")
+assert(grepl("bulk ChIP-seq run report", html) && grepl("Differential peaks (DiffBind)", html, fixed = TRUE) && !grepl("Differential expression (DESeq2)", html, fixed = TRUE), "the report is a ChIP report, without RNA-seq sections")
+assert(grepl("MACS2 peaks", html) && grepl("diffbind_volcano_byDiffPeaks.png", html, fixed = TRUE), "peaks QC and DiffBind's plots are in the report")
+pass("ATAC/ChIP QC and report come from the tools' own outputs")
 
 unlink(file.path(Sys.getenv("CSL_RESULTS_ROOT")), recursive = TRUE)
 cat("All hub bridge tests passed.\n")
