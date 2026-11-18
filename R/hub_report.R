@@ -90,7 +90,15 @@ hub_report_files <- function(p) {
   add(file.path(counts, "featurecounts_summary.txt"), "data", "counts", "featurecounts_summary.txt")
   add(file.path(counts, "count_matrix.txt"), "data", "counts", "count_matrix.txt")
   for (f in sort(list.files(counts, pattern = "^(kallisto|rsem)_.*\\.txt$", full.names = TRUE))) add(f, "data", "counts", basename(f))
-  list(files = out, comparisons = comparisons, gsea_reports = gsea_reports)
+  # ATAC-seq / ChIP-seq: DiffBind's plots and tables per comparison, then the HOMER annotation summary.
+  diffbind <- sort(list.dirs(file.path(data_dir, "diffbind"), recursive = FALSE, full.names = TRUE))
+  for (d in diffbind) {
+    for (f in sort(list.files(d, pattern = "\\.png$", full.names = TRUE))) add(f, "plot", "diffbind", basename(f), basename(d))
+    for (f in sort(list.files(d, pattern = "^DifferentialPeaks.*\\.txt$", full.names = TRUE))) add(f, "data", "diffbind", paste0(basename(d), "_", basename(f)), basename(d))
+    add(file.path(d, "diffbind_sample_sheet.tsv"), "data", "diffbind", paste0(basename(d), "_diffbind_sample_sheet.tsv"), basename(d))
+  }
+  add(file.path(data_dir, "peak_annotation", "peak_annotation_summary.tsv"), "data", "annotation", "peak_annotation_summary.tsv")
+  list(files = out, comparisons = comparisons, gsea_reports = gsea_reports, diffbind = basename(diffbind))
 }
 
 hub_report_qc_table <- function(qc_rows) {
@@ -106,6 +114,10 @@ hub_report_qc_table <- function(qc_rows) {
       `STAR multi %` = num(r$star$multi_mapped_pct %||% NA),
       `featureCounts assigned %` = num(r$featurecounts[["Assigned %"]] %||% NA),
       `Kallisto pseudoaligned %` = num(r$kallisto$pseudoaligned_pct %||% NA),
+      role = r$role %||% "",
+      `Bowtie2 mapped reads` = num(r$bowtie2$mapped_reads %||% NA),
+      `kept after dedup %` = num(r$bowtie2$kept_after_dedup_pct %||% NA),
+      `MACS2 peaks` = num(r$macs2$peaks %||% NA),
       check.names = FALSE, stringsAsFactors = FALSE)
   })
   df <- do.call(rbind, rows)
@@ -185,8 +197,39 @@ hub_report <- function(project_id) {
   if (length(other_figs)) de_html <- c(paste0("<h3>All samples</h3><div class=\"grid\">", paste(vapply(other_figs, figure, ""), collapse = ""), "</div>"), de_html)
   shared <- Filter(function(f) identical(f$section, "deseq2") && is.na(f$comparison), datas)
   if (length(shared)) de_html <- c(de_html, paste0("<ul class=\"files\">", paste(vapply(shared, file_link, ""), collapse = ""), "</ul>"))
+  pipeline <- tryCatch(hub_read_json(hub_spec_path(p))$pipeline, error = function(e) NULL) %||% "rnaseq"
+  peaks_run <- !identical(pipeline, "rnaseq")
   de_html <- if (length(de_html)) c("<section><h2>Differential expression (DESeq2)</h2>", de_html, "</section>")
+             else if (peaks_run) character(0)
              else "<section><h2>Differential expression (DESeq2)</h2><p class=\"muted\">No DESeq2 results yet.</p></section>"
+
+  # ---- DiffBind (ATAC-seq / ChIP-seq) ---------------------------------------------------------
+  peak_summary <- list()
+  db_html <- character(0)
+  for (slug in found$diffbind) {
+    tab_path <- list.files(file.path(p$data_dir, "diffbind", slug), pattern = "^DifferentialPeaks.*\\.txt$", full.names = TRUE)[1]
+    tab <- if (!is.na(tab_path)) hub_read_table(tab_path) else NULL
+    fold <- if (!is.null(tab) && "Fold" %in% names(tab)) suppressWarnings(as.numeric(tab$Fold)) else numeric(0)
+    peak_summary[[slug]] <- list(differential_peaks = if (!is.null(tab)) NROW(tab) else NA,
+                                 gained = sum(fold > 0, na.rm = TRUE), lost = sum(fold < 0, na.rm = TRUE))
+    figs <- Filter(function(f) identical(f$section, "diffbind") && identical(f$comparison, slug), plots)
+    top <- if (!is.null(tab) && "FDR" %in% names(tab)) tab[order(suppressWarnings(as.numeric(tab$FDR))),
+      intersect(c("seqnames", "start", "end", "Fold", "p.value", "FDR"), names(tab)), drop = FALSE] else NULL
+    db_html <- c(db_html, paste0("<h3>", hub_html(slug), "</h3>"),
+                 if (!is.null(tab)) paste0("<p><strong>", NROW(tab), "</strong> regions in DiffBind's report (", peak_summary[[slug]]$gained,
+                                          " with higher signal in the comparison group, ", peak_summary[[slug]]$lost, " lower; direction from DiffBind's Fold).</p>")
+                 else "<p class=\"muted\">No DiffBind table yet.</p>",
+                 if (length(figs)) paste0("<div class=\"grid\">", paste(vapply(figs, figure, ""), collapse = ""), "</div>") else "",
+                 if (!is.null(top)) paste0("<h4>Top regions by FDR</h4>", hub_html_table(top, 15L)) else "",
+                 links_for("diffbind", slug))
+  }
+  if (length(db_html)) db_html <- c("<section><h2>Differential peaks (DiffBind)</h2>", db_html, "</section>")
+  else if (peaks_run) db_html <- "<section><h2>Differential peaks (DiffBind)</h2><p class=\"muted\">No DiffBind results yet.</p></section>"
+  ann <- file.path(p$data_dir, "peak_annotation", "peak_annotation_summary.tsv")
+  if (file.exists(ann)) {
+    ann_tab <- hub_read_table(ann)
+    db_html <- c(db_html, "<section><h2>Peak annotation (HOMER)</h2>", hub_html_table(ann_tab, 30L), links_for("annotation"), "</section>")
+  }
 
   # ---- GSEA ---------------------------------------------------------------------------------
   gsea_top <- list()
@@ -229,7 +272,7 @@ hub_report <- function(project_id) {
     "pre{white-space:pre-wrap;background:var(--card);border:1px solid var(--line);border-radius:6px;padding:12px;font-size:13px}",
     "</style></head><body><main>",
     paste0("<h1>", hub_html(p$name), "</h1>"),
-    paste0("<p class=\"muted\">CodeSpringApp bulk RNA-seq run report, made ", hub_html(format(Sys.time(), "%Y-%m-%d %H:%M")), ".</p>"),
+    paste0("<p class=\"muted\">CodeSpringApp ", hub_html(switch(pipeline, rnaseq = "bulk RNA-seq", atac = "bulk ATAC-seq", chip = "bulk ChIP-seq", pipeline)), " run report, made ", hub_html(format(Sys.time(), "%Y-%m-%d %H:%M")), ".</p>"),
     "<div class=\"facts\">",
     paste0("<div>Run: <strong>", hub_html(st$state %||% "unknown"), "</strong></div>"),
     paste0("<div>Samples: <strong>", length(qc$samples), "</strong></div>"),
@@ -239,7 +282,7 @@ hub_report <- function(project_id) {
     paste0("<p>Full results, interactive plots and every file are in CodeSpringApp: choose RNA-seq, then project <strong>", hub_html(p$name),
            "</strong>, then the Results Explorer tab (or ask Claude to open the results). On the cluster: <code>", hub_html(project_result_dir(p)), "</code></p>"),
     "<section><h2>Steps</h2>", hub_html_table(step_rows, 50L), "</section>",
-    qc_html, de_html, gsea_html,
+    qc_html, de_html, db_html, gsea_html,
     "<section><h2>Methods</h2><p class=\"muted\">Generated by CodeSpringApp from the steps that ran; check versions and settings before publishing.</p>",
     paste0("<pre>", hub_html(methods), "</pre>"),
     if (!is.null(tools) && NROW(tools)) hub_html_table(tools, 50L) else "", "</section>",
@@ -256,7 +299,7 @@ hub_report <- function(project_id) {
   list(ok = TRUE, project_id = p$id, state = st$state, report = out, size_mb = round(file.size(out) / 1024^2, 2),
        plots = lapply(plots, function(f) list(label = f$label, path = f$path, section = f$section, comparison = if (is.na(f$comparison)) NULL else f$comparison)),
        files = lapply(datas, function(f) f$label), left_out = left_out,
-       deg_summary = deg_summary, gsea_top = gsea_top, qc_summary = qc$summary,
+       deg_summary = deg_summary, gsea_top = gsea_top, peak_summary = peak_summary, pipeline = pipeline, qc_summary = qc$summary,
        note = paste("Everything in the report comes from CodeSpringApp's own outputs; nothing is recalculated.",
                     "Plots and small files are embedded and downloadable; big files are listed with their cluster paths."))
 }

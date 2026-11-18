@@ -40,8 +40,9 @@ HUB_FAILED_STATES <- c("FAILED", "TIMEOUT", "NODE_FAIL", "OUT_OF_MEMORY", "CANCE
 
 # Extra quantification (CodeSpringApp's own RSEM and Kallisto) runs at the end, after DESeq2/GSEA.
 HUB_STEP_ORDER <- c("Cutadapt", "FastQC", "STAR", "featureCounts", "DESeq2", "GSEA", "RSEM", "Kallisto")
-HUB_PER_SAMPLE_STEPS <- c("Cutadapt", "FastQC", "STAR", "featureCounts", "Kallisto", "RSEM")
-HUB_SKIPPABLE <- c("Kallisto", "RSEM", "GSEA")
+HUB_PER_SAMPLE_STEPS <- c("Cutadapt", "FastQC", "STAR", "featureCounts", "Kallisto", "RSEM", "Bowtie2", "MACS2 Peaks")
+HUB_SKIPPABLE <- c("Kallisto", "RSEM", "GSEA", "Peak Annotation")
+HUB_RUNNABLE <- c("rnaseq", "atac", "chip")  # pipelines the Hub can start (see R/hub_peaks.R for ATAC and ChIP)
 HUB_EMAIL_DOMAIN <- Sys.getenv("CSL_HUB_EMAIL_DOMAIN", unset = "cshl.edu")
 HUB_SLOT_RESERVE <- 2L  # Slurm submit slots kept free (matrix-build jobs, the person's other work)
 HUB_DONE_STATES <- c("COMPLETED", "COMPLETED+", "CD")
@@ -97,8 +98,8 @@ hub_catalog <- function() {
     pipelines = list(
       list(id = "rnaseq", name = "Bulk RNA-seq (CodeSpringLab: cutadapt, FastQC, STAR, featureCounts, DESeq2, GSEApy; optional RSEM, Kallisto)",
            runnable_from_hub = TRUE, results_explorer = "RNA-seq Results Explorer"),
-      list(id = "atac", name = "Bulk ATAC-seq", runnable_from_hub = FALSE, results_explorer = "ATAC Results Explorer"),
-      list(id = "chip", name = "Bulk ChIP-seq", runnable_from_hub = FALSE, results_explorer = "ChIP Results Explorer"),
+      list(id = "atac", name = "Bulk ATAC-seq (CodeSpringLab: cutadapt, FastQC, Bowtie2, MACS2, DiffBind)", runnable_from_hub = TRUE, results_explorer = "ATAC Results Explorer"),
+      list(id = "chip", name = "Bulk ChIP-seq (CodeSpringLab: cutadapt, FastQC, Bowtie2, MACS2 with matched input, DiffBind, HOMER annotation)", runnable_from_hub = TRUE, results_explorer = "ChIP Results Explorer"),
       list(id = "cutrun", name = "CUT&RUN (nf-core/cutandrun 3.2.2 via CodeSpringApp, or native)", runnable_from_hub = FALSE, results_explorer = "CUT&RUN Results Explorer"),
       list(id = "scrna", name = "Single-cell RNA-seq (Seurat or Scanpy)", runnable_from_hub = FALSE, results_explorer = "scRNA Results Explorer"),
       list(id = "sarek", name = "Whole-genome germline/somatic variants (nf-core/sarek 3.9.0 via CodeSpringApp)", runnable_from_hub = FALSE, results_explorer = "Sarek Explorer"),
@@ -119,7 +120,9 @@ hub_catalog <- function() {
                     max_genesets = HUB_MAX_GENESETS),
       example = list(fastq_dir = RNA_EXAMPLE_FASTQ_DIR, design_matrix = file.path(RNA_EXAMPLE_DESIGN_DIR, "design_matrix.txt"),
                      species = "mouse", paired_end = TRUE, deseq2 = list(column = "treatment", reference = "control", comparison = "treated"))
-    )
+    ),
+    atac = if (exists("hub_peak_catalog")) hub_peak_catalog("atac"),
+    chip = if (exists("hub_peak_catalog")) hub_peak_catalog("chip")
   )
 }
 
@@ -172,11 +175,9 @@ hub_read_design <- function(spec) {
   utils::read.delim(path, colClasses = "character", check.names = FALSE)
 }
 
-hub_check_rnaseq <- function(spec) {
-  errors <- character(0)
-  add <- function(...) errors <<- c(errors, paste0(...))
-  cat_ <- hub_catalog()$rnaseq
-
+hub_check_basics <- function(spec, add, default_adapter = "Illumina Universal TruSeq RNA") {
+  # What every pipeline checks the same way: project name, FASTQ folders, species, design, trimming,
+  # run mode and emails. Problems go to add(); the values come back (best effort) for the rest.
   name <- trimws(as.character(spec$project_name %||% ""))
   if (!grepl(HUB_NAME_RE, name)) add("project_name must be 1-64 letters, digits, '.', '_' or '-' and start with a letter or digit.")
   if (!is.null(spec$results_root)) add("results_root can't be chosen: results always go to your CodeSpringApp results folder (", DEFAULT_RESULTS_ROOT, ").")
@@ -191,9 +192,10 @@ hub_check_rnaseq <- function(spec) {
   species <- tolower(trimws(as.character(spec$species %||% "")))
   version <- trimws(as.character(spec$genome_version %||% ""))
   refs <- genome_reference_catalog()
+  defaults <- list(human = "human_gencode50", mouse = "mouse_gencodeM39")
   if (!species %in% names(refs)) add("species must be one of: ", paste(names(refs), collapse = ", "), ".")
   else {
-    if (!nzchar(version)) version <- cat_$default_reference[[species]] %||% names(refs[[species]])[[1]]
+    if (!nzchar(version)) version <- defaults[[species]] %||% names(refs[[species]])[[1]]
     if (!version %in% names(refs[[species]])) add("genome_version for ", species, " must be one of: ", paste(names(refs[[species]]), collapse = ", "), ".")
   }
 
@@ -216,16 +218,67 @@ hub_check_rnaseq <- function(spec) {
     if ("filename" %in% cols && any(grepl("/", design$filename))) add("filename must name files inside the FASTQ folders, not paths.")
   }
 
+  adapters_r1 <- adapter_choices_r1()[adapter_choices_r1() != "__custom__"]
+  adapters_r2 <- adapter_choices_r2()[adapter_choices_r2() != "__custom__"]
   trim <- spec$trim %||% list()
   trim_on <- tryCatch(hub_flag(trim$enabled, TRUE), error = function(e) { add("trim.enabled: ", conditionMessage(e)); TRUE })
-  a1_name <- trim$adapter_r1 %||% "Illumina Universal TruSeq RNA"
+  a1_name <- trim$adapter_r1 %||% default_adapter
   a2_name <- trim$adapter_r2 %||% a1_name
   if (trim_on) {
-    if (!a1_name %in% names(cat_$adapters_r1)) add("trim.adapter_r1 must be one of: ", paste(names(cat_$adapters_r1), collapse = "; "), ".")
-    if (paired && !a2_name %in% names(cat_$adapters_r2)) add("trim.adapter_r2 must be one of: ", paste(names(cat_$adapters_r2), collapse = "; "), ".")
+    if (!a1_name %in% names(adapters_r1)) add("trim.adapter_r1 must be one of: ", paste(names(adapters_r1), collapse = "; "), ".")
+    if (paired && !a2_name %in% names(adapters_r2)) add("trim.adapter_r2 must be one of: ", paste(names(adapters_r2), collapse = "; "), ".")
   }
   min_len <- suppressWarnings(as.integer(trim$min_length %||% 20L))
   if (is.na(min_len) || min_len < 10 || min_len > 100) add("trim.min_length must be a whole number from 10 to 100.")
+
+  run_mode <- tolower(trimws(as.character(spec$run_mode %||% "all")))
+  if (!run_mode %in% HUB_RUN_MODES) add("run_mode must be 'all' or 'step'.")
+  notify <- hub_check_notify(spec$notify, add)
+  list(name = name, fastq_dirs = fastq_dirs, paired = paired, species = species, version = version, design = design,
+       trim = list(enabled = trim_on, adapter_r1 = a1_name, adapter_r2 = if (paired) a2_name else "", min_length = min_len),
+       run_mode = run_mode, notify = notify)
+}
+
+hub_new_project <- function(b, analysis) {
+  new_project_from_inputs(list(
+    new_project_analysis = analysis, new_project_name = b$name, new_project_mode = "new",
+    new_results_root = DEFAULT_RESULTS_ROOT, new_fastq_location_mode = "multiple",
+    new_fastq_dirs = paste(b$fastq_dirs, collapse = "\n"), new_paired_end = if (b$paired) "paired" else "single",
+    new_species = b$species, new_genome_version = b$version
+  ))
+}
+
+hub_check_reads <- function(project, design, paired) {
+  # Every read file must resolve, using the app's own pairing logic on a scratch copy of the design.
+  # Returns the read paths, or one string starting "ERROR: ".
+  scratch <- tempfile("hub_design_"); dir.create(scratch)
+  on.exit(unlink(scratch, recursive = TRUE), add = TRUE)
+  probe <- project; probe$design_matrix_path <- file.path(scratch, "design_matrix.txt")
+  utils::write.table(design, probe$design_matrix_path, sep = "\t", quote = FALSE, row.names = FALSE)
+  pairs <- tryCatch(sample_fastq_pairs(probe, FALSE), error = function(e) e)
+  if (inherits(pairs, "error")) return(paste("ERROR:", conditionMessage(pairs)))
+  reads <- unique(unlist(lapply(c(pairs$r1, if (paired) pairs$r2), split_fastq_path_list)))
+  missing <- reads[!file.exists(reads)]
+  if (length(missing)) return(paste0("ERROR: These read files from the design aren't in the FASTQ folders: ", paste(head(basename(missing), 10), collapse = ", ")))
+  reads
+}
+
+hub_check <- function(spec) {
+  kind <- as.character(spec$pipeline %||% "")
+  if (identical(kind, "rnaseq")) return(hub_check_rnaseq(spec))
+  if (kind %in% names(HUB_PEAK_KINDS)) return(hub_check_peaks(spec, kind))
+  list(ok = FALSE, errors = paste0("Only these pipelines can be started from the Hub so far: ", paste(HUB_RUNNABLE, collapse = ", "),
+                                   ". Run other analyses in CodeSpringApp."))
+}
+
+hub_check_rnaseq <- function(spec) {
+  errors <- character(0)
+  add <- function(...) errors <<- c(errors, paste0(...))
+  cat_ <- hub_catalog()$rnaseq
+  b <- hub_check_basics(spec, add)
+  name <- b$name; fastq_dirs <- b$fastq_dirs; paired <- b$paired; species <- b$species; version <- b$version
+  design <- b$design; trim_on <- b$trim$enabled; a1_name <- b$trim$adapter_r1; a2_name <- b$trim$adapter_r2
+  min_len <- b$trim$min_length
 
   feature <- spec$feature %||% "gene_name"
   if (!feature %in% cat_$features) add("feature must be gene_name or gene_id.")
@@ -253,17 +306,11 @@ hub_check_rnaseq <- function(spec) {
     gsea <- list(genesets = as.list(sets))
   }
   quants <- hub_quantifiers(spec$quantifiers, add)
-  run_mode <- tolower(trimws(as.character(spec$run_mode %||% "all")))
-  if (!run_mode %in% HUB_RUN_MODES) add("run_mode must be 'all' or 'step'.")
-  notify <- hub_check_notify(spec$notify, add)
+  run_mode <- b$run_mode
+  notify <- b$notify
   if (length(errors)) return(list(ok = FALSE, errors = errors))
 
-  project <- new_project_from_inputs(list(
-    new_project_analysis = "RNA-seq", new_project_name = name, new_project_mode = "new",
-    new_results_root = DEFAULT_RESULTS_ROOT, new_fastq_location_mode = "multiple",
-    new_fastq_dirs = paste(fastq_dirs, collapse = "\n"), new_paired_end = if (paired) "paired" else "single",
-    new_species = species, new_genome_version = version
-  ))
+  project <- hub_new_project(b, "RNA-seq")
   if (length(quants) && !rna_optional_quantifiers_available(project)) {
     return(list(ok = FALSE, errors = "RSEM and Kallisto aren't available for this reference (maize). Choose no extra quantification."))
   }
@@ -272,18 +319,10 @@ hub_check_rnaseq <- function(spec) {
       "). Choose another project name; the Hub never clears existing results.")))
   }
 
-  # Check every read file resolves, using the app's own pairing logic on a scratch copy of the design.
-  scratch <- tempfile("hub_design_"); dir.create(scratch)
-  on.exit(unlink(scratch, recursive = TRUE), add = TRUE)
-  probe <- project; probe$design_matrix_path <- file.path(scratch, "design_matrix.txt")
-  utils::write.table(design, probe$design_matrix_path, sep = "\t", quote = FALSE, row.names = FALSE)
-  pairs <- tryCatch(sample_fastq_pairs(probe, FALSE), error = function(e) e)
-  if (inherits(pairs, "error")) return(list(ok = FALSE, errors = conditionMessage(pairs)))
-  reads <- unique(unlist(lapply(c(pairs$r1, if (paired) pairs$r2), split_fastq_path_list)))
-  missing <- reads[!file.exists(reads)]
-  if (length(missing)) return(list(ok = FALSE, errors = paste0("These read files from the design aren't in the FASTQ folders: ", paste(head(basename(missing), 10), collapse = ", "))))
+  reads <- hub_check_reads(project, design, paired)
+  if (is.character(reads) && length(reads) == 1 && startsWith(reads, "ERROR:")) return(list(ok = FALSE, errors = sub("^ERROR: ", "", reads)))
 
-  list(ok = TRUE, project = project, design = design, paired = paired, species = species, version = version,
+  list(ok = TRUE, pipeline = "rnaseq", project = project, design = design, paired = paired, species = species, version = version,
        trim = list(enabled = trim_on, adapter_r1 = a1_name, adapter_r2 = if (paired) a2_name else "", min_length = min_len),
        feature = feature, deseq2 = de, gsea = gsea, reads = reads, quantifiers = quants, run_mode = run_mode, notify = notify)
 }
@@ -303,6 +342,11 @@ hub_check_notify <- function(x, add = function(...) NULL) {
 }
 
 hub_plan <- function(checked) {
+  if (!identical(checked$pipeline %||% "rnaseq", "rnaseq")) return(hub_plan_peaks(checked))
+  hub_plan_rnaseq(checked)
+}
+
+hub_plan_rnaseq <- function(checked) {
   p <- checked$project
   scripts <- hub_rna_step_scripts(checked$paired)
   n <- NROW(checked$design)
@@ -386,7 +430,7 @@ hub_set_step <- function(project, name, state, message = NULL) {
 }
 
 hub_start <- function(spec, starter = NULL) {
-  checked <- hub_check_rnaseq(spec)
+  checked <- hub_check(spec)
   if (!isTRUE(checked$ok)) return(checked)
   plan <- hub_plan(checked)
   p <- checked$project
@@ -397,14 +441,22 @@ hub_start <- function(spec, starter = NULL) {
   utils::write.table(checked$design, p$design_matrix_path, sep = "\t", quote = FALSE, row.names = FALSE)
   cfg <- write_project_config(p)
   # Store the checked choices, so the controller never re-reads anything the caller could have changed.
-  spec$gsea <- checked$gsea
-  spec$quantifiers <- as.list(checked$quantifiers)
+  spec$pipeline <- checked$pipeline
+  spec$trim <- checked$trim
+  if (identical(checked$pipeline, "rnaseq")) {
+    spec$gsea <- checked$gsea
+    spec$quantifiers <- as.list(checked$quantifiers)
+  } else {
+    spec$macs2 <- checked$macs2
+    spec$diffbind <- checked$diffbind
+    spec$annotate <- checked$annotate
+  }
   spec$run_mode <- checked$run_mode
   spec$notify <- checked$notify
   spec$checked_at <- hub_now()
   hub_write_json(spec, hub_spec_path(p))
   hub_write_json(list(
-    pipeline = "rnaseq", project_id = p$id, project_name = p$name, results_dir = project_result_dir(p),
+    pipeline = checked$pipeline, project_id = p$id, project_name = p$name, results_dir = project_result_dir(p),
     state = "queued", started_by = "CodeSpringHub", user = CURRENT_USER, run_mode = checked$run_mode,
     steps = lapply(plan$steps, function(s) list(step = s$step, state = "waiting", what = s$what)),
     created = hub_now()
@@ -509,9 +561,10 @@ hub_continue <- function(project_id, add = character(0), skip = character(0), ru
   if (length(errors)) return(list(ok = FALSE, errors = errors))
 
   p <- hub_project(project_id)
-  if (length(add) && !rna_optional_quantifiers_available(p)) return(list(ok = FALSE, errors = "RSEM and Kallisto aren't available for this reference (maize)."))
   raw <- hub_read_json(hub_status_path(p))
   spec <- hub_read_json(hub_spec_path(p))
+  if (length(add) && !identical(spec$pipeline %||% "rnaseq", "rnaseq")) return(list(ok = FALSE, errors = "RSEM and Kallisto are only for RNA-seq runs."))
+  if (length(add) && !rna_optional_quantifiers_available(p)) return(list(ok = FALSE, errors = "RSEM and Kallisto aren't available for this reference (maize)."))
   have <- vapply(raw$steps, `[[`, "", "step")
   waiting <- have[vapply(raw$steps, function(s) identical(s$state, "waiting"), logical(1))]
   bad_skip <- skip[!skip %in% HUB_SKIPPABLE | !skip %in% waiting]
@@ -646,6 +699,7 @@ hub_free_slots <- function() {
 }
 
 hub_step_entries <- function(p, spec) {
+  if (!identical(spec$pipeline %||% "rnaseq", "rnaseq")) return(hub_peak_entries(p, spec))
   trim <- isTRUE(hub_flag(spec$trim$enabled, TRUE))
   a1 <- adapter_choices_r1()[[spec$trim$adapter_r1 %||% "Illumina Universal TruSeq RNA"]]
   a2 <- adapter_choices_r2()[[spec$trim$adapter_r2 %||% spec$trim$adapter_r1 %||% "Illumina Universal TruSeq RNA"]]
@@ -736,9 +790,14 @@ hub_submit_waves <- function(p, name, entry, spec, pending) {
 
 hub_run_step <- function(p, name, entry, spec) {
   per_sample <- name %in% HUB_PER_SAMPLE_STEPS
-  first <- if (per_sample) hub_submit_waves(p, name, entry, spec, project_samples(p)) else {
+  samples <- function() if (is.function(entry$samples)) entry$samples() else project_samples(p)  # ChIP MACS2: targets only
+  first <- if (per_sample) hub_submit_waves(p, name, entry, spec, samples()) else {
     sub <- hub_submit(entry$run, NULL)
     if (sub$ok) list(ok = TRUE) else list(ok = FALSE, message = paste(name, "was not submitted:", sub$message))
+  }
+  if (!isTRUE(first$ok) && is.function(entry$explain)) {
+    why <- tryCatch(entry$explain(), error = function(e) "")
+    if (nzchar(why)) first$message <- paste(why, first$message, sep = "\n")
   }
   if (!isTRUE(first$ok)) return(first)
   waited <- hub_wait_idle(p, name, spec)
@@ -748,7 +807,7 @@ hub_run_step <- function(p, name, entry, spec) {
     # Every sample finished but a matrix build was held back while earlier waves were still running:
     # one more pass submits just that (the app skips samples whose outputs are complete). It goes
     # through the wave loop too, so it can never exceed the Slurm limit.
-    again <- if (per_sample) hub_submit_waves(p, name, entry, spec, project_samples(p)) else {
+    again <- if (per_sample) hub_submit_waves(p, name, entry, spec, samples()) else {
       sub <- hub_submit(entry$run, NULL)
       if (sub$ok) list(ok = TRUE) else list(ok = FALSE, message = paste(name, "was not finished:", sub$message))
     }
@@ -776,9 +835,13 @@ hub_drive <- function(spec_path) {
   bad <- character(0)
   spec$notify <- hub_check_notify(spec$notify, function(...) bad <<- c(bad, paste0(...)))
   if (!identical(spec$run_mode, "step")) spec$run_mode <- "all"
-  spec$quantifiers <- as.list(hub_quantifiers(spec$quantifiers, function(...) bad <<- c(bad, paste0(...))))
-  sets <- hub_gsea_sets(spec$gsea)
-  if (length(sets) > HUB_MAX_GENESETS || any(!sets %in% GSEAPY_GENESET_OPTIONS)) bad <- c(bad, "gene sets outside BSR's list.")
+  if (identical(spec$pipeline %||% "rnaseq", "rnaseq")) {
+    spec$quantifiers <- as.list(hub_quantifiers(spec$quantifiers, function(...) bad <<- c(bad, paste0(...))))
+    sets <- hub_gsea_sets(spec$gsea)
+    if (length(sets) > HUB_MAX_GENESETS || any(!sets %in% GSEAPY_GENESET_OPTIONS)) bad <- c(bad, "gene sets outside BSR's list.")
+  } else {
+    spec <- hub_recheck_peaks(spec, function(...) bad <<- c(bad, paste0(...)))
+  }
   if (length(bad)) {
     hub_update_status(p, state = "failed", error = paste("The stored request was changed:", paste(bad, collapse = " ")), controller_pid = NULL)
     return(invisible(FALSE))
@@ -888,10 +951,18 @@ hub_qc <- function(project_id, step = NULL) {
   trim <- isTRUE(hub_flag(spec$trim$enabled, TRUE))
   jobs <- tryCatch(job_history(p), error = function(e) data.frame())
   want <- function(s) is.null(step) || identical(step, s)
+  peaks <- !identical(spec$pipeline %||% "rnaseq", "rnaseq")
+  targets <- if (identical(spec$pipeline, "chip")) tryCatch(as.character(chip_target_design(p)$sample), error = function(e) character(0)) else NULL
   rows <- lapply(project_samples(p), function(sample) {
     r <- list(sample = sample)
     if (want("Cutadapt") && trim) { m <- tryCatch(extract_cutadapt_metrics(p, sample, jobs), error = function(e) NULL); if (length(m) && any(nzchar(m))) r$cutadapt <- as.list(m) }
     if (want("FastQC")) r$fastqc <- hub_fastqc_summary(p, sample, trim)
+    if (peaks) {
+      if (identical(spec$pipeline, "chip")) r$role <- if (sample %in% targets) "chip" else "input"
+      if (want("Bowtie2")) r$bowtie2 <- hub_bowtie2_stats(p, sample)
+      if (want("MACS2 Peaks") && (is.null(targets) || sample %in% targets)) r$macs2 <- hub_macs2_stats(p, sample)
+      return(r[!vapply(r, is.null, logical(1))])
+    }
     if (want("STAR")) r$star <- hub_star_stats(p, sample)
     if (want("featureCounts")) { m <- tryCatch(extract_featurecounts_metrics(p, sample), error = function(e) NULL); if (length(m) && any(nzchar(m))) r$featurecounts <- as.list(m) }
     if (want("Kallisto")) r$kallisto <- hub_kallisto_stats(p, sample)
@@ -914,6 +985,10 @@ hub_qc_summary <- function(rows) {
   if (!is.null(u)) out$star <- list(uniquely_mapped = u, input_reads = rng(pick("star", "input_reads")), multi_mapped = rng(pick("star", "multi_mapped_pct"), "%"))
   k <- rng(pick("kallisto", "pseudoaligned_pct"), "%")
   if (!is.null(k)) out$kallisto <- list(pseudoaligned = k)
+  b <- rng(pick("bowtie2", "mapped_reads"))
+  if (!is.null(b)) out$bowtie2 <- list(mapped_reads = b, kept_after_dedup = rng(pick("bowtie2", "kept_after_dedup_pct"), "%"))
+  m <- rng(pick("macs2", "peaks"))
+  if (!is.null(m)) out$macs2 <- list(peaks_per_sample = m)
   out
 }
 
@@ -929,6 +1004,8 @@ hub_status_text <- function(p) {
   if (!is.null(st$error)) lines <- c(lines, "", paste("Problem:", st$error))
   qc <- tryCatch(hub_qc(p$id)$summary, error = function(e) NULL)
   if (length(qc$star)) lines <- c(lines, "", paste("STAR uniquely mapped:", qc$star$uniquely_mapped))
+  if (length(qc$bowtie2)) lines <- c(lines, "", paste("Bowtie2 mapped reads:", qc$bowtie2$mapped_reads))
+  if (length(qc$macs2)) lines <- c(lines, paste("MACS2 peaks per sample:", qc$macs2$peaks_per_sample))
   if (length(qc$fastqc$samples_with_a_fail)) lines <- c(lines, paste("FastQC FAIL in:", paste(head(qc$fastqc$samples_with_a_fail, 10), collapse = "; ")))
   c(lines, "", paste("Results:", project_result_dir(p)), "Ask Claude about this run, or open it in CodeSpringApp.")
 }
