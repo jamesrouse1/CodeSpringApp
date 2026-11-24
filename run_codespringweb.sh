@@ -328,7 +328,17 @@ for candidate in $(seq "$PORT" "$MAX_PORT"); do
   PORT="$candidate"
   LOG_FILE="$LOG_DIR/codespringweb_${PORT}.log"
 
+  # Keep R's temp folder out of /tmp: login nodes purge old /tmp files, and a
+  # long-running app then loses its tempdir (DataTables "Ajax error", failed
+  # downloads). One folder per node+port; this port is free on this node, so
+  # anything left there is from a dead run and safe to clear.
+  APP_TMPDIR="$LOG_DIR/tmp/${NODE_HOST}_${PORT}"
+  rm -rf "$APP_TMPDIR"
+  mkdir -p "$APP_TMPDIR"
+  chmod 700 "$APP_TMPDIR"
+
   nohup env HOME="$USER_HOME" USER="$USER_NAME" LOGNAME="$USER_NAME" \
+    TMPDIR="$APP_TMPDIR" \
     CSL_CODESPRINGLAB_ROOT="$CSL_ROOT" CSL_WEB_HOME="$LOG_DIR" CSL_WEB_APP_ROOT="$APP_DIR" \
     CSL_FETCHNGS_RESULTS_ROOT="$FETCHNGS_RESULTS_ROOT" \
     CSL_FETCHNGS_RUNTIME_ROOT="$FETCHNGS_RUNTIME_ROOT" \
